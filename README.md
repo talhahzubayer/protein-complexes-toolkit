@@ -41,9 +41,9 @@ protein-complexes-toolkit/
 │   ├── test_visualise_results.py
 │   ├── test_integration.py
 │   └── test_future_aims.py
-├── Test_Data/               # Not included in repo (see "Setting Up Test Data")
-├── Output/                  # Generated figures (gitignored)
-└── Documentation/           # Internal project docs (gitignored)
+├── data/                    # External databases (not included in repo)
+│   └── ppi/                 # Protein-protein interaction databases (see "Setting Up PPI Databases")
+└── Test_Data/               # Not included in repo (see "Setting Up Test Data")
 ```
 
 
@@ -86,6 +86,36 @@ pip install -r requirements.txt
 ```
 
 > **Note:** JAX is **not** required. The toolkit uses module-level mocking to read AlphaFold2 PKL files without a JAX installation.
+
+
+## Setting Up PPI Databases
+
+The `data/` directory is **not included** in this repository due to the large size of external database files. These files are required for Phase A (Database Ingestion & ID Mapping) and later phases. To set up:
+
+1. Create the directory structure:
+```bash
+mkdir -p data/ppi
+```
+
+2. Download the following files into `data/ppi/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `9606.protein.links.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.protein.links.v12.0.txt.gz`, decompress |
+| `9606.protein.aliases.v12.0.txt` | STRING | Same page - download `9606.protein.aliases.v12.0.txt.gz`, decompress |
+| `BIOGRID-ALL-5.0.253.tab3.txt` | BioGRID | [downloads.thebiogrid.org](https://downloads.thebiogrid.org/File/BioGRID/Release-Archive/BIOGRID-5.0.253/BIOGRID-ALL-5.0.253.tab3.zip) - extract the `.tab3.txt` file from the zip |
+| `HuRI.tsv` | HuRI | [interactome-atlas.org/download](https://interactome-atlas.org/download) - download `HuRI.tsv` |
+| `humap2_ppis_ACC_20200821.pairsWprob` | HuMAP 2.0 | [humap2.proteincomplexes.org/download](https://humap2.proteincomplexes.org/download) - download "Protein Interaction Network with probability scores (Uniprot gzip)", decompress |
+
+3. Verify the directory contents:
+```
+data/ppi/
+├── 9606.protein.links.v12.0.txt          (~616 MB)
+├── 9606.protein.aliases.v12.0.txt        (~195 MB)
+├── BIOGRID-ALL-5.0.253.tab3.txt          (~1.48 GB)
+├── HuRI.tsv                              (~1.6 MB)
+└── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
+```
 
 
 ## Setting Up Test Data

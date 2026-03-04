@@ -16,8 +16,11 @@ interfaces.jsonl
 # Internal documentation
 Documentation/
 
-# Test data (large binary files — see README for setup)
+# Test data (large binary files - see README for setup)
 Test_Data/
+
+# Data from external sources (large files - see README for setup)
+data/
 
 # IDE / editor
 .vscode/
