@@ -1,0 +1,1899 @@
+#!/usr/bin/env python3
+"""
+AlphaFold2 Analysis Visualisation Tool (V2)
+
+Generates up to 10 publication-quality figures from AlphaFold2-Multimer batch
+results.  Each figure answers one specific question about the dataset.
+
+Rendering approach:
+    All scatter figures use matplotlib scatter() at every dataset scale.
+    Point size and alpha adapt automatically based on dataset size so that
+    small datasets (~500) show large readable dots and million-scale datasets
+    approach a pixel-dot density aesthetic.  Status messages with timing are
+    printed around blocking render calls so the user knows the script is not
+    stuck, even for multi-minute renders at very large scale.
+
+    The --density flag adds KDE density contour overlays (with percentile
+    labels) to scatter figures where density context aids interpretation.
+    It does NOT switch to hexbin rendering.
+
+Figures (always generated - base CSV columns only):
+  1. ipTM vs pDockQ by Quality Tier (or disorder-coloured fallback)
+  2. Global PAE Health Check histogram
+
+Figures (require full 44-column interface CSV):
+  3. Interface PAE by Quality Tier  (boxplots + strip)
+  4. Composite Score & Quality Tier Validation  (violin + scatter)
+  5. Interface vs Bulk pLDDT  (scatter with diagonal)
+  6. Paradox Complexes Spotlight  (violin triptych)
+  7. Complex Architecture Comparison  (Homo / Hetero / Multi-chain)
+  8. Metric Disagreement  (scatter with disagreement band)
+  9. Correlation & Flag Landscape  (heatmap pair)
+
+Figures (require n_chains column from multi-chain pipeline):
+ 10. Chain-Count Quality Profile  (violin + scatter by chain count)
+
+Per-complex PAE heatmaps are available on demand via --pae-heatmaps.
+When a matching PDB file is found, chain boundaries are drawn and the
+best interacting chain pair is highlighted.
+
+Dependencies:
+    read_af2_nojax.py  - JAX mocking and PKL loading (same directory).
+    pdockq.py              - Chain info / offsets for PAE heatmaps (optional).
+    pandas, matplotlib, numpy, scipy (for KDE contours).
+
+Usage:
+    python visualise_results.py analysis_results.csv                          # Figs 1-10
+    python visualise_results.py results.csv --output-dir ./figures            # Custom output
+    python visualise_results.py results.csv --density                         # Add KDE contours
+    python visualise_results.py results.csv --disorder-scatter                # Also Fig 1b
+    python visualise_results.py results.csv --pae-heatmaps /path/to/models   # PAE heatmaps
+    python visualise_results.py results.csv --pae-heatmaps /models --limit 50
+"""
+
+import os
+import glob
+import time
+import argparse
+from typing import Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
+from scipy.stats import gaussian_kde
+
+# JAX mocking is handled at import time by the reader module
+from read_af2_nojax import load_pkl_without_jax
+
+
+# ============================================================================
+# Output Directory (set by main() after argument parsing)
+# ============================================================================
+
+OUTPUT_DIR: str = ""  # Set in main(); all figures save here
+
+
+# ============================================================================
+# Shared Design Constants
+# ============================================================================
+
+# Quality tier colours - consistent across every figure
+TIER_COLORS = {'High': '#2ecc71', 'Medium': '#f39c12', 'Low': '#e74c3c'}
+TIER_ORDER = ['High', 'Medium', 'Low']
+
+# Rendering
+OUTPUT_DPI = 200
+FONT_TITLE = 13
+FONT_AXIS_LABEL = 11
+FONT_TICK = 10
+GRID_ALPHA = 0.3
+
+# Thresholds (drawn as reference lines where relevant)
+IPTM_HIGH = 0.75
+PDOCKQ_HIGH = 0.5
+PAE_CONFIDENT = 5.0         # Angstroms
+DISORDER_SUBSTANTIAL = 0.30
+METRIC_DISAGREEMENT_GAP = 0.4
+
+# Scatter plot defaults (used as fallback; prefer _adaptive_scatter_params)
+SCATTER_POINT_SIZE = 80
+SCATTER_ALPHA = 0.7
+
+# PAE heatmap layout (on-demand only, via --pae-heatmaps)
+PAE_FIGURE_SIZE = (8, 7)
+PAE_VMIN = 0
+PAE_VMAX = 30  # Angstroms
+
+
+# ============================================================================
+# Adaptive Scatter Sizing
+# ============================================================================
+
+def _adaptive_scatter_params(n: int) -> Tuple[float, float]:
+    """Return (point_size, alpha) scaled to dataset size.
+
+    Ensures small datasets show large readable dots while million-scale
+    datasets approach a pixel-dot density aesthetic.  All figures use
+    scatter() at every scale - no hexbin fallback.
+
+    Args:
+        n: Number of points to be plotted.
+
+    Returns:
+        Tuple of (size, alpha) for use in axes.scatter().
+    """
+    if n < 1_000:
+        return (40, 0.70)
+    elif n < 10_000:
+        return (20, 0.55)
+    elif n < 50_000:
+        return (10, 0.45)
+    elif n < 200_000:
+        return (5, 0.35)
+    else:
+        return (2, 0.25)
+
+
+def _timed_scatter(axes: plt.Axes, x, y, n_points: int,
+                   fig_label: str = '', **kwargs) -> object:
+    """Wrapper around axes.scatter() with timing and status messages.
+
+    For datasets over 10k points, prints an advisory before the blocking
+    scatter call so the user knows the script is not stuck.
+
+    Args:
+        axes: Matplotlib axes to plot on.
+        x, y: Data arrays.
+        n_points: Total points (used for advisory message).
+        fig_label: Short label for the status message (e.g. 'Fig 1').
+        **kwargs: Passed through to axes.scatter().
+
+    Returns:
+        The PathCollection object returned by scatter().
+    """
+    prefix = f"  {fig_label} | " if fig_label else "  "
+    if n_points > 9_000:
+        print(f"{prefix}Rendering {n_points:,} points (this may take a moment)...")
+    t0 = time.time()
+    result = axes.scatter(x, y, **kwargs)
+    elapsed = time.time() - t0
+    if n_points > 9_000 or elapsed > 2.0:
+        print(f"{prefix}scatter: {elapsed:.1f}s")
+    return result
+
+
+# ============================================================================
+# Column Detection
+# ============================================================================
+
+def detect_columns(df: pd.DataFrame) -> dict:
+    """Detect which column groups are present in the CSV.
+
+    Returns:
+        Dictionary of boolean flags indicating available column groups.
+    """
+    columns = set(df.columns)
+    return {
+        'has_v2_data': 'quality_tier_v2' in columns,
+        'has_interface_data': 'n_interface_contacts' in columns,
+        'has_pae_interface': 'interface_pae_mean' in columns,
+        'has_composite': 'interface_confidence_score' in columns,
+        'has_chain_info': 'n_chains' in columns,
+    }
+
+
+# ============================================================================
+# Data Loading
+# ============================================================================
+
+def load_data(csv_path: str) -> pd.DataFrame:
+    """Load the analysis CSV into a pandas DataFrame.
+
+    Numeric columns are coerced (non-numeric values become NaN).
+    Rows with missing ipTM are dropped; pDockQ = 0 is retained
+    (genuine zero-contact complexes are informative for diagnostics).
+
+    Also performs:
+      - Case normalisation on complex_type (Homodimer → homodimer).
+      - One-hot expansion of the comma-separated interface_flags column
+        so that downstream figures (e.g. Fig 9b) can reference individual
+        flag boolean columns directly.
+
+    Args:
+        csv_path: Path to the CSV produced by toolkit.py.
+
+    Returns:
+        Cleaned DataFrame.
+    """
+    df = pd.read_csv(csv_path)
+
+    # Coerce key numeric columns
+    numeric_candidates = [
+        'iptm', 'pdockq', 'pae_mean', 'plddt_below50_fraction',
+        'plddt_below70_fraction', 'interface_pae_mean',
+        'interface_confidence_score', 'confident_contact_fraction',
+        'interface_plddt_combined', 'bulk_plddt_combined',
+        'interface_vs_bulk_delta', 'interface_symmetry',
+        'n_interface_contacts', 'contacts_per_interface_residue',
+        'n_chains',
+    ]
+    for col in numeric_candidates:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # ── Item 2: Normalise complex_type to lowercase ──
+    # parse_complex_name() produces 'Homodimer' / 'Heterodimer' but several
+    # figures filtered for lowercase.  Normalise once here.
+    if 'complex_type' in df.columns:
+        df['complex_type'] = df['complex_type'].astype(str).str.lower()
+
+    # ── Item 3: Relaxed drop filter ──
+    # Keep complexes with pDockQ = 0 (genuine zero-contact interfaces) since
+    # they are informative for Fig 2 (PAE health), Fig 9 (flag landscape),
+    # and the new chain-count profile.  Only drop rows that truly lack ipTM.
+    initial_count = len(df)
+    df = df.dropna(subset=['iptm'])
+    df = df[df['iptm'] > 0]
+    # pDockQ: fill NaN with 0 (no PDB or no contacts) rather than dropping
+    if 'pdockq' in df.columns:
+        df['pdockq'] = df['pdockq'].fillna(0)
+    # n_chains: infer from complex_type for rows where PDB was unavailable
+    if 'n_chains' in df.columns and 'complex_type' in df.columns:
+        missing_mask = df['n_chains'].isna()
+        if missing_mask.any():
+            # homodimer / heterodimer filenames always imply a 2-chain complex
+            dimer_mask = missing_mask & df['complex_type'].isin(['homodimer', 'heterodimer'])
+            df.loc[dimer_mask, 'n_chains'] = 2
+            filled = dimer_mask.sum()
+            still_missing = df['n_chains'].isna().sum()
+            if filled > 0:
+                print(f"  Inferred n_chains=2 for {filled} rows from complex_type "
+                      f"({still_missing} still missing).")
+    dropped = initial_count - len(df)
+    if dropped > 0:
+        print(f"  Dropped {dropped} rows with missing/zero ipTM.")
+
+    # ── Item 1: Expand interface_flags into one-hot boolean columns ──
+    # The CSV stores flags as a single comma-separated string, e.g.
+    #   "small_interface,metric_disagreement"
+    # Downstream figures (especially Fig 9b) need individual boolean columns.
+    ALL_KNOWN_FLAGS = [
+        'small_interface', 'sparse_interface', 'asymmetric_interface',
+        'interface_better_than_bulk', 'low_interface_confidence',
+        'paradox_confident_disorder', 'paradox_artefactual',
+        'metric_disagreement',
+    ]
+    if 'interface_flags' in df.columns:
+        flags_series = df['interface_flags'].fillna('').astype(str)
+        for flag_name in ALL_KNOWN_FLAGS:
+            df[flag_name] = flags_series.str.contains(flag_name, regex=False)
+
+    return df.reset_index(drop=True)
+
+
+# ============================================================================
+# Utility Helpers
+# ============================================================================
+
+def _apply_common_style(axes: plt.Axes, title: str, xlabel: str, ylabel: str,
+                        grid: bool = True) -> None:
+    """Apply consistent font sizes and styling to axes."""
+    axes.set_title(title, fontsize=FONT_TITLE, fontweight='bold', pad=12)
+    axes.set_xlabel(xlabel, fontsize=FONT_AXIS_LABEL)
+    axes.set_ylabel(ylabel, fontsize=FONT_AXIS_LABEL)
+    axes.tick_params(labelsize=FONT_TICK)
+    if grid:
+        axes.grid(True, alpha=GRID_ALPHA, linestyle='--')
+
+
+def _save_figure(figure: plt.Figure, filename: str) -> None:
+    """Save figure to OUTPUT_DIR and close it, with timing."""
+    output_path = os.path.join(OUTPUT_DIR, filename)
+    figure.tight_layout()
+    t0 = time.time()
+    figure.savefig(output_path, dpi=OUTPUT_DPI, bbox_inches='tight')
+    elapsed = time.time() - t0
+    plt.close(figure)
+    if elapsed > 2.0:
+        print(f"  Saved: {filename} (save: {elapsed:.1f}s)")
+    else:
+        print(f"  Saved: {filename}")
+
+
+def _build_tier_legend_handles(df: pd.DataFrame) -> list:
+    """Build legend handles with tier counts."""
+    handles = []
+    for tier in TIER_ORDER:
+        count = (df['quality_tier_v2'] == tier).sum()
+        handles.append(
+            Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor=TIER_COLORS[tier],
+                   markeredgecolor='white', markersize=9,
+                   label=f'{tier} ({count})')
+        )
+    # Grey for missing-tier complexes
+    missing_count = df['quality_tier_v2'].isna().sum()
+    if missing_count > 0:
+        handles.append(
+            Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor='#bdc3c7',
+                   markeredgecolor='white', markersize=9,
+                   label=f'Unclassified ({missing_count})')
+        )
+    return handles
+
+
+def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray,
+                          color: str = '#333333', linewidth: float = 0.9,
+                          alpha: float = 0.6) -> None:
+    """Overlay KDE density contours with percentile labels on a scatter axes.
+
+    Contour levels are percentile-based (10th, 30th, 50th, 70th, 90th of
+    probability mass).  The innermost ring encloses the top 10% density
+    region; the outermost encloses 90% of all points.
+
+    Fails silently if too few points or if KDE encounters a singular matrix.
+
+    Args:
+        axes: Matplotlib axes with scatter data already plotted.
+        x, y: 1D arrays of scatter coordinates.
+        color: Line colour for contours.
+        linewidth: Contour line width.
+        alpha: Contour line alpha.
+    """
+    if len(x) < 20:
+        return
+
+    try:
+        kde = gaussian_kde(np.vstack([x, y]), bw_method='scott')
+
+        x_grid = np.linspace(x.min() - 0.02, x.max() + 0.02, 120)
+        y_grid = np.linspace(y.min() - 0.02, y.max() + 0.02, 120)
+        xx, yy = np.meshgrid(x_grid, y_grid)
+        positions = np.vstack([xx.ravel(), yy.ravel()])
+        zz = kde(positions).reshape(xx.shape)
+
+        # Percentile-based contour levels
+        zz_sorted = np.sort(zz.ravel())
+        cumsum = np.cumsum(zz_sorted)
+        cumsum /= cumsum[-1]
+
+        percentile_thresholds = [0.10, 0.30, 0.50, 0.70, 0.90]
+        levels = []
+        level_labels = {}
+        for p in percentile_thresholds:
+            idx = np.searchsorted(cumsum, p)
+            density_val = zz_sorted[min(idx, len(zz_sorted) - 1)]
+            levels.append(density_val)
+            pct_inside = int(round((1 - p) * 100))
+            level_labels[density_val] = f'{pct_inside}%'
+
+        # Deduplicate while preserving label mapping
+        seen = set()
+        unique_levels = []
+        for lv in sorted(levels):
+            if lv not in seen:
+                unique_levels.append(lv)
+                seen.add(lv)
+        levels = unique_levels
+
+        if len(levels) >= 2:
+            contours = axes.contour(xx, yy, zz, levels=levels,
+                                    colors=color, linewidths=linewidth,
+                                    alpha=alpha, zorder=4)
+            fmt = {}
+            for lv in contours.levels:
+                closest = min(level_labels.keys(), key=lambda k: abs(k - lv))
+                fmt[lv] = level_labels[closest]
+            clabels = axes.clabel(contours, contours.levels,
+                                  fmt=fmt, fontsize=8, inline=True,
+                                  inline_spacing=4)
+            for txt in clabels:
+                txt.set_bbox(dict(boxstyle='round,pad=0.15',
+                                  facecolor='white', edgecolor='none',
+                                  alpha=0.85))
+                txt.set_fontweight('bold')
+    except np.linalg.LinAlgError:
+        print("  Note: KDE failed (singular covariance); contours skipped.")
+
+
+# ============================================================================
+# Figure 1 - ipTM vs pDockQ by Quality Tier
+# ============================================================================
+
+def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict,
+                              density_mode: bool = False) -> None:
+    """Fig 1: Overall prediction quality landscape.
+
+    Colours by V2 quality tier when available, otherwise falls back to
+    disorder-fraction colouring (RdYlGn_r colourmap).
+
+    When density_mode is True, KDE contour overlays are added to show
+    where complexes concentrate.  Scatter dots are used at every scale.
+    """
+    use_tier_colouring = col_flags['has_v2_data']
+    n_total = len(df)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_total)
+
+    figure, axes = plt.subplots(figsize=(10, 8))
+
+    if use_tier_colouring:
+        # Plot by tier: Low first (behind), then Medium, then High on top
+        for tier in reversed(TIER_ORDER):
+            subset = df[df['quality_tier_v2'] == tier]
+            _timed_scatter(axes, subset['iptm'], subset['pdockq'],
+                           n_points=n_total, fig_label='Fig 1',
+                           c=TIER_COLORS[tier], s=pt_size,
+                           alpha=pt_alpha, edgecolors='white',
+                           linewidths=0.5, zorder=3, label=tier)
+
+        # Unclassified (missing PAE → no tier)
+        unclassified = df[df['quality_tier_v2'].isna()]
+        if len(unclassified) > 0:
+            axes.scatter(unclassified['iptm'], unclassified['pdockq'],
+                         c='#bdc3c7', s=pt_size,
+                         alpha=pt_alpha, edgecolors='white',
+                         linewidths=0.5, zorder=2)
+    else:
+        # Fallback: disorder-fraction colouring
+        if 'plddt_below50_fraction' in df.columns:
+            disorder = df['plddt_below50_fraction'].fillna(0)
+            scatter = _timed_scatter(axes, df['iptm'], df['pdockq'],
+                                     n_points=n_total, fig_label='Fig 1',
+                                     c=disorder, cmap='RdYlGn_r', vmin=0, vmax=1,
+                                     s=pt_size, alpha=pt_alpha,
+                                     edgecolors='white', linewidths=0.5, zorder=3)
+            cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
+            cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
+        else:
+            _timed_scatter(axes, df['iptm'], df['pdockq'],
+                           n_points=n_total, fig_label='Fig 1',
+                           c='steelblue', s=pt_size, alpha=pt_alpha,
+                           edgecolors='white', linewidths=0.5, zorder=3)
+
+    # Optional density contours (--density flag)
+    if density_mode:
+        valid = df.dropna(subset=['iptm', 'pdockq'])
+        _overlay_kde_contours(axes, valid['iptm'].values, valid['pdockq'].values)
+
+    # Threshold lines
+    axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1,
+                 alpha=0.7, zorder=1)
+    axes.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1,
+                 alpha=0.7, zorder=1)
+
+    # Shaded high-quality quadrant (subtle)
+    axes.fill_between([IPTM_HIGH, 1.05], PDOCKQ_HIGH, 0.8,
+                      alpha=0.06, color='green', zorder=0)
+
+    # Build legend (tier handles only - multi-chain analysis is in Fig 10)
+    if use_tier_colouring:
+        final_handles = _build_tier_legend_handles(df)
+        axes.legend(handles=final_handles, title='Quality Tier',
+                    fontsize=FONT_TICK, title_fontsize=FONT_AXIS_LABEL,
+                    loc='lower right', framealpha=0.9)
+
+    axes.set_xlim(0.2, 1.05)
+    axes.set_ylim(-0.02, 0.8)
+
+    title = "AlphaFold2-Multimer: Quality Assessment (ipTM vs pDockQ)"
+    _apply_common_style(axes, title, 'ipTM', 'pDockQ')
+
+    _save_figure(figure, '1_Quality_Scatter.png')
+
+
+def plot_fig1b_disorder_scatter(df: pd.DataFrame,
+                                density_mode: bool = False) -> None:
+    """Fig 1b (supplementary): Disorder-coloured scatter with density contours.
+
+    Each point is coloured by its disorder fraction (pLDDT < 50) using the
+    RdYlGn_r colourmap.  KDE density contours with percentile labels are
+    always overlaid so the reader can see where most complexes concentrate.
+    """
+    if 'plddt_below50_fraction' not in df.columns:
+        print("  Skipping Fig 1b: no disorder fraction column.")
+        return
+
+    disorder = df['plddt_below50_fraction'].fillna(0)
+
+    # Valid-data mask (need finite ipTM, pDockQ, and disorder)
+    mask = np.isfinite(df['iptm']) & np.isfinite(df['pdockq']) & np.isfinite(disorder)
+    x = df.loc[mask, 'iptm'].values
+    y = df.loc[mask, 'pdockq'].values
+    c = disorder[mask].values
+    n_points = len(x)
+
+    figure, axes = plt.subplots(figsize=(10, 8))
+
+    # Adaptive point sizing
+    pt_size, pt_alpha = _adaptive_scatter_params(n_points)
+
+    # Scatter: colour = disorder fraction
+    scatter = _timed_scatter(axes, x, y, n_points=n_points, fig_label='Fig 1b',
+                             c=c, cmap='RdYlGn_r', vmin=0, vmax=1,
+                             s=pt_size, alpha=pt_alpha,
+                             edgecolors='none', zorder=3)
+    cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
+    cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
+
+    # Density contours (always shown for this figure - it's the whole point)
+    _overlay_kde_contours(axes, x, y)
+
+    # Reference lines & "confident" quadrant
+    axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    axes.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    axes.fill_between([IPTM_HIGH, 1.05], PDOCKQ_HIGH, 0.8,
+                      alpha=0.06, color='green', zorder=0)
+    axes.set_xlim(0.2, 1.05)
+    axes.set_ylim(-0.02, 0.8)
+
+    # Annotation: sample size
+    axes.text(0.02, 0.98, f'n = {n_points:,}', transform=axes.transAxes,
+              fontsize=FONT_TICK, va='top', ha='left',
+              bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                        edgecolor='grey', alpha=0.8))
+
+    _apply_common_style(axes,
+                        "Quality Scatter - Disorder Colouring (Supplementary)",
+                        'ipTM', 'pDockQ')
+    _save_figure(figure, '1b_Quality_Scatter_Disorder.png')
+
+
+# ============================================================================
+# Figure 2 - Global PAE Health Check
+# ============================================================================
+
+def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
+    """Fig 2: Is the dataset generally well-resolved?"""
+    if 'pae_mean' not in df.columns:
+        print("  Skipping Fig 2: no pae_mean column.")
+        return
+
+    pae_values = df['pae_mean'].dropna()
+    if len(pae_values) == 0:
+        print("  Skipping Fig 2: no valid PAE values.")
+        return
+
+    median_pae = pae_values.median()
+    below_threshold = (pae_values < PAE_CONFIDENT).sum()
+
+    figure, axes = plt.subplots(figsize=(8, 5))
+
+    axes.hist(pae_values, bins=30, color='#3498db', alpha=0.75,
+              edgecolor='white', linewidth=0.5)
+
+    # Median line
+    axes.axvline(x=median_pae, color='red', linestyle='--', linewidth=1.5,
+                 label=f'Median: {median_pae:.1f} Å')
+
+    # Confident guideline
+    axes.axvline(x=PAE_CONFIDENT, color='green', linestyle='--', linewidth=1.5,
+                 label=f'Confident guideline: {PAE_CONFIDENT} Å')
+
+    axes.legend(fontsize=FONT_TICK, loc='upper right')
+
+    title = (f"Global PAE Health Check - {len(pae_values)} complexes, "
+             f"median {median_pae:.1f} Å, {below_threshold} below {PAE_CONFIDENT} Å")
+    _apply_common_style(axes, title, 'Mean PAE (Å)', 'Count', grid=False)
+
+    _save_figure(figure, '2_PAE_Health_Check.png')
+
+
+# ============================================================================
+# Figure 3 - Interface PAE by Quality Tier
+# ============================================================================
+
+def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
+    """Fig 3: How confident are the contacts that matter for quality assessment?"""
+    required = ['interface_pae_mean', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 3: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 3: no valid data after filtering.")
+        return
+
+    figure, axes = plt.subplots(figsize=(10, 6))
+
+    # Build data and positions for boxplots + strip
+    tier_data = []
+    tier_labels = []
+    tier_medians = []
+    positions = []
+    for idx, tier in enumerate(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]['interface_pae_mean']
+        if len(subset) > 0:
+            tier_data.append(subset.values)
+            tier_labels.append(f'{tier}\n(n={len(subset)})')
+            tier_medians.append(subset.median())
+            positions.append(idx)
+
+    # Boxplots
+    box_parts = axes.boxplot(
+        tier_data, positions=positions, widths=0.5,
+        patch_artist=True, showfliers=False,
+        medianprops=dict(color='black', linewidth=2),
+    )
+
+    # Colour the boxes
+    for idx, patch in enumerate(box_parts['boxes']):
+        tier_name = TIER_ORDER[idx] if idx < len(TIER_ORDER) else 'High'
+        patch.set_facecolor(TIER_COLORS.get(tier_name, '#cccccc'))
+        patch.set_alpha(0.6)
+
+    # Ensure median lines render above scatter points
+    for median_line in box_parts['medians']:
+        median_line.set_zorder(10)
+
+    # Jittered strip plot behind
+    for idx, data in enumerate(tier_data):
+        jitter = np.random.normal(0, 0.06, size=len(data))
+        axes.scatter(positions[idx] + jitter, data,
+                     c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'),
+                     alpha=0.35, s=20, zorder=1, edgecolors='none')
+
+    # PAE threshold line
+    axes.axhline(y=PAE_CONFIDENT, color='red', linestyle='--', linewidth=1.5,
+                 alpha=0.7, label=f'Confident contact cutoff ({PAE_CONFIDENT} Å)')
+
+    axes.set_xticks(positions)
+    axes.set_xticklabels(tier_labels, fontsize=FONT_AXIS_LABEL)
+    axes.legend(fontsize=FONT_TICK, loc='upper right')
+
+    # Subtitle with medians
+    median_text = " | ".join(
+        f"{TIER_ORDER[i]} median: {tier_medians[i]:.1f} Å"
+        for i in range(len(tier_medians))
+    )
+    axes.text(0.5, -0.12, median_text, transform=axes.transAxes,
+              ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
+
+    _apply_common_style(axes, "Interface PAE by Quality Tier",
+                        '', 'Interface PAE (Å)', grid=False)
+
+    _save_figure(figure, '3_Interface_PAE_by_Tier.png')
+
+
+# ============================================================================
+# Figure 4 - Composite Score & Quality Tier Validation
+# ============================================================================
+
+def plot_fig4_composite_validation(df: pd.DataFrame,
+                                   density_mode: bool = False) -> None:
+    """Fig 4: Why should I trust the quality tier assigned?
+
+    Panel (a): Composite score distributions by tier (violin/boxplot).
+    Panel (b): Composite vs confident contact fraction scatter.
+    """
+    required = ['interface_confidence_score', 'quality_tier_v2',
+                'confident_contact_fraction']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 4: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 4: no valid data.")
+        return
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # --- Panel (a): Composite score distributions ---
+    tier_data_a = []
+    tier_labels_a = []
+    positions_a = []
+    for idx, tier in enumerate(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]['interface_confidence_score']
+        if len(subset) > 0:
+            tier_data_a.append(subset.values)
+            tier_labels_a.append(f'{tier}\n(n={len(subset)})')
+            positions_a.append(idx)
+
+    # Violin plots
+    if tier_data_a:
+        vp = ax_a.violinplot(tier_data_a, positions=positions_a, showmedians=True,
+                             showextrema=False)
+        for idx, body in enumerate(vp['bodies']):
+            tier_name = TIER_ORDER[idx] if idx < len(TIER_ORDER) else 'High'
+            body.set_facecolor(TIER_COLORS.get(tier_name, '#cccccc'))
+            body.set_alpha(0.6)
+        if 'cmedians' in vp:
+            vp['cmedians'].set_color('black')
+            vp['cmedians'].set_linewidth(2)
+            vp['cmedians'].set_zorder(10)
+
+    # Jittered strip overlay
+    for idx, data in enumerate(tier_data_a):
+        jitter = np.random.normal(0, 0.06, size=len(data))
+        ax_a.scatter(positions_a[idx] + jitter, data,
+                     c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'),
+                     alpha=0.3, s=15, zorder=3, edgecolors='none')
+
+    # Decision threshold lines
+    thresholds = [
+        (0.75, 'Low → High upgrade', '#e74c3c'),
+        (0.80, 'Medium → High upgrade', '#f39c12'),
+        (0.55, 'High → Medium downgrade', '#2ecc71'),
+    ]
+    for val, label, colour in thresholds:
+        ax_a.axhline(y=val, color=colour, linestyle=':', linewidth=1.2,
+                     alpha=0.7)
+        ax_a.text(ax_a.get_xlim()[1], val, f' {label} ({val})',
+                  va='center', fontsize=8, color=colour, alpha=0.8)
+
+    ax_a.set_xticks(positions_a)
+    ax_a.set_xticklabels(tier_labels_a, fontsize=FONT_AXIS_LABEL)
+
+    # Tier colour legend - upper-left to avoid threshold label overlap
+    tier_legend = [mpatches.Patch(color=TIER_COLORS[t], alpha=0.6, label=t)
+                   for t in TIER_ORDER]
+    ax_a.legend(handles=tier_legend, fontsize=FONT_TICK - 1,
+                loc='upper left', framealpha=0.9)
+
+    _apply_common_style(ax_a, "(a) Composite Score by Tier",
+                        '', 'Interface Confidence Score', grid=False)
+
+    # --- Panel (b): Composite vs confident contact fraction ---
+    n_panel_b = len(plot_df)
+    pt_size_b, pt_alpha_b = _adaptive_scatter_params(n_panel_b)
+
+    for tier in reversed(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]
+        axes_b_kwargs = dict(
+            c=TIER_COLORS[tier], alpha=pt_alpha_b,
+            s=pt_size_b, edgecolors='white', linewidths=0.3,
+            label=tier, zorder=3)
+        _timed_scatter(ax_b, subset['confident_contact_fraction'],
+                       subset['interface_confidence_score'],
+                       n_points=n_panel_b, fig_label='Fig 4b',
+                       **axes_b_kwargs)
+    ax_b.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK)
+
+    # Optional density contours
+    if density_mode:
+        valid_b = plot_df[['confident_contact_fraction',
+                           'interface_confidence_score']].dropna()
+        _overlay_kde_contours(ax_b,
+                              valid_b['confident_contact_fraction'].values,
+                              valid_b['interface_confidence_score'].values)
+
+    # Correlation annotation
+    valid_both = plot_df[['confident_contact_fraction',
+                          'interface_confidence_score']].dropna()
+    if len(valid_both) > 2:
+        r = valid_both['confident_contact_fraction'].corr(
+            valid_both['interface_confidence_score'])
+        ax_b.text(0.05, 0.95, f'r = {r:.2f}', transform=ax_b.transAxes,
+                  fontsize=FONT_AXIS_LABEL, va='top',
+                  bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    _apply_common_style(ax_b, "(b) Composite vs Confident Contact Fraction",
+                        'Confident Contact Fraction',
+                        'Interface Confidence Score')
+
+    figure.suptitle("Quality Tier Validation: Composite Score Evidence",
+                    fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '4_Composite_Tier_Validation.png')
+
+
+# ============================================================================
+# Figure 5 - Interface vs Bulk Quality
+# ============================================================================
+
+def plot_fig5_interface_vs_bulk(df: pd.DataFrame,
+                                density_mode: bool = False) -> None:
+    """Fig 5: Are interfaces special, or do they just reflect bulk quality?"""
+    required = ['interface_plddt_combined', 'bulk_plddt_combined', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 5: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 5: no valid data.")
+        return
+
+    figure, axes = plt.subplots(figsize=(8, 8))
+
+    # Identify paradox complexes for special marking
+    paradox_mask = _get_paradox_mask(plot_df)
+
+    # Plot non-paradox by tier with adaptive sizing
+    non_paradox = plot_df[~paradox_mask]
+    n_non_paradox = len(non_paradox)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_non_paradox)
+
+    for tier in reversed(TIER_ORDER):
+        subset = non_paradox[non_paradox['quality_tier_v2'] == tier]
+        _timed_scatter(axes, subset['bulk_plddt_combined'],
+                       subset['interface_plddt_combined'],
+                       n_points=n_non_paradox, fig_label='Fig 5',
+                       c=TIER_COLORS[tier], s=pt_size,
+                       alpha=pt_alpha, edgecolors='white',
+                       linewidths=0.5, zorder=3, label=tier)
+
+    # Optional density contours
+    if density_mode:
+        _overlay_kde_contours(axes,
+                              non_paradox['bulk_plddt_combined'].values,
+                              non_paradox['interface_plddt_combined'].values)
+
+    # Paradox complexes - small triangles so each marker = one complex
+    paradox_df = plot_df[paradox_mask]
+    if len(paradox_df) > 0:
+        axes.scatter(paradox_df['bulk_plddt_combined'],
+                     paradox_df['interface_plddt_combined'],
+                     c='#9b59b6', s=50, alpha=0.9,
+                     marker='^', edgecolors='black', linewidths=0.6,
+                     zorder=5, label=f'Paradox ({len(paradox_df)})')
+
+    # Diagonal y = x line
+    lims = [min(axes.get_xlim()[0], axes.get_ylim()[0]),
+            max(axes.get_xlim()[1], axes.get_ylim()[1])]
+    axes.plot(lims, lims, 'k--', linewidth=1.2, alpha=0.6, zorder=1)
+    axes.set_xlim(lims)
+    axes.set_ylim(lims)
+
+    # Annotations
+    above_diagonal = (plot_df['interface_plddt_combined'] >
+                      plot_df['bulk_plddt_combined']).sum()
+    total = len(plot_df)
+    pct = above_diagonal / total * 100 if total > 0 else 0
+
+    axes.text(0.05, 0.95, "Interface > Bulk ↑", transform=axes.transAxes,
+              fontsize=FONT_TICK, va='top', ha='left', color='#27ae60',
+              fontweight='bold')
+    axes.text(0.95, 0.05, "Bulk > Interface ↓", transform=axes.transAxes,
+              fontsize=FONT_TICK, va='bottom', ha='right', color='#e74c3c',
+              fontweight='bold')
+    axes.text(0.5, 0.02,
+              f'{above_diagonal}/{total} ({pct:.0f}%) above diagonal',
+              transform=axes.transAxes, ha='center', fontsize=FONT_TICK,
+              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    axes.legend(fontsize=FONT_TICK, loc='lower left', framealpha=0.9)
+
+    _apply_common_style(axes, "Interface vs Bulk pLDDT: Are Interfaces Special?",
+                        'Bulk pLDDT', 'Interface pLDDT')
+
+    _save_figure(figure, '5_Interface_vs_Bulk.png')
+
+
+# ============================================================================
+# Figure 6 - Paradox Complexes
+# ============================================================================
+
+def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
+    """Fig 6: Can disordered proteins form confident interfaces?
+
+    Three-panel comparison of paradox vs non-paradox High-tier complexes.
+    """
+    required = ['quality_tier_v2', 'iptm', 'pdockq',
+                'plddt_below50_fraction', 'interface_vs_bulk_delta',
+                'confident_contact_fraction', 'interface_symmetry']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 6: missing required columns.")
+        return
+
+    # Count paradox complexes in the FULL dataset before any filtering,
+    # so we can report how many are lost to (a) not being High-tier and
+    # (b) missing interface data for the three panels.
+    n_paradox_all_tiers = int(_get_paradox_mask(df).sum())
+
+    all_high = df[df['quality_tier_v2'] == 'High'].copy()
+    n_paradox_in_high_before_dropna = int(_get_paradox_mask(all_high).sum())
+
+    high_tier = all_high.dropna(subset=required).copy()
+    if len(high_tier) == 0:
+        print("  Skipping Fig 6: no High-tier complexes.")
+        return
+
+    paradox_mask = _get_paradox_mask(high_tier)
+    paradox = high_tier[paradox_mask]
+    non_paradox = high_tier[~paradox_mask]
+
+    n_paradox = len(paradox)
+    n_non_paradox = len(non_paradox)
+    n_paradox_not_high = n_paradox_all_tiers - n_paradox_in_high_before_dropna
+    n_paradox_missing_data = n_paradox_in_high_before_dropna - n_paradox
+    n_paradox_excluded = n_paradox_all_tiers - n_paradox
+
+    if n_paradox_excluded > 0:
+        parts = []
+        if n_paradox_not_high > 0:
+            parts.append(f"{n_paradox_not_high} in non-High tiers")
+        if n_paradox_missing_data > 0:
+            parts.append(f"{n_paradox_missing_data} missing interface data")
+        reason = ', '.join(parts)
+        print(f"  Note: {n_paradox_excluded} of {n_paradox_all_tiers} paradox complexes "
+              f"excluded from Fig 6 ({reason})")
+
+    if n_paradox == 0:
+        print("  Skipping Fig 6: no paradox complexes found.")
+        return
+
+    colour_paradox = '#9b59b6'
+    colour_non_paradox = TIER_COLORS['High']
+
+    figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
+
+    panels = [
+        (ax_a, 'interface_vs_bulk_delta',
+         '(a) Interface vs Bulk (Δ pLDDT)', 'Δ pLDDT'),
+        (ax_b, 'confident_contact_fraction',
+         '(b) Confident Contact Fraction', 'Fraction'),
+        (ax_c, 'interface_symmetry',
+         '(c) Interface Symmetry', 'Symmetry Score'),
+    ]
+
+    for ax, col, title, ylabel in panels:
+        data_paradox = paradox[col].dropna().values
+        data_non_paradox = non_paradox[col].dropna().values
+
+        if len(data_paradox) == 0 or len(data_non_paradox) == 0:
+            ax.text(0.5, 0.5, 'Insufficient data', transform=ax.transAxes,
+                    ha='center', va='center')
+            ax.set_title(title, fontsize=FONT_TITLE, fontweight='bold')
+            continue
+
+        # Box + strip for each group
+        box_data = [data_paradox, data_non_paradox]
+        positions = [0, 1]
+        bp = ax.boxplot(box_data, positions=positions, widths=0.5,
+                        patch_artist=True, showfliers=False,
+                        medianprops=dict(color='black', linewidth=2))
+
+        bp['boxes'][0].set_facecolor(colour_paradox)
+        bp['boxes'][0].set_alpha(0.5)
+        bp['boxes'][1].set_facecolor(colour_non_paradox)
+        bp['boxes'][1].set_alpha(0.5)
+
+        # Ensure median lines render above scatter points
+        for median_line in bp['medians']:
+            median_line.set_zorder(10)
+
+        # Jittered strip
+        for i, (data, colour) in enumerate(
+                [(data_paradox, colour_paradox),
+                 (data_non_paradox, colour_non_paradox)]):
+            jitter = np.random.normal(0, 0.06, size=len(data))
+            ax.scatter(positions[i] + jitter, data, c=colour, alpha=0.4,
+                       s=20, zorder=3, edgecolors='none')
+
+        ax.set_xticks(positions)
+        ax.set_xticklabels([f'Paradox\n(n={n_paradox})',
+                            f'Non-paradox\n(n={n_non_paradox})'],
+                           fontsize=FONT_TICK)
+        ax.set_title(title, fontsize=FONT_TITLE, fontweight='bold')
+        ax.set_ylabel(ylabel, fontsize=FONT_AXIS_LABEL)
+        ax.tick_params(labelsize=FONT_TICK)
+
+        # Median annotations
+        med_p = np.median(data_paradox)
+        med_np = np.median(data_non_paradox)
+        ax.text(0.5, -0.15,
+                f'Medians: {med_p:.2f} vs {med_np:.2f}',
+                transform=ax.transAxes, ha='center', fontsize=9,
+                style='italic', color='#555555')
+
+    # Shared legend on the first panel
+    legend_handles = [
+        mpatches.Patch(color=colour_paradox, alpha=0.6, label='Paradox'),
+        mpatches.Patch(color=colour_non_paradox, alpha=0.6,
+                       label='Non-paradox'),
+    ]
+    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK,
+                loc='upper right', framealpha=0.9)
+
+    figure.suptitle(
+        "Paradox Complexes: Confident Interfaces Despite Structural Disorder",
+        fontsize=14, fontweight='bold', y=1.04)
+
+    subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
+                f"non-paradox High-tier complexes"
+                f" ({n_paradox_excluded} paradox complexes excluded due to incomplete interface data)")
+    
+    figure.text(0.5, 0.99, subtitle,
+                ha='center', fontsize=FONT_AXIS_LABEL, style='italic',
+                color='#555555')
+
+    _save_figure(figure, '6_Paradox_Spotlight.png')
+
+
+# ============================================================================
+# Figure 7 - Homodimer vs Heterodimer
+# ============================================================================
+
+def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
+    """Fig 7: How does prediction quality vary by complex architecture?
+
+    Panel (a): Stacked bar chart of tier proportions (Homo / Hetero / Multi-chain).
+    Panel (b): Interface symmetry distributions.
+
+    Multi-chain complexes (3+ chains) are shown as a third category when the
+    n_chains column is available.  The case-normalised complex_type column
+    (from load_data) is used for homodimer/heterodimer classification.
+    """
+    required = ['complex_type', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 7: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 7: no valid data.")
+        return
+
+    # Split into architecture categories
+    # Multi-chain (3+) gets its own group regardless of homodimer/heterodimer label
+    has_chain_info = 'n_chains' in plot_df.columns
+    if has_chain_info:
+        multi = plot_df[plot_df['n_chains'] >= 3]
+        dimers = plot_df[plot_df['n_chains'] < 3]
+    else:
+        multi = pd.DataFrame()
+        dimers = plot_df
+
+    homo = dimers[dimers['complex_type'] == 'homodimer']
+    hetero = dimers[dimers['complex_type'] == 'heterodimer']
+
+    # Build category list (only include non-empty groups)
+    MULTI_COLOUR = '#8e44ad'
+    categories = []
+    cat_colours = []
+    if len(homo) > 0:
+        categories.append(('Homodimer', homo))
+        cat_colours.append('#3498db')
+    if len(hetero) > 0:
+        categories.append(('Heterodimer', hetero))
+        cat_colours.append('#e67e22')
+    if len(multi) > 0:
+        categories.append(('Multi-chain', multi))
+        cat_colours.append(MULTI_COLOUR)
+
+    if len(categories) == 0:
+        print("  Skipping Fig 7: no classified complexes.")
+        return
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # --- Panel (a): Stacked bar chart ---
+    bar_positions = list(range(len(categories)))
+    bar_labels = []
+
+    for cat_idx, (label, subset) in enumerate(categories):
+        count = len(subset)
+        bottom = 0
+        for tier in TIER_ORDER:
+            tier_count = (subset['quality_tier_v2'] == tier).sum()
+            pct = tier_count / count * 100 if count > 0 else 0
+            ax_a.bar(cat_idx, pct, bottom=bottom,
+                     color=TIER_COLORS[tier], edgecolor='white', linewidth=0.5)
+            if pct > 3:  # Only label if visible
+                ax_a.text(cat_idx, bottom + pct / 2, f'{pct:.1f}%',
+                          ha='center', va='center', fontsize=9,
+                          fontweight='bold', color='white' if pct > 10 else 'black')
+            bottom += pct
+        bar_labels.append(f'{label}\n(n={count})')
+
+    ax_a.set_xticks(bar_positions)
+    ax_a.set_xticklabels(bar_labels, fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylim(0, 105)
+
+    # Legend
+    legend_handles = [mpatches.Patch(color=TIER_COLORS[t], label=t)
+                      for t in TIER_ORDER]
+    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right')
+
+    _apply_common_style(ax_a, "(a) Quality Tier Proportions",
+                        '', 'Percentage (%)', grid=False)
+
+    # --- Panel (b): Interface symmetry distributions ---
+    has_symmetry = 'interface_symmetry' in df.columns
+    if has_symmetry:
+        sym_data = []
+        sym_labels = []
+        sym_colours = []
+        for (label, subset), colour in zip(categories, cat_colours):
+            sym_values = subset['interface_symmetry'].dropna().values
+            if len(sym_values) > 0:
+                sym_data.append(sym_values)
+                sym_labels.append(f'{label}\n(n={len(sym_values)})')
+                sym_colours.append(colour)
+
+        if sym_data:
+            positions_b = list(range(len(sym_data)))
+            vp = ax_b.violinplot(sym_data, positions=positions_b,
+                                 showmedians=True, showextrema=False)
+            for idx, body in enumerate(vp['bodies']):
+                body.set_facecolor(sym_colours[idx])
+                body.set_alpha(0.6)
+            if 'cmedians' in vp:
+                vp['cmedians'].set_color('black')
+                vp['cmedians'].set_linewidth(2)
+                vp['cmedians'].set_zorder(10)
+
+            ax_b.set_xticks(positions_b)
+            ax_b.set_xticklabels(sym_labels, fontsize=FONT_AXIS_LABEL)
+    else:
+        ax_b.text(0.5, 0.5, 'Interface symmetry data\nnot available',
+                  transform=ax_b.transAxes, ha='center', va='center',
+                  fontsize=FONT_AXIS_LABEL, color='grey')
+
+    _apply_common_style(ax_b, "(b) Interface Symmetry",
+                        '', 'Symmetry Score', grid=False)
+
+    figure.suptitle("Prediction Quality by Complex Architecture",
+                    fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '7_Homo_vs_Hetero.png')
+
+
+# ============================================================================
+# Figure 8 - Metric Disagreement
+# ============================================================================
+
+def plot_fig8_metric_disagreement(df: pd.DataFrame,
+                                  density_mode: bool = False) -> None:
+    """Fig 8: Why do ipTM and pDockQ disagree so systematically?"""
+    required = ['iptm', 'pdockq', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 8: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+
+    figure, axes = plt.subplots(figsize=(10, 8))
+
+    n_plot = len(plot_df)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_plot)
+
+    for tier in reversed(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]
+        _timed_scatter(axes, subset['iptm'], subset['pdockq'],
+                       n_points=n_plot, fig_label='Fig 8',
+                       c=TIER_COLORS[tier], s=pt_size,
+                       alpha=pt_alpha, edgecolors='white',
+                       linewidths=0.5, zorder=3, label=tier)
+    axes.legend(fontsize=FONT_TICK, title='Tier',
+                title_fontsize=FONT_TICK, loc='upper left')
+
+    # Optional density contours
+    if density_mode:
+        _overlay_kde_contours(axes,
+                              plot_df['iptm'].values,
+                              plot_df['pdockq'].values)
+
+    # Diagonal y = x line
+    axes.plot([0, 1.1], [0, 1.1], 'k--', linewidth=1.2, alpha=0.6, zorder=1)
+
+    # Disagreement band: region where ipTM - pDockQ > METRIC_DISAGREEMENT_GAP
+    # This is below the line y = x - gap
+    x_band = np.linspace(0, 1.1, 100)
+    y_band = x_band - METRIC_DISAGREEMENT_GAP
+    axes.fill_between(x_band, -0.1, y_band, alpha=0.08, color='#e74c3c',
+                      zorder=0)
+
+    # Count disagreement cases
+    disagreement_mask = (plot_df['iptm'] - plot_df['pdockq']) > METRIC_DISAGREEMENT_GAP
+    n_disagree = disagreement_mask.sum()
+    pct_disagree = n_disagree / len(plot_df) * 100 if len(plot_df) > 0 else 0
+
+    # Annotation in the disagreement zone
+    axes.text(0.85, 0.10,
+              f'{n_disagree} complexes ({pct_disagree:.0f}%)\nipTM >> pDockQ',
+              transform=axes.transAxes, ha='center', va='center',
+              fontsize=FONT_AXIS_LABEL, fontweight='bold', color='#c0392b',
+              bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
+
+    axes.text(0.85, 0.02,
+              'pDockQ penalises structural\ndisorder; ipTM does not',
+              transform=axes.transAxes, ha='center', fontsize=9,
+              style='italic', color='#777777',
+              bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                        alpha=0.85, edgecolor='none'))
+
+    axes.set_xlim(0.2, 1.05)
+    axes.set_ylim(-0.02, 0.8)
+
+    _apply_common_style(axes,
+                        "Metric Disagreement: ipTM vs pDockQ Systematic Bias",
+                        'ipTM', 'pDockQ')
+
+    _save_figure(figure, '8_Metric_Disagreement.png')
+
+
+# ============================================================================
+# Figure 9 - Correlation & Flag Landscape
+# ============================================================================
+
+def plot_fig9_correlation_flags(df: pd.DataFrame) -> None:
+    """Fig 9: Metric structure and flag co-occurrence patterns.
+
+    Panel (a): Pearson correlation heatmap of key metrics.
+    Panel (b): Flag co-occurrence heatmap.
+    """
+    # --- Panel (a): Correlation heatmap ---
+    correlation_metrics = [
+        'iptm', 'pdockq', 'interface_confidence_score',
+        'confident_contact_fraction', 'interface_pae_mean',
+        'interface_vs_bulk_delta', 'interface_symmetry',
+        'plddt_below50_fraction',
+    ]
+    # Optionally include contacts_per_interface_residue
+    if 'contacts_per_interface_residue' in df.columns:
+        correlation_metrics.append('contacts_per_interface_residue')
+
+    available_metrics = [m for m in correlation_metrics if m in df.columns]
+
+    if len(available_metrics) < 3:
+        print("  Skipping Fig 9: fewer than 3 metrics available for correlation.")
+        return
+
+    # Readable labels for the heatmap
+    label_map = {
+        'iptm': 'ipTM',
+        'pdockq': 'pDockQ',
+        'interface_confidence_score': 'Composite Score',
+        'confident_contact_fraction': 'Confident Contact Frac',
+        'interface_pae_mean': 'Interface PAE',
+        'interface_vs_bulk_delta': 'Interface-Bulk Δ',
+        'interface_symmetry': 'Symmetry',
+        'plddt_below50_fraction': 'Disorder Fraction',
+        'contacts_per_interface_residue': 'Contacts/Residue',
+    }
+
+    corr_df = df[available_metrics].dropna()
+    if len(corr_df) < 10:
+        print("  Skipping Fig 9 panel (a): insufficient data for correlations.")
+        return
+
+    corr_matrix = corr_df.corr()
+
+    # --- Panel (b): Flag co-occurrence ---
+    active_flags = [
+        'small_interface', 'sparse_interface', 'asymmetric_interface',
+        'interface_better_than_bulk', 'low_interface_confidence',
+        'paradox_confident_disorder', 'metric_disagreement',
+    ]
+    available_flags = [f for f in active_flags if f in df.columns]
+
+    has_flags = len(available_flags) >= 2
+
+    if has_flags:
+        figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(16, 7))
+    else:
+        figure, ax_a = plt.subplots(figsize=(8, 7))
+
+    # --- Correlation heatmap ---
+    n_metrics = len(available_metrics)
+    mask_upper = np.triu(np.ones((n_metrics, n_metrics), dtype=bool), k=1)
+
+    # Plot heatmap
+    im = ax_a.imshow(corr_matrix.values, cmap='RdBu_r', vmin=-1, vmax=1,
+                     aspect='equal')
+
+    # Mask upper triangle by setting those cells to white
+    for i in range(n_metrics):
+        for j in range(n_metrics):
+            if mask_upper[i, j]:
+                ax_a.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1,
+                               fill=True, color='white', zorder=4))
+            else:
+                # Annotate with correlation value
+                val = corr_matrix.values[i, j]
+                text_colour = 'white' if abs(val) > 0.6 else 'black'
+                ax_a.text(j, i, f'{val:.2f}', ha='center', va='center',
+                          fontsize=8, color=text_colour, zorder=5)
+
+    readable_labels = [label_map.get(m, m) for m in available_metrics]
+    ax_a.set_xticks(range(n_metrics))
+    ax_a.set_xticklabels(readable_labels, rotation=45, ha='right',
+                         fontsize=FONT_TICK)
+    ax_a.set_yticks(range(n_metrics))
+    ax_a.set_yticklabels(readable_labels, fontsize=FONT_TICK)
+
+    cbar_a = figure.colorbar(im, ax=ax_a, shrink=0.8, label='Pearson r')
+    ax_a.set_title("(a) Metric Correlations", fontsize=FONT_TITLE,
+                   fontweight='bold', pad=12)
+
+    # --- Flag co-occurrence heatmap ---
+    if has_flags:
+        flag_label_map = {
+            'small_interface': 'Small Interface',
+            'sparse_interface': 'Sparse Interface',
+            'asymmetric_interface': 'Asymmetric',
+            'interface_better_than_bulk': 'Better Than Bulk',
+            'low_interface_confidence': 'Low Confidence',
+            'paradox_confident_disorder': 'Paradox',
+            'metric_disagreement': 'Metric Disagreement',
+        }
+
+        n_flags = len(available_flags)
+        co_occurrence = np.zeros((n_flags, n_flags), dtype=int)
+
+        # Convert flag columns to boolean
+        flag_matrix = df[available_flags].fillna(False)
+        # Handle string 'True'/'False' columns
+        for col in available_flags:
+            if flag_matrix[col].dtype == object:
+                flag_matrix[col] = flag_matrix[col].astype(str).str.lower() == 'true'
+            else:
+                flag_matrix[col] = flag_matrix[col].astype(bool)
+
+        for i in range(n_flags):
+            for j in range(n_flags):
+                co_occurrence[i, j] = (flag_matrix[available_flags[i]] &
+                                       flag_matrix[available_flags[j]]).sum()
+
+        im_b = ax_b.imshow(co_occurrence, cmap='YlOrRd', aspect='equal')
+
+        # Annotate with counts
+        for i in range(n_flags):
+            for j in range(n_flags):
+                val = co_occurrence[i, j]
+                text_colour = ('white' if val > co_occurrence.max() * 0.6
+                               else 'black')
+                ax_b.text(j, i, str(val), ha='center', va='center',
+                          fontsize=9, color=text_colour, fontweight='bold')
+
+        flag_labels = [flag_label_map.get(f, f) for f in available_flags]
+        ax_b.set_xticks(range(n_flags))
+        ax_b.set_xticklabels(flag_labels, rotation=45, ha='right',
+                             fontsize=FONT_TICK)
+        ax_b.set_yticks(range(n_flags))
+        ax_b.set_yticklabels(flag_labels, fontsize=FONT_TICK)
+
+        figure.colorbar(im_b, ax=ax_b, shrink=0.8, label='Co-occurrence Count')
+        ax_b.set_title("(b) Flag Co-occurrence", fontsize=FONT_TITLE,
+                       fontweight='bold', pad=12)
+
+    figure.suptitle("Metric Relationships and Flag Co-occurrence Patterns",
+                    fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '9_Correlation_Flags.png')
+
+
+# ============================================================================
+# Figure 10 - Chain-Count Quality Profile
+# ============================================================================
+
+def plot_fig10_chain_count_profile(df: pd.DataFrame,
+                                   density_mode: bool = False) -> None:
+    """Fig 10: Does prediction quality degrade for multi-chain complexes?
+
+    Panel (a): Composite score distributions by chain count (violin + strip).
+    Panel (b): ipTM vs pDockQ coloured by chain count.
+
+    Requires the n_chains column (added by the multi-chain pipeline fix).
+    Complexes are grouped into 2, 3, and 4+ chains.
+    """
+    required = ['n_chains', 'iptm', 'pdockq']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 10: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 10: no valid data.")
+        return
+
+    # Bin chain counts into interpretable groups
+    def chain_group(n):
+        if n <= 2:
+            return '2 chains'
+        elif n == 3:
+            return '3 chains'
+        else:
+            return '4+ chains'
+
+    plot_df['chain_group'] = plot_df['n_chains'].apply(chain_group)
+
+    group_order = ['2 chains', '3 chains', '4+ chains']
+    group_colours = {'2 chains': '#3498db', '3 chains': '#e67e22', '4+ chains': '#8e44ad'}
+
+    # Only keep groups that actually appear
+    present_groups = [g for g in group_order if (plot_df['chain_group'] == g).any()]
+    if len(present_groups) < 2:
+        print("  Skipping Fig 10: need at least 2 chain-count groups for comparison.")
+        return
+
+    has_composite = 'interface_confidence_score' in plot_df.columns
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # --- Panel (a): Composite score or ipTM distributions by chain group ---
+    metric_col = 'interface_confidence_score' if has_composite else 'iptm'
+    metric_label = 'Composite Score' if has_composite else 'ipTM'
+
+    group_data = []
+    group_labels = []
+    positions_a = []
+    for idx, group in enumerate(present_groups):
+        values = plot_df.loc[plot_df['chain_group'] == group, metric_col].dropna().values
+        if len(values) > 0:
+            group_data.append(values)
+            group_labels.append(f'{group}\n(n={len(values)})')
+            positions_a.append(idx)
+
+    if group_data:
+        vp = ax_a.violinplot(group_data, positions=positions_a,
+                             showmedians=True, showextrema=False)
+        for idx, body in enumerate(vp['bodies']):
+            grp = present_groups[idx]
+            body.set_facecolor(group_colours.get(grp, '#cccccc'))
+            body.set_alpha(0.6)
+        if 'cmedians' in vp:
+            vp['cmedians'].set_color('black')
+            vp['cmedians'].set_linewidth(2)
+            vp['cmedians'].set_zorder(10)
+
+        # Jittered strip overlay
+        for idx, data in enumerate(group_data):
+            jitter = np.random.normal(0, 0.06, size=len(data))
+            grp = present_groups[idx]
+            ax_a.scatter(positions_a[idx] + jitter, data,
+                         c=group_colours.get(grp, '#cccccc'),
+                         alpha=0.3, s=15, zorder=3, edgecolors='none')
+
+        ax_a.set_xticks(positions_a)
+        ax_a.set_xticklabels(group_labels, fontsize=FONT_AXIS_LABEL)
+
+        # Median annotation
+        medians = [np.median(d) for d in group_data]
+        median_text = " | ".join(
+            f"{present_groups[i]}: {medians[i]:.2f}" for i in range(len(medians))
+        )
+        ax_a.text(0.5, -0.12, median_text, transform=ax_a.transAxes,
+                  ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
+
+    _apply_common_style(ax_a, f"(a) {metric_label} by Chain Count",
+                        '', metric_label, grid=False)
+
+    # --- Panel (b): ipTM vs pDockQ coloured by chain count ---
+    # 2-chain complexes are rendered as a translucent background context layer;
+    # multi-chain groups (3, 4+) are plotted on top at full opacity.
+    n_panel_b = len(plot_df)
+    pt_size_b, _ = _adaptive_scatter_params(n_panel_b)
+
+    # Background layer: 2 chains (very low alpha)
+    if '2 chains' in present_groups:
+        subset_2 = plot_df[plot_df['chain_group'] == '2 chains']
+        _timed_scatter(ax_b, subset_2['iptm'], subset_2['pdockq'],
+                       n_points=n_panel_b, fig_label='Fig 10b',
+                       c=group_colours.get('2 chains', '#cccccc'),
+                       s=pt_size_b, alpha=0.12,
+                       edgecolors='none', linewidths=0, zorder=2,
+                       label=f'2 chains (n={len(subset_2)})')
+
+    # Foreground layer: multi-chain groups (full opacity)
+    for group in reversed([g for g in present_groups if g != '2 chains']):
+        subset = plot_df[plot_df['chain_group'] == group]
+        _timed_scatter(ax_b, subset['iptm'], subset['pdockq'],
+                       n_points=n_panel_b, fig_label='Fig 10b',
+                       c=group_colours.get(group, '#cccccc'),
+                       s=pt_size_b, alpha=1.0,
+                       edgecolors='white', linewidths=0.5, zorder=5,
+                       label=f'{group} (n={len(subset)})')
+    ax_b.legend(fontsize=FONT_TICK, loc='lower right', framealpha=0.9)
+
+    # Optional density contours
+    if density_mode:
+        _overlay_kde_contours(ax_b,
+                              plot_df['iptm'].values,
+                              plot_df['pdockq'].values)
+
+    ax_b.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    ax_b.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    ax_b.set_xlim(0.2, 1.05)
+    ax_b.set_ylim(-0.02, 0.8)
+
+    _apply_common_style(ax_b, "(b) Quality Landscape by Chain Count",
+                        'ipTM', 'pDockQ')
+
+    figure.suptitle("Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?",
+                    fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '10_Chain_Count_Profile.png')
+
+
+# ============================================================================
+# PAE Heatmaps (on-demand, --pae-heatmaps)
+# ============================================================================
+
+def load_pae_matrix_from_pkl(pkl_path: str) -> Optional[np.ndarray]:
+    """Load a PAE matrix from an AlphaFold2 PKL file.
+
+    Delegates to read_af2_nojax for JAX-free PKL loading.
+
+    Args:
+        pkl_path: Path to the PKL file.
+
+    Returns:
+        2D numpy array of PAE values, or None if not present.
+    """
+    data = load_pkl_without_jax(pkl_path)
+    if 'predicted_aligned_error' not in data:
+        return None
+    return np.asarray(data['predicted_aligned_error'])
+
+
+def extract_readable_title(pkl_filename: str) -> str:
+    """Shorten a PKL filename into a readable plot title.
+
+    Args:
+        pkl_filename: The basename of the PKL file.
+
+    Returns:
+        A shortened, readable title string.
+    """
+    if "_result_model" in pkl_filename:
+        return pkl_filename.split("_result_model")[0]
+    return pkl_filename.replace('.pkl', '')
+
+
+def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
+    """Generate and save a PAE heatmap for a single AlphaFold2 prediction.
+
+    Uses Greens_r colourmap, clamped to 0-30 Å.  On-demand only (--pae-heatmaps).
+
+    When a matching PDB file is found alongside the PKL, chain boundaries
+    are drawn as dashed lines and the best interacting chain pair's
+    cross-chain PAE block is highlighted with a translucent rectangle.
+
+    Args:
+        pkl_path: Full path to the .pkl file.
+        models_dir: Directory to save the heatmap PNG alongside the PKL files.
+    """
+    filename = os.path.basename(pkl_path)
+    readable_title = extract_readable_title(filename)
+    output_filename = f"{filename.replace('.pkl', '')}_PAE.png"
+    output_path = os.path.join(models_dir, output_filename)
+
+    try:
+        pae_matrix = load_pae_matrix_from_pkl(pkl_path)
+    except Exception as error:
+        print(f"  Error processing {pkl_path}: {error}")
+        return
+
+    if pae_matrix is None:
+        print(f"  Skipping {filename}: No PAE data found.")
+        return
+
+    figure, axes = plt.subplots(figsize=PAE_FIGURE_SIZE)
+    image = axes.imshow(pae_matrix, cmap='Greens_r',
+                        vmin=PAE_VMIN, vmax=PAE_VMAX,
+                        interpolation='nearest')
+    colour_bar = figure.colorbar(image, ax=axes, fraction=0.046, pad=0.04)
+    colour_bar.set_label('Expected Position Error (Å)', rotation=270,
+                         labelpad=15)
+
+    # ── Chain boundary lines and best-pair highlighting ──
+    # Look for a matching PDB file in the same directory
+    pdb_candidates = [
+        pkl_path.replace('.pkl', '.pdb'),
+        pkl_path.replace('_result_', '_relaxed_').replace('.pkl', '.pdb'),
+    ]
+    pdb_path = None
+    for candidate in pdb_candidates:
+        if os.path.isfile(candidate):
+            pdb_path = candidate
+            break
+
+    if pdb_path is not None:
+        try:
+            from pdockq import read_pdb_with_chain_info, compute_pae_chain_offsets, find_best_chain_pair
+            from pdockq import (read_pdb_with_chain_info_New as read_pdb_with_chain_info, compute_pae_chain_offsets_New as compute_pae_chain_offsets, find_best_chain_pair_New as find_best_chain_pair) # Import aliasing to avoid naming conflicts with old pdockq versions
+
+            chain_info = read_pdb_with_chain_info(pdb_path)
+            offsets = compute_pae_chain_offsets(chain_info)
+            n_total = pae_matrix.shape[0]
+
+            # Draw chain boundary lines
+            boundary_positions = []
+            chain_labels_for_axis = []
+            for ch in chain_info.chain_ids:
+                start = offsets[ch]
+                end = start + chain_info.ca_counts[ch]
+                midpoint = (start + end) / 2
+                chain_labels_for_axis.append((midpoint, ch))
+                if start > 0:
+                    boundary_positions.append(start)
+
+            for bpos in boundary_positions:
+                axes.axhline(y=bpos - 0.5, color='white', linestyle='--',
+                             linewidth=1.5, alpha=0.8)
+                axes.axvline(x=bpos - 0.5, color='white', linestyle='--',
+                             linewidth=1.5, alpha=0.8)
+
+            # Add chain ID labels along the top edge
+            if len(chain_info.chain_ids) > 1:
+                for midpoint, ch_id in chain_labels_for_axis:
+                    axes.text(midpoint, -0.02, ch_id, transform=axes.get_xaxis_transform(),
+                              ha='center', va='bottom', fontsize=10, fontweight='bold',
+                              color='#2c3e50')
+
+            # Highlight best-pair cross-chain block
+            if len(chain_info.chain_ids) >= 2:
+                ch_a, ch_b, contact_result = find_best_chain_pair(chain_info, t=8)
+                off_a = offsets[ch_a]
+                off_b = offsets[ch_b]
+                len_a = chain_info.ca_counts[ch_a]
+                len_b = chain_info.ca_counts[ch_b]
+
+                # Highlight both cross-chain rectangles (A→B and B→A)
+                for rect_x, rect_y, rect_w, rect_h in [
+                    (off_b - 0.5, off_a - 0.5, len_b, len_a),
+                    (off_a - 0.5, off_b - 0.5, len_a, len_b),
+                ]:
+                    rect = plt.Rectangle(
+                        (rect_x, rect_y), rect_w, rect_h,
+                        linewidth=2, edgecolor='#e74c3c', facecolor='none',
+                        linestyle='-', alpha=0.8, zorder=5,
+                    )
+                    axes.add_patch(rect)
+
+                readable_title += f'  (best pair: {ch_a}–{ch_b})'
+
+        except Exception:
+            pass  # Gracefully degrade to plain heatmap
+
+    axes.set_title(f'PAE Matrix: {readable_title}', fontsize=12,
+                   fontweight='bold')
+    axes.set_xlabel('Residue Index (Scored)')
+    axes.set_ylabel('Residue Index (Aligned)')
+
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=OUTPUT_DPI)
+    plt.close(figure)
+    print(f"  Saved PAE Plot: {output_filename}")
+
+
+# ============================================================================
+# Paradox Detection Helper
+# ============================================================================
+
+def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
+    """Identify paradox complexes in a DataFrame.
+
+    Paradox definition: ipTM >= 0.75 AND pDockQ >= 0.5 AND disorder >= 0.30.
+
+    These are complexes where both headline quality metrics indicate a
+    confident interaction despite substantial structural disorder — the
+    biological hallmark of intrinsically disordered proteins that undergo
+    disorder-to-order transitions upon binding.
+
+    Returns:
+        Boolean Series aligned with the DataFrame index.
+    """
+    mask = pd.Series(False, index=df.index)
+
+    required = ['iptm', 'pdockq', 'plddt_below50_fraction']
+    if not all(col in df.columns for col in required):
+        return mask
+
+    mask = (
+        (df['iptm'] >= IPTM_HIGH) &
+        (df['pdockq'] >= PDOCKQ_HIGH) &
+        (df['plddt_below50_fraction'] >= DISORDER_SUBSTANTIAL)
+    )
+    return mask.fillna(False)
+
+
+# ============================================================================
+# Main Execution
+# ============================================================================
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="AlphaFold2 Analysis Visualisation Tool (V2)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  %(prog)s analysis_results.csv
+  %(prog)s analysis_results.csv --output-dir ./figures
+  %(prog)s analysis_results.csv --density
+  %(prog)s analysis_results.csv --pae-heatmaps C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models
+  %(prog)s analysis_results.csv --pae-heatmaps /path/to/models --limit 50
+""")
+
+    # --- Positional: CSV path ---
+    parser.add_argument(
+        'csv', type=str,
+        help='Path to the analysis_results.csv produced by toolkit.py.')
+
+    # --- Optional: output directory ---
+    parser.add_argument(
+        '--output-dir', type=str, default=None,
+        help='Directory for output figures. Defaults to ./Output/')
+
+    # --- Optional: PAE heatmaps (requires models directory) ---
+    parser.add_argument(
+        '--pae-heatmaps', type=str, default=None, metavar='MODELS_DIR',
+        help='Generate per-complex PAE heatmaps from PKL files in MODELS_DIR.')
+    parser.add_argument(
+        '--limit', type=int, default=None,
+        help='Cap the number of PAE heatmaps generated.')
+
+    # --- Optional: rendering flags ---
+    parser.add_argument(
+        '--disorder-scatter', action='store_true',
+        help='Also produce disorder-coloured quality scatter (Fig 1b).')
+    parser.add_argument(
+        '--density', action='store_true',
+        help='Add KDE density contour overlays to scatter figures. '
+             'Contour lines show percentile-based density levels (10%%-90%%).')
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Generate all visualisations based on available data columns."""
+    global OUTPUT_DIR
+
+    args = parse_arguments()
+
+    # ------------------------------------------------------------------
+    # Resolve paths
+    # ------------------------------------------------------------------
+    csv_path = os.path.abspath(args.csv)
+    OUTPUT_DIR = os.path.abspath(args.output_dir) if args.output_dir else os.path.join(os.getcwd(), "Output")
+    models_dir = os.path.abspath(args.pae_heatmaps) if args.pae_heatmaps else None
+
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    print("=" * 60)
+    print("  AlphaFold2 Analysis Visualisation Tool (V2)")
+    print("=" * 60)
+    print(f"CSV file:         {csv_path}")
+    print(f"Output directory: {OUTPUT_DIR}")
+    if models_dir:
+        print(f"Models directory: {models_dir}")
+    if args.density:
+        print("Rendering mode:   DENSITY (KDE contour overlays enabled)")
+    print()
+
+    # ------------------------------------------------------------------
+    # Load CSV
+    # ------------------------------------------------------------------
+    if not os.path.exists(csv_path):
+        print(f"Error: {csv_path} not found.")
+        return
+
+    print(f"Loading data from {csv_path}...")
+    df = load_data(csv_path)
+    print(f"Loaded {len(df)} valid complex records.")
+
+    if len(df) == 0:
+        print("No valid data found. Exiting.")
+        return
+
+    # ------------------------------------------------------------------
+    # Detect available columns
+    # ------------------------------------------------------------------
+    col_flags = detect_columns(df)
+    print(f"\nColumn detection:")
+    print(f"  V2 quality tiers:  {'Yes' if col_flags['has_v2_data'] else 'No'}")
+    print(f"  Interface data:    {'Yes' if col_flags['has_interface_data'] else 'No'}")
+    print(f"  Interface PAE:     {'Yes' if col_flags['has_pae_interface'] else 'No'}")
+    print(f"  Composite score:   {'Yes' if col_flags['has_composite'] else 'No'}")
+    print(f"  Chain info:        {'Yes' if col_flags['has_chain_info'] else 'No'}")
+
+    # Chain count summary
+    if col_flags['has_chain_info']:
+        chain_counts = df['n_chains'].value_counts().sort_index()
+        chain_parts = [f"{int(n)}-chain: {count}" for n, count in chain_counts.items()]
+        print(f"  Chain breakdown:   {', '.join(chain_parts)}")
+
+    # Console log replacing old pLDDT source bar chart (dropped Fig 4)
+    if 'plddt_source' in df.columns:
+        source_counts = df['plddt_source'].value_counts()
+        source_parts = [f"{count} {source}" for source, count in source_counts.items()]
+        print(f"\n  pLDDT source: {', '.join(source_parts)}")
+
+    figures_generated = 0
+    print("\n--- Generating Figures ---\n")
+
+    # ------------------------------------------------------------------
+    # ALWAYS generated: Fig 1 and Fig 2
+    # ------------------------------------------------------------------
+    print("Fig 1 - Quality Scatter (ipTM vs pDockQ)")
+    plot_fig1_quality_scatter(df, col_flags, density_mode=args.density)
+    figures_generated += 1
+
+    print("Fig 2 - Global PAE Health Check")
+    plot_fig2_pae_health_check(df)
+    figures_generated += 1
+
+    # Supplementary Fig 1b (only when --disorder-scatter AND V2 data present)
+    if args.disorder_scatter and col_flags['has_v2_data']:
+        print("Fig 1b - Disorder Scatter (supplementary)")
+        plot_fig1b_disorder_scatter(df, density_mode=args.density)
+        figures_generated += 1
+
+    # ------------------------------------------------------------------
+    # Interface figures (require V2 + interface data)
+    # ------------------------------------------------------------------
+    if col_flags['has_v2_data'] and col_flags['has_interface_data']:
+        print("Fig 3 - Interface PAE by Tier")
+        plot_fig3_interface_pae_by_tier(df)
+        figures_generated += 1
+
+        print("Fig 4 - Composite & Tier Validation")
+        plot_fig4_composite_validation(df, density_mode=args.density)
+        figures_generated += 1
+
+        print("Fig 5 - Interface vs Bulk")
+        plot_fig5_interface_vs_bulk(df, density_mode=args.density)
+        figures_generated += 1
+
+        print("Fig 6 - Paradox Spotlight")
+        plot_fig6_paradox_spotlight(df)
+        figures_generated += 1
+
+        print("Fig 7 - Homo vs Hetero")
+        plot_fig7_homo_vs_hetero(df)
+        figures_generated += 1
+
+        print("Fig 8 - Metric Disagreement")
+        plot_fig8_metric_disagreement(df, density_mode=args.density)
+        figures_generated += 1
+
+        print("Fig 9 - Correlation & Flags")
+        plot_fig9_correlation_flags(df)
+        figures_generated += 1
+    else:
+        print("\nInterface figures (3-9) require V2 quality tiers AND interface")
+        print("columns in the CSV. Re-run the batch script with interface analysis")
+        print("enabled to generate the full 44-column CSV.")
+
+    # ------------------------------------------------------------------
+    # Chain-count figure (requires n_chains column from multi-chain fix)
+    # ------------------------------------------------------------------
+    if col_flags['has_chain_info']:
+        print("Fig 10 - Chain-Count Quality Profile")
+        plot_fig10_chain_count_profile(df, density_mode=args.density)
+        figures_generated += 1
+
+    # ------------------------------------------------------------------
+    # On-demand: Per-complex PAE heatmaps
+    # ------------------------------------------------------------------
+    if models_dir:
+        if not os.path.isdir(models_dir):
+            print(f"\nError: Models directory not found: {models_dir}")
+        else:
+            pkl_search_pattern = os.path.join(models_dir, "*.pkl")
+            pkl_file_paths = sorted(glob.glob(pkl_search_pattern))
+
+            if pkl_file_paths:
+                total_available = len(pkl_file_paths)
+
+                if args.limit is not None:
+                    pkl_file_paths = pkl_file_paths[:args.limit]
+                    print(f"\nGenerating PAE heatmaps for {len(pkl_file_paths)} "
+                          f"of {total_available} PKL files (--limit {args.limit})...")
+                else:
+                    print(f"\nGenerating PAE heatmaps for all {total_available} "
+                          f"PKL files...")
+                    if total_available > 100:
+                        print(f"  Warning: {total_available} heatmaps will take a "
+                              f"while. Consider using --limit.")
+
+                for pkl_path in pkl_file_paths:
+                    plot_pae_matrix(pkl_path, models_dir)
+            else:
+                print(f"\nNo .pkl files found in {models_dir}")
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    print(f"\n{'=' * 60}")
+    print(f"  Generated {figures_generated} figures. Saved to {OUTPUT_DIR}")
+    print(f"{'=' * 60}")
+
+
+if __name__ == "__main__":
+    main()
