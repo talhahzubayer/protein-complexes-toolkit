@@ -1,6 +1,6 @@
 # Protein Complexes Toolkit
 
-**A Python toolkit to facilitate the analysis of protein complexes and target drug discovery
+A Python toolkit to facilitate the analysis of protein complexes and target drug discovery
 
 MSc Applied Bioinformatics Research Project - King's College London
 
@@ -60,15 +60,15 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
 
 ### Script Descriptions
 
-**read_af2_nojax.py** - Loads AlphaFold2 result PKL files using module-level JAX mocking, so JAX does not need to be installed. Extracts ipTM, pTM, ranking_confidence, per-residue pLDDT arrays, and PAE matrices. Supports `.pkl`, `.pkl.gz`, and `.pkl.bz2` formats.
+**read_af2_nojax.py**: Loads AlphaFold2 result PKL files using module-level JAX mocking, so JAX does not need to be installed. Extracts ipTM, pTM, ranking_confidence, per-residue pLDDT arrays, and PAE matrices. Supports `.pkl`, `.pkl.gz`, and `.pkl.bz2` formats.
 
-**pdockq.py** - Calculates predicted DockQ scores using the FoldDock sigmoid model (L=0.724, x0=152.611, k=0.052, b=0.018). Provides three PDB readers at increasing detail levels. Finds the best interacting chain pair in multi-chain complexes and returns a `ContactResult` dataclass with full contact geometry.
+**pdockq.py**: Calculates predicted DockQ scores using the FoldDock sigmoid model (L=0.724, x0=152.611, k=0.052, b=0.018). Provides three PDB readers at increasing detail levels. Finds the best interacting chain pair in multi-chain complexes and returns a `ContactResult` dataclass with full contact geometry.
 
-**interface_analysis.py** - 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
+**interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 46-column CSV and optional JSONL interface export. Implements 2 quality classification schemes.
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 46-column CSV and optional JSONL interface export. Implements 2 quality classification schemes.
 
-**visualise_results.py** - Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
+**visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
 
 
