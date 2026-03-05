@@ -35,7 +35,7 @@ def test_data_dir():
 
 
 # --- Reference Complex 1: heterodimer, old naming convention ---
-# A0A0B4J2C3_P24534 — ~269 KB PDB, fast to parse
+# A0A0B4J2C3_P24534 - ~269 KB PDB, fast to parse
 
 @pytest.fixture(scope="session")
 def ref_pdb_1(test_data_dir):
@@ -54,7 +54,7 @@ def ref_pkl_1(test_data_dir):
 
 
 # --- Reference Complex 2: heterodimer, new naming convention ---
-# A0A0A0MQZ0_P40933 — _relaxed_model_ / _result_model_ naming
+# A0A0A0MQZ0_P40933 - _relaxed_model_ / _result_model_ naming
 
 @pytest.fixture(scope="session")
 def ref_pdb_2(test_data_dir):
@@ -73,7 +73,7 @@ def ref_pkl_2(test_data_dir):
 
 
 # --- Reference Complex 3: homodimer ---
-# A0A0H3C8Q1_A0A0H3C8Q1 — protein_a == protein_b
+# A0A0H3C8Q1_A0A0H3C8Q1 - protein_a == protein_b
 
 @pytest.fixture(scope="session")
 def ref_pdb_homodimer(test_data_dir):
@@ -92,7 +92,7 @@ def ref_pkl_homodimer(test_data_dir):
 
 
 # --- Reference Complex 4: isoform dash ID, cross-convention ---
-# P63208-1_Q6PJ61 — old PDB name, new PKL name
+# P63208-1_Q6PJ61 - old PDB name, new PKL name
 
 @pytest.fixture(scope="session")
 def ref_pdb_isoform(test_data_dir):
@@ -187,7 +187,7 @@ def chain_offsets_1(chain_info_1):
     return compute_pae_chain_offsets_New(chain_info_1)
 
 
-# ── Loaded Data Fixtures (Complex 2 — new naming) ────────────────
+# ── Loaded Data Fixtures (Complex 2 - new naming) ────────────────
 
 @pytest.fixture(scope="session")
 def loaded_pkl_2(ref_pkl_2):

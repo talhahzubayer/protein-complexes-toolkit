@@ -1,5 +1,5 @@
 """
-Tests for database_loaders.py — PPI database parsing and standardisation.
+Tests for database_loaders.py - PPI database parsing and standardisation.
 
 Uses small excerpt files in tests/test_data/databases/ for offline testing.
 Full-file tests are marked @pytest.mark.slow.
@@ -474,7 +474,7 @@ class TestCrossDatabaseOverlap:
 
         STRING has 9606.ENSP00000269305 - 9606.ENSP00000258149
         BioGRID has P04637 - Q00987
-        After mapping ENSP→UniProt, normalise_pair should produce
+        After mapping ENSP->UniProt, normalise_pair should produce
         the same canonical pair ('P04637', 'Q00987').
 
         Note: Some pairs (e.g. TP53-BRCA1) may NOT match across databases
@@ -491,7 +491,7 @@ class TestCrossDatabaseOverlap:
 
         HuRI has ENSG00000141510 - ENSG00000135679
         BioGRID has P04637 - Q00987
-        The ENSG→ENSP→UniProt chain should resolve correctly.
+        The ENSG->ENSP->UniProt chain should resolve correctly.
         """
         from overlap_analysis import normalise_pair
         tp53_mdm2 = normalise_pair('P04637', 'Q00987')
@@ -521,7 +521,7 @@ class TestCrossDatabaseOverlap:
 
         HuMAP has (P22607-1, P28482) while BioGRID has (P22607, P54764).
         The isoform-specific pair should NOT be conflated with the
-        canonical pair — they are stored as distinct strings.
+        canonical pair - they are stored as distinct strings.
         """
         from overlap_analysis import normalise_pair
         isoform_pair = normalise_pair('P22607-1', 'P28482')
@@ -557,3 +557,134 @@ class TestCrossDatabaseOverlap:
         for pair in mapped_pair_sets['HuRI']:
             assert not pair[0].startswith('ENSG'), f"Unmapped ENSG in HuRI overlap: {pair}"
             assert not pair[1].startswith('ENSG'), f"Unmapped ENSG in HuRI overlap: {pair}"
+
+
+# ── Base-Level Overlap Tests ────────────────────────────────────────
+
+@pytest.mark.slow
+@pytest.mark.database
+class TestBaseLevelOverlap:
+    """Tests for base-accession level pair normalisation and overlap.
+
+    At base level, isoform suffixes (e.g. -1, -2) are stripped before
+    normalisation. This should increase overlap counts compared to
+    isoform-specific matching.
+    """
+
+    def test_normalise_pair_base_strips_isoform(self):
+        """normalise_pair_base strips -N isoform suffixes."""
+        from overlap_analysis import normalise_pair_base
+        result = normalise_pair_base('P22607-1', 'P28482')
+        assert result == ('P22607', 'P28482')
+
+    def test_normalise_pair_base_no_isoform_unchanged(self):
+        """normalise_pair_base leaves non-isoform IDs unchanged."""
+        from overlap_analysis import normalise_pair_base, normalise_pair
+        result_base = normalise_pair_base('P04637', 'Q00987')
+        result_iso = normalise_pair('P04637', 'Q00987')
+        assert result_base == result_iso
+
+    def test_normalise_pair_base_both_isoforms(self):
+        """normalise_pair_base handles isoform suffixes on both IDs."""
+        from overlap_analysis import normalise_pair_base
+        result = normalise_pair_base('Q9UKT4-2', 'P22607-1')
+        assert result == ('P22607', 'Q9UKT4')
+
+    def test_extract_pair_set_base_fewer_or_equal_pairs(self):
+        """Base-level pair set size <= isoform-level (merging reduces count)."""
+        from overlap_analysis import extract_pair_set, extract_pair_set_base
+
+        # Build a DataFrame with isoform-bearing pairs
+        df = pd.DataFrame({
+            'protein_a': ['P22607-1', 'P22607', 'P04637'],
+            'protein_b': ['P28482',   'P28482', 'Q00987'],
+        })
+        iso_pairs = extract_pair_set(df)
+        base_pairs = extract_pair_set_base(df)
+        # P22607-1/P28482 and P22607/P28482 collapse to one base pair
+        assert len(base_pairs) <= len(iso_pairs)
+        assert len(base_pairs) == 2  # (P22607,P28482) + (P04637,Q00987)
+
+    def test_base_level_overlap_gte_isoform_level(self):
+        """Base-level overlap >= isoform-level for real test databases.
+
+        Stripping isoform suffixes can only increase or maintain overlap
+        (more pairs match across databases when isoforms are collapsed).
+        """
+        from id_mapper import IDMapper, map_dataframe_to_uniprot
+        from overlap_analysis import (
+            extract_pair_set, extract_pair_set_base, compute_overlaps,
+        )
+
+        aliases_path = TEST_DB_DIR / "test_aliases.txt"
+        mapper = IDMapper(str(aliases_path))
+
+        string_df = load_string(str(TEST_DB_DIR / "test_string_links.txt"))
+        biogrid_df = load_biogrid(str(TEST_DB_DIR / "test_biogrid.tab3.txt"))
+
+        string_mapped = map_dataframe_to_uniprot(string_df, mapper)
+
+        # Isoform-specific
+        iso_sets = {
+            'STRING': extract_pair_set(string_mapped, col_a='uniprot_a', col_b='uniprot_b'),
+            'BioGRID': extract_pair_set(biogrid_df),
+        }
+        iso_stats = compute_overlaps(iso_sets)
+
+        # Base-accession
+        base_sets = {
+            'STRING': extract_pair_set_base(string_mapped, col_a='uniprot_a', col_b='uniprot_b'),
+            'BioGRID': extract_pair_set_base(biogrid_df),
+        }
+        base_stats = compute_overlaps(base_sets)
+
+        assert base_stats['pairwise'][('STRING', 'BioGRID')] >= \
+               iso_stats['pairwise'][('STRING', 'BioGRID')]
+
+
+@pytest.mark.slow
+@pytest.mark.database
+class TestOverlapReport:
+    """Tests for the --report CLI flag that writes stats to a file."""
+
+    def test_report_file_written(self, tmp_path):
+        """--report writes a text file with overlap statistics."""
+        from overlap_analysis import compute_overlaps, print_overlap_summary
+
+        # Create minimal pair sets
+        pair_sets = {
+            'DB1': {('A', 'B'), ('C', 'D')},
+            'DB2': {('A', 'B'), ('E', 'F')},
+        }
+        stats = compute_overlaps(pair_sets)
+
+        report_path = tmp_path / "test_report.txt"
+        with open(report_path, 'w') as f:
+            f.write("PPI Database Overlap Report\n")
+            f.write("=" * 40 + "\n")
+            print_overlap_summary(stats, file=f)
+
+        assert report_path.exists()
+        content = report_path.read_text()
+        assert 'PPI Database Overlap Summary' in content
+        assert 'DB1' in content
+        assert 'DB2' in content
+        assert 'DB1 & DB2: 1' in content  # ('A','B') is shared
+
+    def test_report_contains_unique_counts(self, tmp_path):
+        """Report file contains per-database unique pair counts."""
+        from overlap_analysis import compute_overlaps, print_overlap_summary
+
+        pair_sets = {
+            'DB1': {('A', 'B'), ('C', 'D')},
+            'DB2': {('A', 'B'), ('E', 'F')},
+        }
+        stats = compute_overlaps(pair_sets)
+
+        report_path = tmp_path / "test_report.txt"
+        with open(report_path, 'w') as f:
+            print_overlap_summary(stats, file=f)
+
+        content = report_path.read_text()
+        assert 'DB1 only: 1' in content  # (C,D) unique to DB1
+        assert 'DB2 only: 1' in content  # (E,F) unique to DB2

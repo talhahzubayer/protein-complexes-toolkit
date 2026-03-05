@@ -1,5 +1,5 @@
 """
-Tests for id_mapper.py — ID cross-referencing and resolution.
+Tests for id_mapper.py - ID cross-referencing and resolution.
 
 Uses test_aliases.txt excerpt in tests/test_data/databases/ for offline testing.
 """
@@ -14,6 +14,8 @@ from id_mapper import (
     split_isoform,
     detect_id_type,
     map_dataframe_to_uniprot,
+    export_lookup_table,
+    build_uniprot_lookup,
 )
 
 # ── Test Data Paths ──────────────────────────────────────────────────
@@ -216,7 +218,7 @@ class TestIDMapper:
 
 @pytest.mark.slow
 class TestIDMapperEdgeCases:
-    """Edge case tests for IDMapper — isoforms, multi-accession, splice variants."""
+    """Edge case tests for IDMapper - isoforms, multi-accession, splice variants."""
 
     @pytest.fixture(scope="class")
     def mapper(self):
@@ -347,3 +349,148 @@ class TestMapDataframeToUniprot:
         result = map_dataframe_to_uniprot(df, mapper)
         assert 'source' in result.columns
         assert result['source'].iloc[0] == 'STRING'
+
+
+# ── Secondary Accessions & Lookup Table Tests ────────────────────────
+
+@pytest.mark.slow
+@pytest.mark.database
+class TestSecondaryAccessions:
+    """Tests for get_secondary_accessions() and enhanced lookup table."""
+
+    @pytest.fixture(scope="class")
+    def mapper(self):
+        assert TEST_ALIASES.exists(), f"Test aliases not found: {TEST_ALIASES}"
+        return IDMapper(str(TEST_ALIASES))
+
+    def test_secondary_accessions_returns_remainder(self, mapper):
+        """TP53 (ENSP00000269305) has multiple accessions; secondary = all but first."""
+        all_acc = mapper.ensembl_to_uniprot("ENSP00000269305")
+        secondary = mapper.get_secondary_accessions("ENSP00000269305")
+        if len(all_acc) >= 2:
+            assert secondary == all_acc[1:]
+            assert all_acc[0] not in secondary
+
+    def test_secondary_accessions_single_mapping_empty(self, mapper):
+        """ENSP with only one UniProt mapping returns empty list."""
+        # ARF5 (ENSP00000000233) maps to P84085 - may have only one mapping
+        all_acc = mapper.ensembl_to_uniprot("ENSP00000000233")
+        secondary = mapper.get_secondary_accessions("ENSP00000000233")
+        if len(all_acc) == 1:
+            assert secondary == []
+        else:
+            assert len(secondary) == len(all_acc) - 1
+
+    def test_secondary_accessions_unknown_ensp(self, mapper):
+        """Unknown ENSP returns empty list."""
+        assert mapper.get_secondary_accessions("ENSP99999999999") == []
+
+    def test_secondary_accessions_accepts_prefix(self, mapper):
+        """Handles 9606. prefix correctly."""
+        result = mapper.get_secondary_accessions("9606.ENSP00000269305")
+        all_acc = mapper.ensembl_to_uniprot("ENSP00000269305")
+        if len(all_acc) >= 2:
+            assert result == all_acc[1:]
+
+    def test_get_protein_name(self, mapper):
+        """Protein name lookup returns a string or None."""
+        name = mapper.get_protein_name("ENSP00000269305")
+        # May or may not be in the test excerpt
+        assert name is None or isinstance(name, str)
+
+
+@pytest.mark.slow
+@pytest.mark.database
+class TestExportLookupTable:
+    """Tests for the enhanced export_lookup_table() with primary/secondary columns."""
+
+    @pytest.fixture(scope="class")
+    def mapper(self):
+        assert TEST_ALIASES.exists()
+        return IDMapper(str(TEST_ALIASES))
+
+    def test_export_creates_file(self, mapper, tmp_path):
+        """Export produces a CSV file."""
+        out = tmp_path / "lookup.csv"
+        export_lookup_table(mapper, str(out))
+        assert out.exists()
+
+    def test_export_has_new_columns(self, mapper, tmp_path):
+        """Exported CSV has the enhanced column structure."""
+        out = tmp_path / "lookup.csv"
+        export_lookup_table(mapper, str(out))
+        import csv
+        with open(out, encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            headers = reader.fieldnames
+        expected = [
+            'ensembl_protein_id', 'primary_uniprot', 'base_accession',
+            'secondary_accessions', 'ensembl_gene_id', 'gene_symbol',
+            'protein_name',
+        ]
+        assert headers == expected
+
+    def test_export_primary_is_first_accession(self, mapper, tmp_path):
+        """primary_uniprot matches the first entry from ensembl_to_uniprot()."""
+        out = tmp_path / "lookup.csv"
+        export_lookup_table(mapper, str(out))
+        import csv
+        with open(out, encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['ensembl_protein_id'] == 'ENSP00000269305':
+                    assert row['primary_uniprot'] == 'P04637'
+                    break
+
+    def test_export_base_accession_strips_isoform(self, mapper, tmp_path):
+        """base_accession strips isoform suffix from primary_uniprot."""
+        out = tmp_path / "lookup.csv"
+        export_lookup_table(mapper, str(out))
+        import csv
+        with open(out, encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                primary = row['primary_uniprot']
+                base = row['base_accession']
+                if primary:
+                    assert '-' not in base or not base.rsplit('-', 1)[1].isdigit()
+
+
+@pytest.mark.slow
+@pytest.mark.database
+class TestBuildUniprotLookup:
+    """Tests for build_uniprot_lookup() convenience function."""
+
+    @pytest.fixture(scope="class")
+    def mapper(self):
+        assert TEST_ALIASES.exists()
+        return IDMapper(str(TEST_ALIASES))
+
+    @pytest.fixture(scope="class")
+    def lookup(self, mapper):
+        return build_uniprot_lookup(mapper)
+
+    def test_lookup_is_dict(self, lookup):
+        assert isinstance(lookup, dict)
+        assert len(lookup) > 0
+
+    def test_lookup_has_expected_keys(self, lookup):
+        """Each entry has the expected metadata fields."""
+        for acc, info in list(lookup.items())[:5]:
+            assert 'gene_symbol' in info
+            assert 'protein_name' in info
+            assert 'ensembl_protein_id' in info
+            assert 'ensembl_gene_id' in info
+
+    def test_lookup_contains_tp53(self, lookup):
+        """P04637 (TP53) is in the lookup."""
+        assert 'P04637' in lookup
+        assert lookup['P04637']['gene_symbol'] == 'TP53'
+
+    def test_secondary_points_to_same_info(self, lookup, mapper):
+        """Secondary accessions for TP53 point to the same ENSP info."""
+        secondary = mapper.get_secondary_accessions("ENSP00000269305")
+        primary_info = lookup.get('P04637')
+        for acc in secondary:
+            if acc in lookup:
+                assert lookup[acc]['ensembl_protein_id'] == primary_info['ensembl_protein_id']

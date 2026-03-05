@@ -2,7 +2,7 @@
 Cross-module integration tests spanning the full pipeline.
 
 These tests verify that data flows correctly between modules:
-  read_af2_nojax → pdockq → interface_analysis → toolkit
+  read_af2_nojax -> pdockq -> interface_analysis -> toolkit
 """
 
 import csv
@@ -44,16 +44,16 @@ class TestFullPipeline:
         self, ref_pdb_1, ref_pkl_1, loaded_pkl_1, pae_matrix_1,
         chain_info_1, chain_offsets_1, contact_result_1
     ):
-        """Full pipeline for one complex — every module contributes."""
-        # Step 1: PKL → metrics
+        """Full pipeline for one complex - every module contributes."""
+        # Step 1: PKL -> metrics
         metrics = extract_metrics(loaded_pkl_1)
         assert 'iptm' in metrics
         assert 'pae_mean' in metrics
 
-        # Step 2: PDB → chain info → contacts
+        # Step 2: PDB -> chain info -> contacts
         assert contact_result_1.n_interface_contacts > 0
 
-        # Step 3: Contacts + PAE → interface analysis
+        # Step 3: Contacts + PAE -> interface analysis
         ch_a, ch_b = chain_info_1.chain_ids[0], chain_info_1.chain_ids[1]
         result = analyse_interface_from_contact_result(
             contact_result_1,
@@ -119,7 +119,7 @@ class TestPaeDimensionsMatchChainInfo:
 
 
 class TestCsvRoundtrip:
-    """Test process → write CSV → read back."""
+    """Test process -> write CSV -> read back."""
 
     def test_roundtrip(self, test_output_dir, ref_pdb_1, ref_pkl_1):
         file_paths = {'pdb': ref_pdb_1, 'pkl': ref_pkl_1}
@@ -139,7 +139,7 @@ class TestCsvRoundtrip:
 
 
 class TestFindPairedAndProcess:
-    """Test file discovery → processing pipeline."""
+    """Test file discovery -> processing pipeline."""
 
     def test_find_and_process_two(self, test_data_dir):
         from toolkit import find_paired_data_files
@@ -169,7 +169,7 @@ class TestNamingConventionsAgree:
 
 
 class TestCbToCaMapNonTrivial:
-    """Verify CB→CA maps are functional in PAE extraction."""
+    """Verify CB->CA maps are functional in PAE extraction."""
 
     def test_cb_to_ca_map_used(self, chain_info_1, contact_result_1, pae_matrix_1, chain_offsets_1):
         ch_a, ch_b = chain_info_1.chain_ids[0], chain_info_1.chain_ids[1]

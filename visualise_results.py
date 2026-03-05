@@ -198,7 +198,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
     (genuine zero-contact complexes are informative for diagnostics).
 
     Also performs:
-      - Case normalisation on complex_type (Homodimer → homodimer).
+      - Case normalisation on complex_type (Homodimer -> homodimer).
       - One-hot expansion of the comma-separated interface_flags column
         so that downstream figures (e.g. Fig 9b) can reference individual
         flag boolean columns directly.
@@ -431,7 +431,7 @@ def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict,
                            alpha=pt_alpha, edgecolors='white',
                            linewidths=0.5, zorder=3, label=tier)
 
-        # Unclassified (missing PAE → no tier)
+        # Unclassified (missing PAE -> no tier)
         unclassified = df[df['quality_tier_v2'].isna()]
         if len(unclassified) > 0:
             axes.scatter(unclassified['iptm'], unclassified['pdockq'],
@@ -717,9 +717,9 @@ def plot_fig4_composite_validation(df: pd.DataFrame,
 
     # Decision threshold lines
     thresholds = [
-        (0.75, 'Low → High upgrade', '#e74c3c'),
-        (0.80, 'Medium → High upgrade', '#f39c12'),
-        (0.55, 'High → Medium downgrade', '#2ecc71'),
+        (0.75, 'Low -> High upgrade', '#e74c3c'),
+        (0.80, 'Medium -> High upgrade', '#f39c12'),
+        (0.55, 'High -> Medium downgrade', '#2ecc71'),
     ]
     for val, label, colour in thresholds:
         ax_a.axhline(y=val, color=colour, linestyle=':', linewidth=1.2,
@@ -1623,7 +1623,7 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
                 len_a = chain_info.ca_counts[ch_a]
                 len_b = chain_info.ca_counts[ch_b]
 
-                # Highlight both cross-chain rectangles (A→B and B→A)
+                # Highlight both cross-chain rectangles (A->B and B->A)
                 for rect_x, rect_y, rect_w, rect_h in [
                     (off_b - 0.5, off_a - 0.5, len_b, len_a),
                     (off_a - 0.5, off_b - 0.5, len_a, len_b),
@@ -1635,7 +1635,7 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
                     )
                     axes.add_patch(rect)
 
-                readable_title += f'  (best pair: {ch_a}–{ch_b})'
+                readable_title += f'  (best pair: {ch_a}-{ch_b})'
 
         except Exception:
             pass  # Gracefully degrade to plain heatmap
@@ -1661,7 +1661,7 @@ def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
     Paradox definition: ipTM >= 0.75 AND pDockQ >= 0.5 AND disorder >= 0.30.
 
     These are complexes where both headline quality metrics indicate a
-    confident interaction despite substantial structural disorder — the
+    confident interaction despite substantial structural disorder - the
     biological hallmark of intrinsically disordered proteins that undergo
     disorder-to-order transitions upon binding.
 

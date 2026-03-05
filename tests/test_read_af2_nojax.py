@@ -1,5 +1,5 @@
 """
-Tests for read_af2_nojax.py — JAX-free PKL extraction.
+Tests for read_af2_nojax.py - JAX-free PKL extraction.
 
 Regression values captured on 2026-03-04 from reference complex 1
 (A0A0B4J2C3_P24534) on Windows 11.

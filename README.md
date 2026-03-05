@@ -12,15 +12,16 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 46-column CSV output with automated quality flags and paradox detection
+- 58-column CSV output with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate 10 figures with adaptive rendering for datasets from hundreds to millions of complexes
 - Optional KDE density contour overlays and per-complex PAE heatmaps
 - PPI database ingestion: parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
-- Database overlap analysis: pairwise and multi-database intersection computation with UpSet-style visualisation
-- 290-test regression suite with real PDB/PKL data and offline database excerpts
+- Database overlap analysis: dual-level (isoform-specific + base-accession) intersection computation with UpSet-style visualisation
+- CSV enrichment: gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types
+- 325-test regression suite with real PDB/PKL data and offline database excerpts
 
 
 ## Repository Structure
@@ -38,7 +39,7 @@ protein-complexes-toolkit/
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (290 tests + 28 future placeholders)
+├── tests/                   # Test suite (325 tests + 28 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -64,8 +65,14 @@ PDB + PKL files
        │
        ▼
 read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ toolkit.py ──▶ visualise_results.py
-  (PKL metrics)     (pDockQ/PPV)    (interface geometry     (batch CSV output)  (generates figures)
-                                     + PAE features)            
+  (PKL metrics)     (pDockQ/PPV)    (interface geometry       (batch CSV     (generates figures)
+                                     + PAE features)           output)
+                                                                  │
+                                                    ┌─────────────┤ (optional --enrich)
+                                                    ▼             ▼
+                                              id_mapper.py   database_loaders.py
+                                            (gene symbols,   (source tagging,
+                                             protein names)   evidence types)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -81,7 +88,8 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
        │                                      │
        ▼                                      ▼
               overlap_analysis.py
-        (pair normalisation, Venn/UpSet diagrams)
+        (pair normalisation, Venn/UpSet diagrams,
+         --base-level dual analysis, --report)
 ```
 
 ### Script Descriptions
@@ -92,15 +100,15 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 46-column CSV and optional JSONL interface export. Implements 2 quality classification schemes.
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 46-column base CSV (58 columns with `--enrich`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags.
 
 **visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
 **database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`.
 
-**id_mapper.py**: Protein identifier cross-referencing using the STRING aliases file as a single source of truth. `IDMapper` class builds bidirectional lookup tables for ENSP-to-UniProt, UniProt-to-gene-symbol, and ENSG-to-ENSP mappings. `resolve_id()` accepts any identifier type and resolves to a target namespace. Isoform-aware: preserves full isoform accessions (e.g., `P22607-2`) and prioritises reviewed Swiss-Prot accessions over TrEMBL. Includes `map_dataframe_to_uniprot()` convenience function for batch DataFrame ID conversion.
+**id_mapper.py**: Protein identifier cross-referencing using the STRING aliases file as a single source of truth. `IDMapper` class builds bidirectional lookup tables for ENSP-to-UniProt, UniProt-to-gene-symbol, and ENSG-to-ENSP mappings. `resolve_id()` accepts any identifier type and resolves to a target namespace. Isoform-aware: preserves full isoform accessions (e.g., `P22607-2`) and prioritises reviewed Swiss-Prot accessions over TrEMBL. Includes `map_dataframe_to_uniprot()` for batch DataFrame ID conversion, `build_uniprot_lookup()` for efficient enrichment, and `export_lookup_table()` for structured CSV export with primary/secondary accession columns.
 
-**overlap_analysis.py**: Computes pairwise protein interaction overlaps across databases after ID normalisation. `normalise_pair()` creates order-independent pair keys. `extract_pair_set()` converts DataFrames to normalised pair sets. `compute_overlaps()` returns per-database counts, pairwise overlaps, triple overlaps, all-database intersections, and unique-to-database sets. Supports UpSet-style intersection visualisation for 4+ databases.
+**overlap_analysis.py**: Computes pairwise protein interaction overlaps across databases after ID normalisation. `normalise_pair()` and `normalise_pair_base()` create order-independent pair keys at isoform-specific and base-accession levels respectively. `extract_pair_set()` and `extract_pair_set_base()` convert DataFrames to normalised pair sets. `compute_overlaps()` returns per-database counts, pairwise overlaps, triple overlaps, all-database intersections, and unique-to-database sets. Supports UpSet-style intersection visualisation for 4+ databases. CLI supports dual-level analysis (`--base-level`), report generation (`--report`), and STRING threshold comparison.
 
 
 ## Installation
@@ -244,6 +252,16 @@ python interface_analysis.py --pdb structure.pdb --json output.json
 python interface_analysis.py --pdb structure.pdb --pkl result.pkl --json output.json
 ```
 
+### Enriched Pipeline (Gene Symbols, Database Sources, Sequences)
+
+```bash
+# Full pipeline with enrichment (adds gene symbols, protein names, sequences, species, structure source)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt -w 4
+
+# Full pipeline with enrichment + database source tagging
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ -w 4
+```
+
 ### Database Ingestion & ID Mapping
 
 ```bash
@@ -263,8 +281,14 @@ python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve 
 # Print mapping statistics
 python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --stats
 
+# Export structured lookup table
+python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --export lookup.csv
+
 # Compute database overlaps and generate Venn/UpSet diagram
 python overlap_analysis.py --data-dir data/ppi/ --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn_overlap.png
+
+# Dual-level overlap (isoform-specific + base-accession) with report
+python overlap_analysis.py --data-dir data/ppi/ --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn_overlap.png --base-level --report Output/overlap_report.txt
 ```
 
 ### Running Tests
@@ -312,13 +336,13 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (46 columns)
+### CSV (46 base columns, 58 with enrichment)
 
 The main output CSV groups columns into:
 
 | Category | Key Columns |
 |----------|-------------|
-| **Identity** | complex_name, protein_a, protein_b, complex_type, n_chains |
+| **Identity** | complex_name, protein_a, protein_b, complex_type, n_chains, species, structure_source |
 | **Core Metrics** | ipTM, pTM, ranking_confidence, pDockQ, ppv |
 | **pLDDT Statistics** | plddt_mean, plddt_median, plddt_min, plddt_max, plddt_below50/70_fraction |
 | **Interface Geometry** | n_interface_contacts, interface_fraction_a/b, interface_symmetry, contacts_per_interface_residue |
@@ -326,6 +350,7 @@ The main output CSV groups columns into:
 | **PAE Features** | interface_pae_mean, n_confident_contacts, confident_contact_fraction, cross_chain_pae_mean |
 | **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2 |
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
+| **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 
 ### JSONL Interface Export
 
@@ -357,7 +382,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 - **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 46-column CSV, 10-figure visualisation suite
 - **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
-- **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with cross-database overlap analysis
+- **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
 
 ### Planned
 
@@ -371,21 +396,21 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **318 tests** across 10 modules (290 real + 28 future placeholders):
+The test suite contains **353 tests** across 10 modules (325 real + 28 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
 | test_read_af2_nojax.py | 26 | PKL loading, metric extraction |
 | test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
 | test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
-| test_toolkit.py | 37 | File discovery, quality classification, CSV |
+| test_toolkit.py | 52 | File discovery, quality classification, CSV, enrichment, sequences |
 | test_visualise_results.py | 22 | Figure generation, data loading, CLI |
 | test_integration.py | 8 | Cross-module pipeline, data flow |
-| test_database_loaders.py | 63 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap |
-| test_id_mapper.py | 49 | ID validation, mapping, isoform handling, DataFrame conversion |
+| test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
+| test_id_mapper.py | 62 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
 | test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
 
-**Results:** 289 passing, 1 skipped (Fig 10 - requires multi-chain data), 28 future placeholders (deselected by default)
+**Results:** 324 passing, 1 skipped (Fig 10 - requires multi-chain data), 28 future placeholders (deselected by default)
 
 **Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `future` (unimplemented features)
 

@@ -57,6 +57,26 @@ def normalise_pair(id_a: str, id_b: str) -> tuple[str, str]:
     return (min(id_a, id_b), max(id_a, id_b))
 
 
+def normalise_pair_base(id_a: str, id_b: str) -> tuple[str, str]:
+    """Return a canonical sorted pair at base-accession level.
+
+    Strips isoform suffixes (e.g., Q9UKT4-2 -> Q9UKT4) before sorting,
+    so that isoform-specific and base accessions match in cross-database
+    comparisons.
+
+    Args:
+        id_a: First protein identifier (may include isoform suffix).
+        id_b: Second protein identifier.
+
+    Returns:
+        Tuple (min_base, max_base) ensuring A_B == B_A at base level.
+    """
+    from id_mapper import split_isoform
+    base_a = split_isoform(id_a)[0]
+    base_b = split_isoform(id_b)[0]
+    return (min(base_a, base_b), max(base_a, base_b))
+
+
 def extract_pair_set(
     df: pd.DataFrame,
     col_a: str = 'protein_a',
@@ -80,6 +100,33 @@ def extract_pair_set(
     return pairs
 
 
+def extract_pair_set_base(
+    df: pd.DataFrame,
+    col_a: str = 'protein_a',
+    col_b: str = 'protein_b',
+) -> set[tuple[str, str]]:
+    """Extract normalised pair set at base-accession level.
+
+    Like extract_pair_set() but strips isoform suffixes before
+    normalising, enabling cross-database comparison where some
+    databases (STRING, BioGRID) lack isoform specificity.
+
+    Args:
+        df: DataFrame with protein pair columns.
+        col_a: Column name for protein A.
+        col_b: Column name for protein B.
+
+    Returns:
+        Set of (base_id_a, base_id_b) tuples, canonically ordered.
+    """
+    pairs = set()
+    for _, row in df.iterrows():
+        a, b = str(row[col_a]), str(row[col_b])
+        if a and b and a != 'nan' and b != 'nan':
+            pairs.add(normalise_pair_base(a, b))
+    return pairs
+
+
 # ── Overlap Computation ──────────────────────────────────────────────
 
 def compute_overlaps(
@@ -92,12 +139,12 @@ def compute_overlaps(
 
     Returns:
         Dict with keys:
-        - 'per_database': {name: count} — unique pair count per DB
-        - 'pairwise': {(db1, db2): count} — intersection counts
-        - 'triple': {(db1, db2, db3): count} — triple intersection counts
-        - 'all': count — pairs in all databases
-        - 'unique_to': {name: count} — pairs found only in that DB
-        - 'union': count — total unique pairs across all databases
+        - 'per_database': {name: count} - unique pair count per DB
+        - 'pairwise': {(db1, db2): count} - intersection counts
+        - 'triple': {(db1, db2, db3): count} - triple intersection counts
+        - 'all': count - pairs in all databases
+        - 'unique_to': {name: count} - pairs found only in that DB
+        - 'union': count - total unique pairs across all databases
     """
     names = list(pair_sets.keys())
 
@@ -463,6 +510,16 @@ Examples:
         help="Generate threshold comparison figure at this path",
     )
     parser.add_argument(
+        "--report",
+        metavar="OUTPUT_PATH",
+        help="Write full overlap statistics to a text file",
+    )
+    parser.add_argument(
+        "--base-level",
+        action="store_true",
+        help="Also compute overlaps at base-accession level (stripping isoform suffixes)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print detailed progress",
@@ -507,14 +564,56 @@ def main() -> None:
         else:
             pair_sets[name] = extract_pair_set(df)
 
-    # Compute and display overlaps
+    # Compute and display overlaps (isoform-specific level)
     stats = compute_overlaps(pair_sets)
     print_overlap_summary(stats)
 
     # Generate Venn diagram
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    plot_venn_diagram(pair_sets, args.output, verbose=args.verbose)
+    plot_venn_diagram(pair_sets, args.output,
+                      title="PPI Database Overlap (Isoform-Specific)",
+                      verbose=args.verbose)
     print(f"\nVenn diagram saved to: {args.output}")
+
+    # Base-accession level overlap (strips isoform suffixes)
+    if args.base_level:
+        if args.verbose:
+            print("\nComputing base-accession level overlap...", file=sys.stderr)
+
+        base_pair_sets = {}
+        for name, df in dbs.items():
+            if 'uniprot_a' in df.columns:
+                base_pair_sets[name] = extract_pair_set_base(
+                    df, col_a='uniprot_a', col_b='uniprot_b')
+            else:
+                base_pair_sets[name] = extract_pair_set_base(df)
+
+        base_stats = compute_overlaps(base_pair_sets)
+        print("\n--- Base-Accession Level (isoform suffixes stripped) ---")
+        print_overlap_summary(base_stats)
+
+        # Generate base-level Venn diagram
+        base_output = Path(args.output)
+        base_output_path = str(
+            base_output.parent / f"{base_output.stem}_base{base_output.suffix}")
+        plot_venn_diagram(base_pair_sets, base_output_path,
+                          title="PPI Database Overlap (Base Accession)",
+                          verbose=args.verbose)
+        print(f"Base-level Venn diagram saved to: {base_output_path}")
+
+    # Write report file
+    if args.report:
+        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.report, 'w') as f:
+            f.write("PPI Database Overlap Report\n")
+            f.write("=" * 40 + "\n")
+            f.write(f"\nSTRING minimum score: {args.string_min_score}\n")
+            f.write("\n--- Isoform-Specific Level ---")
+            print_overlap_summary(stats, file=f)
+            if args.base_level:
+                f.write("\n\n--- Base-Accession Level ---")
+                print_overlap_summary(base_stats, file=f)
+        print(f"Report written to: {args.report}")
 
     # Optional threshold comparison
     if args.threshold_comparison:

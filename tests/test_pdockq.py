@@ -1,5 +1,5 @@
 """
-Tests for pdockq.py — PDB reading, pDockQ calculation, multi-chain support.
+Tests for pdockq.py - PDB reading, pDockQ calculation, multi-chain support.
 
 Regression values captured on 2026-03-04 from reference complex 1
 (A0A0B4J2C3_P24534) on Windows 11.
@@ -232,7 +232,7 @@ class TestChainInfo:
             ca_count = chain_info_1.ca_counts[ch]
             for idx in chain_info_1.cb_to_ca_map[ch]:
                 assert 0 <= idx < ca_count, \
-                    f"Chain {ch} CB→CA index {idx} out of range [0, {ca_count})"
+                    f"Chain {ch} CB->CA index {idx} out of range [0, {ca_count})"
 
     @pytest.mark.regression
     def test_residue_counts_regression(self, chain_info_1):

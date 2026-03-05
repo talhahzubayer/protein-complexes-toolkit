@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pDockQ — Predicted DockQ Score Calculator
+pDockQ - Predicted DockQ Score Calculator
 
 Calculates predicted DockQ scores for AlphaFold2-predicted protein complexes.
 Uses the FoldDock parameterisation which normalises by the average pLDDT value
@@ -42,7 +42,7 @@ PDOCKQ_X0_New = 152.611
 PDOCKQ_K_New = 0.052
 PDOCKQ_B_New = 0.018
 
-# PPV lookup table — maps pDockQ thresholds to positive predictive values
+# PPV lookup table - maps pDockQ thresholds to positive predictive values
 PPV_VALUES_New = np.array([
     0.98128027, 0.96322524, 0.95333044, 0.94001920,
     0.93172991, 0.92420274, 0.91629946, 0.90952562, 0.90043139,
@@ -74,7 +74,7 @@ class ContactResult_New:
         pdockq: Predicted DockQ score (0 to ~0.74).
         ppv: Positive predictive value from calibration lookup.
         chain_ids: Tuple of (chain_A_id, chain_B_id).
-        contacts: Nx2 array of contact indices — contacts[:,0] are chain A
+        contacts: Nx2 array of contact indices - contacts[:,0] are chain A
                   residue indices, contacts[:,1] are chain B residue indices.
                   Empty (0,2) array if no contacts found.
         contact_distances: 1D array of distances for each contact pair.
@@ -243,7 +243,7 @@ class ChainInfo_New:
     Provides the data needed to correctly map CB-based contact indices
     into the full PAE matrix, even when:
       - The complex has 3+ chains (multi-chain offset calculation)
-      - Some residues lack CB atoms (CB→CA index mapping)
+      - Some residues lack CB atoms (CB->CA index mapping)
 
     Attributes:
         chain_ids: Ordered list of chain identifiers found in the PDB.
@@ -276,7 +276,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
     This reader solves three problems that the basic readers cannot:
       1. It counts CA atoms per chain (matching PKL residue counts) separately
          from CB atoms (used for contact analysis), resolving the CB mismatch.
-      2. It builds a CB→CA index mapping per chain, allowing correct PAE matrix
+      2. It builds a CB->CA index mapping per chain, allowing correct PAE matrix
          lookup even when some residues lack CB atoms.
       3. It preserves chain ordering and per-chain counts for multi-chain
          PAE offset computation.
@@ -290,7 +290,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
     """
     # First pass: collect CA residues per chain (ordered by residue number).
     # This establishes the full residue indexing that matches the PKL/PAE matrix.
-    # Second pass: collect CB atoms and build the CB→CA mapping.
+    # Second pass: collect CB atoms and build the CB->CA mapping.
     #
     # We do this in two passes for clarity, though a single-pass approach
     # is possible. At PDB-parsing scale, the overhead is negligible.
@@ -315,7 +315,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
                 chain_ca_residues[chain_id].append(resid)
 
     # -- Pass 2: CB atoms (contact representatives) --
-    # For each CB atom, record its position in the CA array (the CB→CA map).
+    # For each CB atom, record its position in the CA array (the CB->CA map).
     chain_cb_coords: dict[str, list[list[float]]] = defaultdict(list)
     chain_cb_plddt: dict[str, list[float]] = defaultdict(list)
     chain_cb_to_ca: dict[str, list[int]] = defaultdict(list)
@@ -347,7 +347,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
                     ca_index = chain_ca_residues[chain_id].index(resid)
                     chain_cb_to_ca[chain_id].append(ca_index)
                 except ValueError:
-                    # CB atom without a matching CA — shouldn't happen but
+                    # CB atom without a matching CA - shouldn't happen but
                     # use the CB count as a fallback (direct 1:1 mapping).
                     chain_cb_to_ca[chain_id].append(len(chain_cb_to_ca[chain_id]))
 
@@ -422,7 +422,7 @@ def find_best_chain_pair_New(
         raise ValueError(f"Fewer than 2 chains with coordinates: {chains_with_coords}")
 
     if len(chains_with_coords) == 2:
-        # Standard dimer — no search needed
+        # Standard dimer - no search needed
         ch1, ch2 = chains_with_coords
         pair_coords = {ch1: chain_info.cb_coords[ch1], ch2: chain_info.cb_coords[ch2]}
         pair_plddt = {ch1: chain_info.cb_plddt[ch1], ch2: chain_info.cb_plddt[ch2]}
@@ -488,7 +488,7 @@ def calc_pdockq_Edited(
     _Edited: Uses named constants instead of magic numbers; added type hints;
     delegates PPV lookup to _lookup_ppv_New; returns explicit floats.
 
-    This is the original interface — returns just (pdockq, ppv).
+    This is the original interface - returns just (pdockq, ppv).
 
     Args:
         chain_coords: Dict mapping chain IDs to (N, 3) coordinate arrays.
@@ -599,7 +599,7 @@ def calc_pdockq_and_contacts_New(
 # ── CLI Entry Point ──────────────────────────────────────────────────
 
 def main_New() -> None:
-    """CLI entry point — parse arguments, read PDB, calculate and print pDockQ.
+    """CLI entry point - parse arguments, read PDB, calculate and print pDockQ.
 
     _New: Wrapped original module-level CLI code into a function.
     """

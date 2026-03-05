@@ -1,5 +1,5 @@
 """
-Tests for toolkit.py — batch orchestration, file parsing, quality classification.
+Tests for toolkit.py - batch orchestration, file parsing, quality classification.
 
 Regression values captured on 2026-03-04 from reference complex 1
 (A0A0B4J2C3_P24534) on Windows 11.
@@ -21,10 +21,13 @@ from toolkit import (
     process_single_complex,
     get_csv_fieldnames,
     write_results_csv,
+    enrich_results,
     CSV_FIELDNAMES_BASE,
     CSV_FIELDNAMES_INTERFACE,
     CSV_FIELDNAMES_INTERFACE_PAE,
+    CSV_FIELDNAMES_ENRICHMENT,
     CSV_FIELDNAMES_FLAGS,
+    THREE_TO_ONE,
     IPTM_HIGH_THRESHOLD,
     IPTM_MEDIUM_THRESHOLD,
     PDOCKQ_HIGH_THRESHOLD,
@@ -338,3 +341,129 @@ class TestToolkitCLI:
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0
+
+
+# ── Enrichment Tests ─────────────────────────────────────────────
+
+class TestThreeToOne:
+    """Tests for THREE_TO_ONE amino acid code mapping."""
+
+    def test_all_20_amino_acids(self):
+        """All 20 standard amino acids are present."""
+        assert len(THREE_TO_ONE) == 20
+
+    def test_ala_is_a(self):
+        assert THREE_TO_ONE['ALA'] == 'A'
+
+    def test_trp_is_w(self):
+        assert THREE_TO_ONE['TRP'] == 'W'
+
+
+class TestCSVFieldnamesEnrichment:
+    """Tests for enrichment column constants."""
+
+    def test_enrichment_columns_exist(self):
+        assert 'gene_symbol_a' in CSV_FIELDNAMES_ENRICHMENT
+        assert 'database_source' in CSV_FIELDNAMES_ENRICHMENT
+        assert 'sequence_a' in CSV_FIELDNAMES_ENRICHMENT
+
+    def test_with_enrichment_flag(self):
+        fields = get_csv_fieldnames(include_enrichment=True)
+        assert 'gene_symbol_a' in fields
+        assert 'database_source' in fields
+
+    def test_enrichment_after_base(self):
+        """Enrichment columns come after base columns."""
+        fields = get_csv_fieldnames(include_enrichment=True)
+        base_end = fields.index(CSV_FIELDNAMES_BASE[-1])
+        enrich_start = fields.index(CSV_FIELDNAMES_ENRICHMENT[0])
+        assert enrich_start > base_end
+
+
+@pytest.mark.slow
+class TestConstantColumns:
+    """Tests for species and structure_source constant columns."""
+
+    @pytest.fixture(scope="class")
+    def file_paths_1(self, ref_pdb_1, ref_pkl_1):
+        return {'pdb': ref_pdb_1, 'pkl': ref_pkl_1}
+
+    def test_species_populated(self, file_paths_1):
+        row = process_single_complex('A0A0B4J2C3_P24534', file_paths_1)
+        assert row['species'] == 'Homo sapiens (9606)'
+
+    def test_structure_source_populated(self, file_paths_1):
+        row = process_single_complex('A0A0B4J2C3_P24534', file_paths_1)
+        assert row['structure_source'] == 'AlphaFold2_prediction'
+
+    def test_species_in_base_fieldnames(self):
+        assert 'species' in CSV_FIELDNAMES_BASE
+        assert 'structure_source' in CSV_FIELDNAMES_BASE
+
+
+@pytest.mark.slow
+class TestSequenceExtraction:
+    """Tests for amino acid sequence extraction from PDB."""
+
+    @pytest.fixture(scope="class")
+    def row_with_sequences(self, ref_pdb_1, ref_pkl_1):
+        file_paths = {'pdb': ref_pdb_1, 'pkl': ref_pkl_1}
+        return process_single_complex('A0A0B4J2C3_P24534', file_paths)
+
+    def test_sequence_a_is_string(self, row_with_sequences):
+        assert isinstance(row_with_sequences.get('sequence_a'), str)
+        assert len(row_with_sequences['sequence_a']) > 0
+
+    def test_sequence_b_is_string(self, row_with_sequences):
+        assert isinstance(row_with_sequences.get('sequence_b'), str)
+        assert len(row_with_sequences['sequence_b']) > 0
+
+    def test_sequence_only_valid_chars(self, row_with_sequences):
+        """Sequences contain only valid amino acid codes or X."""
+        valid = set('ARNDCQEGHILKMFPSTWYV' + 'X')
+        for seq_key in ('sequence_a', 'sequence_b'):
+            seq = row_with_sequences[seq_key]
+            invalid = set(seq) - valid
+            assert not invalid, f"Invalid characters in {seq_key}: {invalid}"
+
+
+@pytest.mark.slow
+@pytest.mark.database
+class TestEnrichResults:
+    """Tests for enrich_results() function."""
+
+    def test_enrich_with_mock_lookup(self):
+        """Enrich adds gene symbols from lookup dict."""
+        results = [{'protein_a': 'P04637', 'protein_b': 'Q00987'}]
+        lookup = {
+            'P04637': {
+                'gene_symbol': 'TP53',
+                'protein_name': 'Cellular tumor antigen p53',
+                'ensembl_protein_id': 'ENSP00000269305',
+                'ensembl_gene_id': 'ENSG00000141510',
+            },
+        }
+        enrich_results(results, lookup)
+        assert results[0]['gene_symbol_a'] == 'TP53'
+        assert results[0]['gene_symbol_b'] == ''  # Q00987 not in lookup
+
+    def test_enrich_database_source(self):
+        """Enrich adds database_source when pair sets are provided."""
+        results = [{'protein_a': 'P04637', 'protein_b': 'Q00987'}]
+        lookup = {}
+        pair_sets = {
+            'STRING': {('P04637', 'Q00987')},
+            'BioGRID': {('P04637', 'Q00987')},
+            'HuRI': set(),
+        }
+        enrich_results(results, lookup, database_pair_sets=pair_sets)
+        assert 'STRING' in results[0]['database_source']
+        assert 'BioGRID' in results[0]['database_source']
+        assert 'HuRI' not in results[0]['database_source']
+
+    def test_enrich_without_databases(self):
+        """Enrich without database_pair_sets leaves source empty."""
+        results = [{'protein_a': 'P04637', 'protein_b': 'Q00987'}]
+        enrich_results(results, {})
+        assert results[0]['database_source'] == ''
+        assert results[0]['evidence_types'] == ''

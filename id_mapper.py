@@ -423,6 +423,44 @@ class IDMapper:
 
         return (uniprot_a, uniprot_b, is_base)
 
+    def get_secondary_accessions(self, ensp_id: str) -> list[str]:
+        """Return non-primary UniProt accessions mapped to an ENSP ID.
+
+        Design decision: We use the STRING aliases file rather than the
+        UniProt REST API or the 8 GB idmapping.dat download. STRING aliases
+        already contain secondary accessions as alternative ENSP mappings.
+        Trade-off: proteins removed entirely from UniProt (not just merged)
+        are not caught. See Documentation/Research_Project_Roadmap.md for
+        the full rationale and future alternatives.
+
+        The primary accession is the first entry (prioritised by the
+        Swiss-Prot-first sort key). Secondary accessions are all remaining
+        entries - these may be older UniProt accessions that have been
+        merged into the primary or TrEMBL alternatives.
+
+        Args:
+            ensp_id: Ensembl protein ID.
+
+        Returns:
+            List of secondary UniProt accessions (excluding the primary).
+            Empty list if ENSP has zero or one mapping.
+        """
+        ensp = ensp_id.removeprefix(STRING_TAXONOMY_PREFIX)
+        accessions = self._ensp_to_uniprot.get(ensp, [])
+        return list(accessions[1:]) if len(accessions) > 1 else []
+
+    def get_protein_name(self, ensp_id: str) -> Optional[str]:
+        """Return the protein name for an ENSP ID, or None.
+
+        Args:
+            ensp_id: Ensembl protein ID.
+
+        Returns:
+            Protein name string, or None if no name is recorded.
+        """
+        ensp = ensp_id.removeprefix(STRING_TAXONOMY_PREFIX)
+        return self._ensp_to_name.get(ensp)
+
     def get_mapping_stats(self) -> dict[str, int]:
         """Return counts of entries in each lookup dictionary.
 
@@ -500,7 +538,8 @@ def export_lookup_table(
     """Export the master ID lookup table as a CSV file.
 
     Produces a table with one row per unique ENSP ID, containing all
-    available cross-references.
+    available cross-references. The primary UniProt accession is the
+    reviewed Swiss-Prot entry (sorted first by _uniprot_sort_key).
 
     Args:
         mapper: Initialised IDMapper instance.
@@ -509,7 +548,9 @@ def export_lookup_table(
     """
     fieldnames = [
         'ensembl_protein_id',
-        'uniprot_accessions',
+        'primary_uniprot',
+        'base_accession',
+        'secondary_accessions',
         'ensembl_gene_id',
         'gene_symbol',
         'protein_name',
@@ -524,9 +565,14 @@ def export_lookup_table(
     rows = []
     for ensp in sorted(all_ensp):
         uniprots = mapper._ensp_to_uniprot.get(ensp, [])
+        primary = uniprots[0] if uniprots else ''
+        base, _ = split_isoform(primary) if primary else ('', None)
+        secondary = uniprots[1:] if len(uniprots) > 1 else []
         rows.append({
             'ensembl_protein_id': ensp,
-            'uniprot_accessions': '|'.join(uniprots) if uniprots else '',
+            'primary_uniprot': primary,
+            'base_accession': base,
+            'secondary_accessions': '|'.join(secondary),
             'ensembl_gene_id': mapper._ensp_to_ensg.get(ensp, ''),
             'gene_symbol': mapper._ensp_to_symbol.get(ensp, ''),
             'protein_name': mapper._ensp_to_name.get(ensp, ''),
@@ -540,6 +586,50 @@ def export_lookup_table(
     if verbose:
         print(f"  Exported {len(rows):,} protein entries to {output_path}",
               file=sys.stderr)
+
+
+def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
+    """Build a fast UniProt-keyed lookup dict for enrichment.
+
+    Returns a dict keyed by UniProt accession (primary and secondary)
+    containing gene symbol, protein name, Ensembl IDs. Used by the
+    toolkit to enrich CSV rows without repeated resolve_id() calls.
+
+    Args:
+        mapper: Initialised IDMapper instance.
+
+    Returns:
+        Dict mapping UniProt accession -> {
+            'gene_symbol': str or '',
+            'protein_name': str or '',
+            'ensembl_protein_id': str or '',
+            'ensembl_gene_id': str or '',
+        }.
+    """
+    lookup: dict[str, dict] = {}
+
+    for ensp, uniprots in mapper._ensp_to_uniprot.items():
+        symbol = mapper._ensp_to_symbol.get(ensp, '')
+        name = mapper._ensp_to_name.get(ensp, '')
+        ensg = mapper._ensp_to_ensg.get(ensp, '')
+
+        info = {
+            'gene_symbol': symbol,
+            'protein_name': name,
+            'ensembl_protein_id': ensp,
+            'ensembl_gene_id': ensg,
+        }
+
+        for acc in uniprots:
+            # First entry for this accession wins (primary ENSP mapping)
+            if acc not in lookup:
+                lookup[acc] = info
+            # Also index by base accession for isoform-agnostic lookup
+            base, _ = split_isoform(acc)
+            if base != acc and base not in lookup:
+                lookup[base] = info
+
+    return lookup
 
 
 # ── CLI ──────────────────────────────────────────────────────────────

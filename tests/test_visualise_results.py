@@ -1,5 +1,5 @@
 """
-Tests for visualise_results.py — data loading, column detection, and figure generation.
+Tests for visualise_results.py - data loading, column detection, and figure generation.
 
 Tests use a CSV generated from the pipeline (via the pipeline_csv fixture)
 rather than the pre-existing results.csv. This ensures the visualisation

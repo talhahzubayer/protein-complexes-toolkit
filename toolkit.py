@@ -3,33 +3,48 @@
 Batch Processor for AlphaFold2 Protein Complex Quality Assessment
 
 Processes multiple AlphaFold2 predictions by directly importing analysis
-functions — no subprocess calls, no temp-file round-trips.
+functions - no subprocess calls, no temp-file round-trips.
 
 Integrated analysis modules:
-    - read_af2_nojax  → PKL metric extraction (JAX-free)
-    - pdockq              → Interface quality scoring (pDockQ/PPV)
-    - interface_analysis  → Interface geometry, pLDDT, PAE features, and export
+    - read_af2_nojax     -> PKL metric extraction (JAX-free)
+    - pdockq             -> Interface quality scoring (pDockQ/PPV)
+    - interface_analysis -> Interface geometry, pLDDT, PAE features, and export
+    - id_mapper          -> Gene symbols, protein names, Ensembl IDs (via --enrich)
+    - database_loaders   -> Database source tagging and evidence types (via --databases)
 
 Scalability features:
-    - Multiprocessing      → --workers N for parallel processing via ProcessPoolExecutor
-    - Progress tracking    → tqdm progress bar (auto-fallback to print if not installed)
-    - Checkpointing        → --checkpoint saves progress every 50 complexes
-    - Resume capability    → --resume skips already-processed complexes
+    - Multiprocessing    -> --workers N for parallel processing via ProcessPoolExecutor
+    - Progress tracking  -> tqdm progress bar (auto-fallback to print if not installed)
+    - Checkpointing      -> --checkpoint saves progress every 50 complexes
+    - Resume capability  -> --resume skips already-processed complexes
+
+Enrichment features (Phase A):
+    - --enrich           -> Adds gene symbols, protein names, Ensembl IDs, amino acid
+                           sequences via id_mapper.py (requires STRING aliases file)
+    - --databases        -> Tags each complex with source databases (STRING, BioGRID,
+                           HuRI, HuMAP) and evidence types via database_loaders.py
+    - Base output: 46 columns; enriched output: up to 58 columns
 
 Usage:
     # Basic (sequential, no checkpointing)
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae
 
     # Full analysis with parallel workers and checkpointing
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae -w 4 --checkpoint
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --checkpoint
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
 
-    # Resume an interrupted full-analysis run
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --resume
+    # With enrichment (gene symbols, protein names, sequences)
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "C:\\Users\\Talhah Zubayer\\Documents\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt"
 
-    # Verbose (sequential only — verbose is suppressed with -w > 1)
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae -v
+    # With enrichment + database source tagging
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "C:\\Users\\Talhah Zubayer\\Documents\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --databases "C:\\Users\\Talhah Zubayer\\Documents\\protein-complexes-toolkit\\data\\ppi"
+
+    # Resume an interrupted run
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --resume
+
+    # Verbose (sequential only - verbose is suppressed with -w > 1)
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -v
 """
 
 import os
@@ -48,7 +63,7 @@ import re
 
 import numpy as np
 
-# tqdm — graceful fallback if not installed
+# tqdm - graceful fallback if not installed
 try:
     from tqdm import tqdm
 except ImportError:
@@ -60,7 +75,7 @@ except ImportError:
 CHECKPOINT_INTERVAL = 50   # Save checkpoint every N complexes
 CHECKPOINT_SUFFIX = '.checkpoint.jsonl'
 
-# Direct module imports — no subprocess calls needed.
+# Direct module imports - no subprocess calls needed.
 # JAX mocking happens once when read_af2_nojax is first imported.
 from read_af2_nojax import load_pkl_without_jax, extract_metrics
 from pdockq import (
@@ -93,7 +108,7 @@ SUBSTANTIAL_DISORDER_FRACTION = 0.3
 # PAE threshold
 PAE_CONFIDENT_THRESHOLD = 5.0
 
-# CSV column order — base columns always present
+# CSV column order - base columns always present
 CSV_FIELDNAMES_BASE = [
     'complex_name', 'protein_a', 'protein_b', 'complex_type',
     'n_chains', 'best_chain_pair',
@@ -103,7 +118,27 @@ CSV_FIELDNAMES_BASE = [
     'num_residues', 'pae_mean',
     'pdockq', 'ppv', 'quality_tier',
     'has_pdb', 'has_pkl', 'plddt_source',
+    'species', 'structure_source',
 ]
+
+# Enrichment columns (added when --enrich is used)
+CSV_FIELDNAMES_ENRICHMENT = [
+    'gene_symbol_a', 'gene_symbol_b',
+    'protein_name_a', 'protein_name_b',
+    'ensembl_id_a', 'ensembl_id_b',
+    'secondary_accessions_a', 'secondary_accessions_b',
+    'database_source',
+    'evidence_types',
+    'sequence_a', 'sequence_b',
+]
+
+# Standard amino acid three-letter to one-letter code mapping
+THREE_TO_ONE = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+    'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
+}
 
 # Interface geometry columns (added when --interface is used)
 CSV_FIELDNAMES_INTERFACE = [
@@ -201,7 +236,7 @@ def parse_complex_name(filename: str) -> tuple[str, str, str, str]:
         if clean_name.endswith(ext):
             clean_name = clean_name[:-len(ext)]
 
-    # Strip AlphaFold2 model suffixes — handles both naming conventions:
+    # Strip AlphaFold2 model suffixes - handles both naming conventions:
     #   PKL files use:  _result_model_X_multimer_v3_pred_Y
     #   PDB files use:  _relaxed_model_X_multimer_v3_pred_Y
     # Also handles legacy _results / .results suffixes.
@@ -356,8 +391,8 @@ def process_single_complex(
     Run all analysis steps on a single protein complex.
 
     Direct function calls replace all subprocess invocations:
-        - load_pkl_without_jax() + extract_metrics() replace subprocess → JSON round-trip
-        - calc_pdockq() / calc_pdockq_and_contacts() replace subprocess → stdout parsing
+        - load_pkl_without_jax() + extract_metrics() replace subprocess -> JSON round-trip
+        - calc_pdockq() / calc_pdockq_and_contacts() replace subprocess -> stdout parsing
         - analyse_interface_from_contact_result() provides new interface features
 
     Args:
@@ -382,6 +417,8 @@ def process_single_complex(
         'complex_type': complex_type,
         'has_pdb': 'pdb' in file_paths,
         'has_pkl': 'pkl' in file_paths,
+        'species': 'Homo sapiens (9606)',
+        'structure_source': 'AlphaFold2_prediction',
     }
 
     prediction_result = None  # Will hold full PKL data if loaded
@@ -400,7 +437,7 @@ def process_single_complex(
                 pae_matrix = np.asarray(prediction_result['predicted_aligned_error'])
 
             if verbose:
-                print(f"  PKL → ipTM={pkl_metrics.get('iptm', 'N/A')}")
+                print(f"  PKL -> ipTM={pkl_metrics.get('iptm', 'N/A')}")
         except Exception as error:
             print(f"  Warning: PKL extraction failed for {file_paths['pkl']}: {error}",
                   file=sys.stderr)
@@ -420,7 +457,7 @@ def process_single_complex(
                 row['num_residues'] = pdb_plddt['num_residues']
                 row['plddt_source'] = 'pdb'
                 if verbose:
-                    print(f"  PDB → pLDDT fallback: mean={pdb_plddt['plddt_mean']:.1f}")
+                    print(f"  PDB -> pLDDT fallback: mean={pdb_plddt['plddt_mean']:.1f}")
 
     # ── pDockQ Calculation (direct function call) ──
     # Uses read_pdb_with_chain_info() to support:
@@ -462,7 +499,7 @@ def process_single_complex(
                     offsets = compute_pae_chain_offsets(chain_info)
                     pae_chain_offsets = (offsets[ch_a], offsets[ch_b])
 
-                    # Build CB→CA maps for the selected chain pair
+                    # Build CB->CA maps for the selected chain pair
                     map_a = chain_info.cb_to_ca_map.get(ch_a, [])
                     map_b = chain_info.cb_to_ca_map.get(ch_b, [])
                     if map_a and map_b:
@@ -474,12 +511,23 @@ def process_single_complex(
                         if ca_a != cb_a or ca_b != cb_b:
                             cb_to_ca_maps = (map_a, map_b)
                             if verbose:
-                                print(f"  CB→CA mapping active: "
+                                print(f"  CB->CA mapping active: "
                                       f"chain {ch_a} CB={cb_a}/CA={ca_a}, "
                                       f"chain {ch_b} CB={cb_b}/CA={ca_b}")
 
+                # Extract amino acid sequences from chain residue names
+                if hasattr(chain_info, 'chain_res_names'):
+                    res_a = chain_info.chain_res_names.get(ch_a, [])
+                    res_b = chain_info.chain_res_names.get(ch_b, [])
+                    row['sequence_a'] = ''.join(
+                        THREE_TO_ONE.get(r, 'X') for r in res_a
+                    )
+                    row['sequence_b'] = ''.join(
+                        THREE_TO_ONE.get(r, 'X') for r in res_b
+                    )
+
                 if verbose and row.get('pdockq') is not None:
-                    print(f"  PDB → pDockQ={row['pdockq']}")
+                    print(f"  PDB -> pDockQ={row['pdockq']}")
             else:
                 row['n_chains'] = len(chain_info.chain_ids)
                 print(f"  Warning: <2 chains in {file_paths['pdb']}", file=sys.stderr)
@@ -512,7 +560,7 @@ def process_single_complex(
                 # (skip pdockq/ppv since we already set them above)
                 skip_keys = {'pdockq', 'ppv', 'avg_interface_plddt', 'flags',
                              'confident_contacts'}
-                # Only skip residue number lists from CSV — they go to JSONL export
+                # Only skip residue number lists from CSV - they go to JSONL export
                 if not export_interfaces:
                     skip_keys.update({
                         'confident_residue_numbers_a',
@@ -521,7 +569,7 @@ def process_single_complex(
                         'confident_residue_indices_b',
                     })
                 else:
-                    # Still skip the raw indices — only keep PDB residue numbers
+                    # Still skip the raw indices - only keep PDB residue numbers
                     skip_keys.update({
                         'confident_residue_indices_a',
                         'confident_residue_indices_b',
@@ -574,9 +622,15 @@ def process_single_complex(
 
 # ── Results Output ───────────────────────────────────────────────────
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False) -> list[str]:
+def get_csv_fieldnames(
+    include_interface: bool = False,
+    include_pae: bool = False,
+    include_enrichment: bool = False,
+) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
+    if include_enrichment:
+        fieldnames.extend(CSV_FIELDNAMES_ENRICHMENT)
     if include_interface:
         fieldnames.extend(CSV_FIELDNAMES_INTERFACE)
         fieldnames.extend(CSV_FIELDNAMES_FLAGS)
@@ -590,6 +644,7 @@ def write_results_csv(
     output_path: str,
     include_interface: bool = False,
     include_pae: bool = False,
+    include_enrichment: bool = False,
 ) -> None:
     """
     Write batch analysis results to a CSV file.
@@ -599,8 +654,10 @@ def write_results_csv(
         output_path: File path for the output CSV.
         include_interface: Whether to include interface columns.
         include_pae: Whether to include PAE interface columns.
+        include_enrichment: Whether to include enrichment columns
+            (gene symbols, names, database sources, sequences).
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -617,7 +674,7 @@ def write_interface_exports(
     Export confident interface residue data to a JSONL file.
 
     Each line is a self-contained JSON record describing one complex's
-    confident interface residues — the computationally identified binding
+    confident interface residues - the computationally identified binding
     hot-spots that pass both PAE and pLDDT confidence filters.
 
     Only exports complexes that meet the quality tier threshold and have
@@ -676,6 +733,74 @@ def write_interface_exports(
             exported_count += 1
 
     return exported_count
+
+
+# ── Enrichment (gene symbols, database sources) ─────────────────────
+
+def enrich_results(
+    results: list[dict],
+    lookup: dict[str, dict],
+    database_pair_sets: Optional[dict[str, set]] = None,
+    database_evidence: Optional[dict[str, 'pd.DataFrame']] = None,
+) -> None:
+    """Enrich result rows with gene symbols, protein names, and database sources.
+
+    Modifies the result dicts in-place.
+
+    Args:
+        results: List of per-complex result dicts from batch processing.
+        lookup: UniProt-keyed lookup dict from build_uniprot_lookup().
+        database_pair_sets: Optional dict of {db_name: set of normalised
+            UniProt pairs} for "source of complex" tagging.
+        database_evidence: Optional dict of {db_name: DataFrame} with
+            original interaction data for evidence_type extraction.
+    """
+    from overlap_analysis import normalise_pair
+
+    for row in results:
+        prot_a = row.get('protein_a', '')
+        prot_b = row.get('protein_b', '')
+
+        info_a = lookup.get(prot_a, {})
+        info_b = lookup.get(prot_b, {})
+
+        row['gene_symbol_a'] = info_a.get('gene_symbol', '')
+        row['gene_symbol_b'] = info_b.get('gene_symbol', '')
+        row['protein_name_a'] = info_a.get('protein_name', '')
+        row['protein_name_b'] = info_b.get('protein_name', '')
+        row['ensembl_id_a'] = info_a.get('ensembl_protein_id', '')
+        row['ensembl_id_b'] = info_b.get('ensembl_protein_id', '')
+
+        # Secondary accessions (need to look up via ENSP)
+        ensp_a = info_a.get('ensembl_protein_id', '')
+        ensp_b = info_b.get('ensembl_protein_id', '')
+        row['secondary_accessions_a'] = ''
+        row['secondary_accessions_b'] = ''
+
+        # Database source tagging
+        if database_pair_sets:
+            pair = normalise_pair(prot_a, prot_b)
+            sources = [
+                name for name, pair_set in sorted(database_pair_sets.items())
+                if pair in pair_set
+            ]
+            row['database_source'] = '|'.join(sources)
+
+            # Collect evidence types from matched databases
+            if database_evidence:
+                evidence_set: set[str] = set()
+                for db_name in sources:
+                    df = database_evidence.get(db_name)
+                    if df is not None and 'evidence_type' in df.columns:
+                        # Collect unique evidence types from this DB
+                        evidence_types_col = df['evidence_type'].dropna().unique()
+                        evidence_set.update(str(e) for e in evidence_types_col)
+                row['evidence_types'] = '|'.join(sorted(evidence_set))
+            else:
+                row['evidence_types'] = ''
+        else:
+            row['database_source'] = ''
+            row['evidence_types'] = ''
 
 
 def _checkpoint_path(output_path: str) -> Path:
@@ -858,7 +983,7 @@ def run_batch_parallel(
                 results.append(row)
                 newly_processed += 1
                 tier = row.get('quality_tier', '?')
-                pbar.set_postfix_str(f"{complex_name} → {tier}")
+                pbar.set_postfix_str(f"{complex_name} -> {tier}")
                 pbar.update(1)
 
                 if enable_checkpoint and newly_processed % CHECKPOINT_INTERVAL == 0:
@@ -881,7 +1006,7 @@ def run_batch_parallel(
                         results.append(row)
                         newly_processed += 1
                         tier = row.get('quality_tier', '?')
-                        pbar.set_postfix_str(f"{complex_name} → {tier}")
+                        pbar.set_postfix_str(f"{complex_name} -> {tier}")
                     except Exception as error:
                         print(f"\n  Error processing {complex_name}: {error}",
                               file=sys.stderr)
@@ -1055,26 +1180,26 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for the batch processor."""
     parser = argparse.ArgumentParser(
-        description="Batch process AlphaFold2 predictions — direct imports, no subprocesses",
+        description="Batch process AlphaFold2 predictions - direct imports, no subprocesses",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
     # Basic batch analysis (PKL metrics + pDockQ only)
     python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv
 
-    # Full analysis — sequential
+    # Full analysis - sequential
     python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae
 
-    # Full analysis — 4 parallel workers with checkpointing
+    # Full analysis - 4 parallel workers with checkpointing
     python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae -w 4 --checkpoint
 
-    # Full analysis + JSONL export — 4 parallel workers with checkpointing
+    # Full analysis + JSONL export - 4 parallel workers with checkpointing
     python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
 
     # Resume an interrupted run (picks up where it left off)
     python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --resume
 
-    # Verbose output (sequential only — suppressed with -w > 1)
+    # Verbose output (sequential only - suppressed with -w > 1)
     python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae -v
         """,
     )
@@ -1099,6 +1224,15 @@ Examples:
     parser.add_argument("--resume", action="store_true",
                         help="Resume from a previous checkpoint. Implies --checkpoint. "
                              "Already-processed complexes are skipped.")
+    parser.add_argument("--enrich", metavar="ALIASES_PATH",
+                        help="Enrich output with gene symbols, protein names, and "
+                             "cross-references using a STRING aliases file.")
+    parser.add_argument("--databases", metavar="DATA_DIR",
+                        help="Tag each complex with its database source(s) by checking "
+                             "against STRING, BioGRID, HuRI, and HuMAP. Requires --enrich.")
+    parser.add_argument("--string-min-score", type=int, default=700,
+                        help="Minimum STRING confidence score for database source matching "
+                             "(default: 700). Only used with --databases.")
 
     return parser
 
@@ -1119,6 +1253,10 @@ def main() -> None:
                   file=sys.stderr)
             args.interface = True
             args.pae = True
+
+    if args.databases and not args.enrich:
+        print("Error: --databases requires --enrich", file=sys.stderr)
+        sys.exit(1)
 
     if args.resume:
         args.checkpoint = True
@@ -1161,7 +1299,7 @@ def main() -> None:
     ]
 
     if not sorted_complexes and resumed_results:
-        print("All complexes already processed — writing final output.")
+        print("All complexes already processed - writing final output.")
         results = list(resumed_results)
         results.sort(key=lambda r: r.get('complex_name', ''))
     else:
@@ -1178,11 +1316,60 @@ def main() -> None:
             resumed_results=resumed_results,
         )
 
+    # Enrichment (gene symbols, database sources)
+    include_enrichment = False
+    if args.enrich:
+        from id_mapper import IDMapper, build_uniprot_lookup
+        print(f"Loading ID mapper from: {args.enrich}", file=sys.stderr)
+        mapper = IDMapper(args.enrich, verbose=True)
+        lookup = build_uniprot_lookup(mapper)
+        print(f"  Lookup table: {len(lookup):,} UniProt entries", file=sys.stderr)
+
+        db_pair_sets = None
+        db_evidence = None
+
+        if args.databases:
+            from database_loaders import load_all_databases
+            from id_mapper import map_dataframe_to_uniprot
+            from overlap_analysis import extract_pair_set
+
+            print(f"Loading databases from: {args.databases}", file=sys.stderr)
+            dbs = load_all_databases(
+                args.databases,
+                string_min_score=args.string_min_score,
+                verbose=True,
+            )
+
+            # Map STRING and HuRI to UniProt for pair matching
+            dbs['STRING'] = map_dataframe_to_uniprot(dbs['STRING'], mapper, verbose=True)
+            dbs['HuRI'] = map_dataframe_to_uniprot(dbs['HuRI'], mapper, verbose=True)
+
+            # Build pair sets for each database
+            db_pair_sets = {}
+            for name, df in dbs.items():
+                if 'uniprot_a' in df.columns:
+                    db_pair_sets[name] = extract_pair_set(
+                        df, col_a='uniprot_a', col_b='uniprot_b'
+                    )
+                else:
+                    db_pair_sets[name] = extract_pair_set(df)
+
+            db_evidence = dbs
+            total_pairs = sum(len(s) for s in db_pair_sets.values())
+            print(f"  Database pair sets: {total_pairs:,} total pairs across "
+                  f"{len(db_pair_sets)} databases", file=sys.stderr)
+
+        enrich_results(results, lookup, db_pair_sets, db_evidence)
+        include_enrichment = True
+        print(f"  Enrichment complete: {len(results)} complexes annotated",
+              file=sys.stderr)
+
     # Write CSV output
     write_results_csv(
         results, args.output,
         include_interface=args.interface,
         include_pae=args.pae,
+        include_enrichment=include_enrichment,
     )
 
     print(f"\n{'=' * 60}")

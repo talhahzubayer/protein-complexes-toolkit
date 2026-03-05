@@ -51,7 +51,7 @@ STRING_MAX_SCORE = 1000
 # BioGRID organism filter
 HUMAN_TAXONOMY_ID = "9606"
 
-# BioGRID columns to read (by name) — avoids loading all 37 columns
+# BioGRID columns to read (by name) - avoids loading all 37 columns
 BIOGRID_USECOLS = [
     'Organism ID Interactor A',
     'Organism ID Interactor B',

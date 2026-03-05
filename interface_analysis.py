@@ -54,7 +54,7 @@ from pdockq import (
 INTERFACE_PLDDT_HIGH = 70       # Residues above this are confidently placed
 INTERFACE_PLDDT_VERY_HIGH = 90  # Very high confidence
 
-# PAE confidence threshold (Ångströms) — literature-grounded (PMC11956457)
+# PAE confidence threshold (Ångströms) - literature-grounded (PMC11956457)
 PAE_CONFIDENT_THRESHOLD = 5.0
 
 # Geometry thresholds for flagging
@@ -72,7 +72,7 @@ PLDDT_DISORDER_THRESHOLD = 50
 DENSITY_NORMALIZATION = 3.0          # density / 3.0, capped at 1.0
                                      # (median density ~1.25; max ~1.8 typical)
 
-# Composite score weights — biological importance ordering:
+# Composite score weights - biological importance ordering:
 #   Interface pLDDT + confident contacts are the strongest indicators,
 #   symmetry and density are supporting evidence.
 WEIGHT_PLDDT = 0.35
@@ -83,12 +83,12 @@ WEIGHT_DENSITY = 0.15
 # Paradox detection thresholds (High-quality + substantial disorder)
 PARADOX_IPTM_THRESHOLD = 0.75
 PARADOX_PDOCKQ_THRESHOLD = 0.5
-PARADOX_CONFIDENT_CONTACT_GENUINE = 0.5   # above → likely genuine binding
-PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.2  # below → likely artefactual
+PARADOX_CONFIDENT_CONTACT_GENUINE = 0.5   # above -> likely genuine binding
+PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.2  # below -> likely artefactual
 
 # Metric disagreement threshold (ipTM vs pDockQ)
 # All 212 disagreement cases in 547-complex dataset are ipTM >> pDockQ,
-# indicating pDockQ is systematically more stringent — often penalising
+# indicating pDockQ is systematically more stringent - often penalising
 # genuine interfaces in disordered complexes.
 METRIC_DISAGREEMENT_THRESHOLD = 0.4
 
@@ -197,7 +197,7 @@ def compute_interface_plddt(contact_result: ContactResult) -> dict:
 
     This is the computational replacement for PyMOL eyeballing.  A positive
     interface_vs_bulk_delta indicates the interface is MORE confident than
-    the overall structure — characteristic of genuine interactions and the
+    the overall structure - characteristic of genuine interactions and the
     "paradox complexes" where disordered proteins fold upon binding.
 
     Args:
@@ -309,7 +309,7 @@ def extract_interface_pae(
                        (n_residues_chain_A, n_residues_chain_B) for the
                        dimer case.  Used only as fallback when chain_offsets
                        is not provided.
-        chain_offsets: Tuple of (offset_A, offset_B) — the starting
+        chain_offsets: Tuple of (offset_A, offset_B) - the starting
                        row/column index of each chain in the PAE matrix.
                        For a dimer this is (0, len_A); for multi-chain
                        complexes, computed by compute_pae_chain_offsets().
@@ -337,7 +337,7 @@ def extract_interface_pae(
     else:
         return None
 
-    # ── Map CB contact indices → PAE matrix indices ──
+    # ── Map CB contact indices -> PAE matrix indices ──
     contacts = contact_result.contacts
 
     if cb_to_ca_maps is not None:
@@ -388,7 +388,7 @@ def compute_interface_pae_features(
         chain_lengths: Tuple of (n_residues_chain_A, n_residues_chain_B).
                        Used as fallback when chain_offsets is not provided.
         chain_offsets: Tuple of (offset_A, offset_B) in the PAE matrix.
-        cb_to_ca_maps: Tuple of (map_A, map_B) for CB→CA index translation.
+        cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
 
     Returns:
         Dictionary with keys:
@@ -399,7 +399,7 @@ def compute_interface_pae_features(
             n_confident_contacts: Contacts with PAE < 5Å.
             confident_contact_fraction: Fraction of contacts that are confident.
             cross_chain_pae_mean: Mean of the full cross-chain PAE block
-                                  (not just contacts — captures overall
+                                  (not just contacts - captures overall
                                   chain-chain relative positioning).
     """
     empty = {
@@ -475,7 +475,7 @@ def identify_confident_interface_residues(
     """
     Identify interface residues that pass both PAE and pLDDT confidence filters.
 
-    These are the "computational hot spots" — residue pairs at the interface
+    These are the "computational hot spots" - residue pairs at the interface
     where AlphaFold2 is confident about both the local structure (pLDDT) and
     the relative positioning between chains (PAE).  These are the primary
     drug-discovery-relevant output.
@@ -490,7 +490,7 @@ def identify_confident_interface_residues(
         pae_threshold: Maximum PAE for a confident contact (default 5.0 Å).
         plddt_threshold: Minimum pLDDT for a confident residue (default 70).
         chain_offsets: Tuple of (offset_A, offset_B) in the PAE matrix.
-        cb_to_ca_maps: Tuple of (map_A, map_B) for CB→CA index translation.
+        cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
 
     Returns:
         Dictionary with keys:
@@ -641,7 +641,7 @@ def analyse_interface_with_pae(
     Phase 1+2 analysis: PDB features plus PAE-derived interface features.
 
     Now uses read_pdb_with_chain_info() for proper multi-chain support
-    and CB→CA mapping.  The chain_lengths parameter is accepted for
+    and CB->CA mapping.  The chain_lengths parameter is accepted for
     backward compatibility but is no longer required.
 
     Args:
@@ -739,7 +739,7 @@ def analyse_interface_from_contact_result(
         chain_residue_numbers: Optional for PDB residue number mapping.
         chain_offsets: Tuple of (offset_A, offset_B) in the PAE matrix.
                        Required for multi-chain complexes.
-        cb_to_ca_maps: Tuple of (map_A, map_B) for CB→CA index translation.
+        cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
                        Required when CB count ≠ CA count.
 
     Returns:
@@ -864,8 +864,8 @@ def compute_interface_confidence(metrics: dict) -> Optional[float]:
         return None
 
     plddt_component = if_plddt / 100.0
-    pae_component = conf_frac                                   # already 0–1
-    symmetry_component = symmetry                               # already 0–1
+    pae_component = conf_frac                                   # already 0-1
+    symmetry_component = symmetry                               # already 0-1
     density_component = min(density / DENSITY_NORMALIZATION, 1.0)
 
     score = (
@@ -947,7 +947,7 @@ def build_interface_export_record(
     Build a structured record for interface residue export.
 
     Produces a JSON-serialisable dictionary suitable for JSONL output.
-    Each record describes a complex's confident interface residues —
+    Each record describes a complex's confident interface residues -
     the computationally identified binding hot-spots that pass both
     PAE and pLDDT confidence filters.
 
@@ -959,7 +959,7 @@ def build_interface_export_record(
         protein_a: UniProt ID for chain A.
         protein_b: UniProt ID for chain B.
         quality_tier_v2: V2 quality classification ("High"/"Medium"/"Low").
-        interface_confidence_score: Composite score (0.0–1.0) or None.
+        interface_confidence_score: Composite score (0.0-1.0) or None.
         confident_residue_numbers_a: PDB residue numbers for chain A
             confident interface residues.
         confident_residue_numbers_b: PDB residue numbers for chain B

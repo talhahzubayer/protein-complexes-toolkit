@@ -23,7 +23,7 @@ from typing import Any, Optional, Union
 # ── JAX Module Mocking ──────────────────────────────────────────────
 # Mock JAX modules BEFORE any other imports.
 # This prevents pickle from trying to import real JAX modules.
-# Runs once at import time — safe for use across multiprocessing workers
+# Runs once at import time - safe for use across multiprocessing workers
 # when each worker imports this module independently.
 
 class _MockJaxArray:
@@ -39,7 +39,7 @@ class _MockJaxArray:
 class _MockJaxModule:
     """Mock module that returns passthrough functions for all JAX calls.
     
-    Python's dunder/special methods bypass __getattr__ entirely — the
+    Python's dunder/special methods bypass __getattr__ entirely - the
     interpreter looks them up directly on the *type*, not the instance.
     Pickle's object-reconstruction machinery may call __call__, iterate
     with __iter__, index with __getitem__, or test truthiness with

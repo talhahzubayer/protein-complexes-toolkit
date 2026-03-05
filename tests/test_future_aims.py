@@ -19,7 +19,7 @@ class TestScalability:
 
     def test_multiprocessing_same_as_sequential(self):
         """Workers > 1 should produce identical results to workers == 1."""
-        pytest.skip("Not yet implemented — requires processing N complexes both ways")
+        pytest.skip("Not yet implemented - requires processing N complexes both ways")
 
     def test_checkpoint_save_creates_file(self):
         """Checkpoint file is created during processing."""
@@ -46,7 +46,7 @@ class TestQualityFramework:
 
     def test_quality_tier_distribution(self):
         """Quality tier distribution matches documented proportions."""
-        pytest.skip("Not yet implemented — requires full dataset")
+        pytest.skip("Not yet implemented - requires full dataset")
 
     def test_v2_reclassification_counts(self):
         """Number of upgrades/downgrades matches documented values."""
@@ -54,7 +54,7 @@ class TestQualityFramework:
 
     def test_paradox_detection_on_known_examples(self):
         """Known paradox complexes are correctly flagged."""
-        pytest.skip("Not yet implemented — requires specific complex IDs")
+        pytest.skip("Not yet implemented - requires specific complex IDs")
 
 
 # ── Aim 3: Database Ingestion & ID Mapping ───────────────────────
@@ -134,7 +134,7 @@ class TestVariantMapping:
 
     def test_variant_parser_returns_dataframe(self):
         """UniProt variant parser returns standardised DataFrame."""
-        pytest.skip("Not yet implemented — variant_parser.py not built")
+        pytest.skip("Not yet implemented - variant_parser.py not built")
 
     def test_variant_at_interface_detected(self):
         """Known disease variant at interface position is detected."""
@@ -165,7 +165,7 @@ class TestStabilityScoring:
 
     def test_protvar_api_query(self):
         """ProtVar API returns valid results for known variant."""
-        pytest.skip("Not yet implemented — requires ProtVar integration")
+        pytest.skip("Not yet implemented - requires ProtVar integration")
 
     def test_eve_score_lookup(self):
         """EVE scores correctly loaded and mapped."""
@@ -184,7 +184,7 @@ class TestVisualisationRobustness:
 
     def test_all_figures_generated_without_error(self):
         """All 10 figures are created without exceptions."""
-        pytest.skip("Not yet implemented — requires matplotlib rendering test")
+        pytest.skip("Not yet implemented - requires matplotlib rendering test")
 
     def test_pae_heatmap_generation(self):
         """Per-complex PAE heatmaps generated correctly."""
@@ -211,7 +211,7 @@ class TestPyMOLScripts:
 
     def test_pymol_script_generated(self):
         """PyMOL script generated for a High-tier complex."""
-        pytest.skip("Not yet implemented — pymol_scripts.py not built")
+        pytest.skip("Not yet implemented - pymol_scripts.py not built")
 
     def test_pymol_script_valid_syntax(self):
         """Generated .pml file has valid PyMOL commands."""
