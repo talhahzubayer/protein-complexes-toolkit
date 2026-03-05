@@ -68,7 +68,7 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                      + PAE features)            
 ```
 
-### Phase A: Database Ingestion & ID Mapping Pipeline
+### Database Ingestion & ID Mapping Pipeline
 
 ```
 PPI Database Files                    STRING Aliases File
