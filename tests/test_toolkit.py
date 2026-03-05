@@ -461,6 +461,24 @@ class TestEnrichResults:
         assert 'BioGRID' in results[0]['database_source']
         assert 'HuRI' not in results[0]['database_source']
 
+    def test_enrich_database_evidence_types(self):
+        """Enrich populates evidence_types from pre-computed evidence sets."""
+        results = [{'protein_a': 'P04637', 'protein_b': 'Q00987'}]
+        lookup = {}
+        pair_sets = {
+            'STRING': {('P04637', 'Q00987')},
+            'BioGRID': {('P04637', 'Q00987')},
+        }
+        evidence = {
+            'STRING': {'combined_score'},
+            'BioGRID': {'physical', 'co-fractionation'},
+        }
+        enrich_results(results, lookup, pair_sets, evidence)
+        ev = results[0]['evidence_types']
+        assert 'combined_score' in ev
+        assert 'physical' in ev
+        assert 'co-fractionation' in ev
+
     def test_enrich_without_databases(self):
         """Enrich without database_pair_sets leaves source empty."""
         results = [{'protein_a': 'P04637', 'protein_b': 'Q00987'}]

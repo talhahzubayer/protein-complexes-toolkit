@@ -741,7 +741,7 @@ def enrich_results(
     results: list[dict],
     lookup: dict[str, dict],
     database_pair_sets: Optional[dict[str, set]] = None,
-    database_evidence: Optional[dict[str, 'pd.DataFrame']] = None,
+    database_evidence: Optional[dict[str, set]] = None,
 ) -> None:
     """Enrich result rows with gene symbols, protein names, and database sources.
 
@@ -752,8 +752,9 @@ def enrich_results(
         lookup: UniProt-keyed lookup dict from build_uniprot_lookup().
         database_pair_sets: Optional dict of {db_name: set of normalised
             UniProt pairs} for "source of complex" tagging.
-        database_evidence: Optional dict of {db_name: DataFrame} with
-            original interaction data for evidence_type extraction.
+        database_evidence: Optional dict of {db_name: set of evidence type
+            strings}, pre-computed once to avoid scanning large DataFrames
+            per complex.
     """
     from overlap_analysis import normalise_pair
 
@@ -790,11 +791,9 @@ def enrich_results(
             if database_evidence:
                 evidence_set: set[str] = set()
                 for db_name in sources:
-                    df = database_evidence.get(db_name)
-                    if df is not None and 'evidence_type' in df.columns:
-                        # Collect unique evidence types from this DB
-                        evidence_types_col = df['evidence_type'].dropna().unique()
-                        evidence_set.update(str(e) for e in evidence_types_col)
+                    ev = database_evidence.get(db_name)
+                    if ev:
+                        evidence_set.update(ev)
                 row['evidence_types'] = '|'.join(sorted(evidence_set))
             else:
                 row['evidence_types'] = ''
@@ -1354,7 +1353,17 @@ def main() -> None:
                 else:
                     db_pair_sets[name] = extract_pair_set(df)
 
-            db_evidence = dbs
+            # Pre-compute evidence types per database (avoids scanning
+            # millions of rows per complex inside enrich_results)
+            db_evidence = {}
+            for name, df in dbs.items():
+                if 'evidence_type' in df.columns:
+                    db_evidence[name] = set(
+                        str(e) for e in df['evidence_type'].dropna().unique()
+                    )
+                else:
+                    db_evidence[name] = set()
+
             total_pairs = sum(len(s) for s in db_pair_sets.values())
             print(f"  Database pair sets: {total_pairs:,} total pairs across "
                   f"{len(db_pair_sets)} databases", file=sys.stderr)
