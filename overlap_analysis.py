@@ -93,8 +93,7 @@ def extract_pair_set(
         Set of (id_a, id_b) tuples, canonically ordered.
     """
     pairs = set()
-    for _, row in df.iterrows():
-        a, b = str(row[col_a]), str(row[col_b])
+    for a, b in zip(df[col_a].astype(str), df[col_b].astype(str)):
         if a and b and a != 'nan' and b != 'nan':
             pairs.add(normalise_pair(a, b))
     return pairs
@@ -120,8 +119,7 @@ def extract_pair_set_base(
         Set of (base_id_a, base_id_b) tuples, canonically ordered.
     """
     pairs = set()
-    for _, row in df.iterrows():
-        a, b = str(row[col_a]), str(row[col_b])
+    for a, b in zip(df[col_a].astype(str), df[col_b].astype(str)):
         if a and b and a != 'nan' and b != 'nan':
             pairs.add(normalise_pair_base(a, b))
     return pairs
@@ -350,7 +348,8 @@ def _plot_upset_style(
         n_active = sum(flags)
         if n_active == 1:
             idx = flags.index(True)
-            colours.append(list(DB_COLOURS.values())[idx % len(DB_COLOURS)])
+            db_name = names[idx]
+            colours.append(DB_COLOURS.get(db_name, '#888888'))
         else:
             colours.append('#888888')
 

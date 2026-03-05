@@ -775,8 +775,8 @@ def enrich_results(
         # Secondary accessions (need to look up via ENSP)
         ensp_a = info_a.get('ensembl_protein_id', '')
         ensp_b = info_b.get('ensembl_protein_id', '')
-        row['secondary_accessions_a'] = ''
-        row['secondary_accessions_b'] = ''
+        row['secondary_accessions_a'] = info_a.get('secondary_accessions', '')
+        row['secondary_accessions_b'] = info_b.get('secondary_accessions', '')
 
         # Database source tagging
         if database_pair_sets:
@@ -1318,6 +1318,7 @@ def main() -> None:
     # Enrichment (gene symbols, database sources)
     include_enrichment = False
     if args.enrich:
+        enrich_start = time.time()
         from id_mapper import IDMapper, build_uniprot_lookup
         print(f"Loading ID mapper from: {args.enrich}", file=sys.stderr)
         mapper = IDMapper(args.enrich, verbose=True)
@@ -1340,10 +1341,13 @@ def main() -> None:
             )
 
             # Map STRING and HuRI to UniProt for pair matching
+            print("Mapping STRING IDs to UniProt...", file=sys.stderr)
             dbs['STRING'] = map_dataframe_to_uniprot(dbs['STRING'], mapper, verbose=True)
+            print("Mapping HuRI IDs to UniProt...", file=sys.stderr)
             dbs['HuRI'] = map_dataframe_to_uniprot(dbs['HuRI'], mapper, verbose=True)
 
             # Build pair sets for each database
+            print("Building pair sets...", file=sys.stderr)
             db_pair_sets = {}
             for name, df in dbs.items():
                 if 'uniprot_a' in df.columns:
@@ -1352,6 +1356,8 @@ def main() -> None:
                     )
                 else:
                     db_pair_sets[name] = extract_pair_set(df)
+                print(f"  {name}: {len(db_pair_sets[name]):,} unique pairs",
+                      file=sys.stderr)
 
             # Pre-compute evidence types per database (avoids scanning
             # millions of rows per complex inside enrich_results)
@@ -1365,15 +1371,18 @@ def main() -> None:
                     db_evidence[name] = set()
 
             total_pairs = sum(len(s) for s in db_pair_sets.values())
-            print(f"  Database pair sets: {total_pairs:,} total pairs across "
+            print(f"  Total: {total_pairs:,} pairs across "
                   f"{len(db_pair_sets)} databases", file=sys.stderr)
 
+        print(f"Enriching {len(results):,} complexes...", file=sys.stderr)
         enrich_results(results, lookup, db_pair_sets, db_evidence)
         include_enrichment = True
-        print(f"  Enrichment complete: {len(results)} complexes annotated",
-              file=sys.stderr)
+        enrich_elapsed = time.time() - enrich_start
+        print(f"Enrichment complete: {len(results)} complexes annotated "
+              f"in {enrich_elapsed:.1f}s", file=sys.stderr)
 
     # Write CSV output
+    print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
         results, args.output,
         include_interface=args.interface,

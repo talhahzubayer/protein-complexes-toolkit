@@ -441,11 +441,35 @@ class TestEnrichResults:
                 'protein_name': 'Cellular tumor antigen p53',
                 'ensembl_protein_id': 'ENSP00000269305',
                 'ensembl_gene_id': 'ENSG00000141510',
+                'secondary_accessions': 'O15129|Q53GA5',
             },
         }
         enrich_results(results, lookup)
         assert results[0]['gene_symbol_a'] == 'TP53'
         assert results[0]['gene_symbol_b'] == ''  # Q00987 not in lookup
+
+    def test_enrich_secondary_accessions(self):
+        """Enrich populates secondary_accessions from lookup dict."""
+        results = [{'protein_a': 'P04637', 'protein_b': 'Q00987'}]
+        lookup = {
+            'P04637': {
+                'gene_symbol': 'TP53',
+                'protein_name': '',
+                'ensembl_protein_id': 'ENSP00000269305',
+                'ensembl_gene_id': '',
+                'secondary_accessions': 'O15129|Q53GA5',
+            },
+            'Q00987': {
+                'gene_symbol': 'MDM2',
+                'protein_name': '',
+                'ensembl_protein_id': 'ENSP00000258149',
+                'ensembl_gene_id': '',
+                'secondary_accessions': '',
+            },
+        }
+        enrich_results(results, lookup)
+        assert results[0]['secondary_accessions_a'] == 'O15129|Q53GA5'
+        assert results[0]['secondary_accessions_b'] == ''
 
     def test_enrich_database_source(self):
         """Enrich adds database_source when pair sets are provided."""

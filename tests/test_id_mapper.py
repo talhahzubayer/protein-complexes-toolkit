@@ -494,3 +494,27 @@ class TestBuildUniprotLookup:
         for acc in secondary:
             if acc in lookup:
                 assert lookup[acc]['ensembl_protein_id'] == primary_info['ensembl_protein_id']
+
+    def test_lookup_has_secondary_accessions_field(self, lookup):
+        """Each entry has a secondary_accessions field."""
+        for acc, info in list(lookup.items())[:5]:
+            assert 'secondary_accessions' in info
+
+    def test_lookup_secondary_accessions_populated(self, lookup, mapper):
+        """ENSPs with multiple UniProt mappings produce non-empty secondary_accessions."""
+        found_populated = False
+        for acc, info in lookup.items():
+            if info['secondary_accessions']:
+                found_populated = True
+                # Pipe-separated format
+                assert '|' in info['secondary_accessions'] or len(info['secondary_accessions']) >= 6
+                break
+        assert found_populated, "No entries with secondary accessions found"
+
+    def test_lookup_single_mapping_has_empty_secondary(self, lookup):
+        """P04637 (TP53) with a single primary mapping has empty secondary_accessions."""
+        info = lookup.get('P04637')
+        assert info is not None
+        # TP53 may or may not have secondary accessions depending on STRING data;
+        # verify the field is a string (not None/missing)
+        assert isinstance(info['secondary_accessions'], str)

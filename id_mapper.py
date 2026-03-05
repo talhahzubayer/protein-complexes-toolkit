@@ -604,6 +604,7 @@ def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
             'protein_name': str or '',
             'ensembl_protein_id': str or '',
             'ensembl_gene_id': str or '',
+            'secondary_accessions': str (pipe-separated) or '',
         }.
     """
     lookup: dict[str, dict] = {}
@@ -618,6 +619,7 @@ def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
             'protein_name': name,
             'ensembl_protein_id': ensp,
             'ensembl_gene_id': ensg,
+            'secondary_accessions': '|'.join(uniprots[1:]) if len(uniprots) > 1 else '',
         }
 
         for acc in uniprots:
