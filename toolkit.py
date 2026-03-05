@@ -126,7 +126,7 @@ CSV_FIELDNAMES_ENRICHMENT = [
     'gene_symbol_a', 'gene_symbol_b',
     'protein_name_a', 'protein_name_b',
     'ensembl_id_a', 'ensembl_id_b',
-    'secondary_accessions_a', 'secondary_accessions_b',
+    'secondary_accessions_a', 'secondary_accessions_b',  # pipe-separated alternate UniProt accessions (e.g. merged or TrEMBL entries)
     'database_source',
     'evidence_types',
     'sequence_a', 'sequence_b',
@@ -772,7 +772,12 @@ def enrich_results(
         row['ensembl_id_a'] = info_a.get('ensembl_protein_id', '')
         row['ensembl_id_b'] = info_b.get('ensembl_protein_id', '')
 
-        # Secondary accessions (need to look up via ENSP)
+        # Secondary accessions — pipe-separated alternate UniProt accessions.
+        # A single ENSP in STRING aliases can map to multiple UniProt IDs
+        # (e.g. reviewed Swiss-Prot + unreviewed TrEMBL, or merged/legacy
+        # accessions). The first (alphabetically sorted) is the primary
+        # accession used as protein_a/protein_b; the rest are joined with
+        # '|' here.  Example: "P38398|Q6IN68" for BRCA1.
         ensp_a = info_a.get('ensembl_protein_id', '')
         ensp_b = info_b.get('ensembl_protein_id', '')
         row['secondary_accessions_a'] = info_a.get('secondary_accessions', '')
@@ -904,6 +909,16 @@ def _make_progress_bar(total: int, desc: str = "Processing"):
 
 # ── Worker wrapper for multiprocessing ────────────────────────────────
 
+def _worker_initializer():
+    """Run once per worker process on startup.
+
+    Forces the module import chain to execute in the worker so that any
+    import failure raises BrokenProcessPool immediately rather than
+    causing a silent hang.
+    """
+    import toolkit  # noqa: F401
+
+
 def _worker_process_complex(args_tuple: tuple) -> dict:
     """
     Top-level wrapper for process_single_complex that unpacks a tuple.
@@ -992,7 +1007,11 @@ def run_batch_parallel(
             # ── Parallel mode ──
             # Note: verbose per-complex output is suppressed in parallel mode
             # because interleaved prints from multiple workers are unreadable.
-            with ProcessPoolExecutor(max_workers=workers) as executor:
+            print(f"Starting {workers} worker processes...", flush=True)
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_worker_initializer,
+            ) as executor:
                 future_to_name = {
                     executor.submit(_worker_process_complex, item): item[0]
                     for item in work_items
@@ -1001,7 +1020,7 @@ def run_batch_parallel(
                 for future in as_completed(future_to_name):
                     complex_name = future_to_name[future]
                     try:
-                        row = future.result()
+                        row = future.result(timeout=300)
                         results.append(row)
                         newly_processed += 1
                         tier = row.get('quality_tier', '?')
@@ -1409,4 +1428,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from multiprocessing import freeze_support
+    freeze_support()
     main()

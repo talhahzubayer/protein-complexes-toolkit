@@ -619,6 +619,10 @@ def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
             'protein_name': name,
             'ensembl_protein_id': ensp,
             'ensembl_gene_id': ensg,
+            # Pipe-separated alternate UniProt accessions for this ENSP.
+            # One ENSP can map to multiple UniProt IDs (reviewed + unreviewed,
+            # or merged/legacy accessions).  uniprots[0] is the primary;
+            # uniprots[1:] are secondary, joined with '|'.
             'secondary_accessions': '|'.join(uniprots[1:]) if len(uniprots) > 1 else '',
         }
 
