@@ -96,7 +96,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
-**database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0–1000 to 0.0–1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`.
+**database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`.
 
 **id_mapper.py**: Protein identifier cross-referencing using the STRING aliases file as a single source of truth. `IDMapper` class builds bidirectional lookup tables for ENSP-to-UniProt, UniProt-to-gene-symbol, and ENSG-to-ENSP mappings. `resolve_id()` accepts any identifier type and resolves to a target namespace. Isoform-aware: preserves full isoform accessions (e.g., `P22607-2`) and prioritises reviewed Swiss-Prot accessions over TrEMBL. Includes `map_dataframe_to_uniprot()` convenience function for batch DataFrame ID conversion.
 
@@ -385,7 +385,7 @@ The test suite contains **318 tests** across 10 modules (290 real + 28 future pl
 | test_id_mapper.py | 49 | ID validation, mapping, isoform handling, DataFrame conversion |
 | test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
 
-**Results:** 289 passing, 1 skipped (Fig 10 — requires multi-chain data), 28 future placeholders (deselected by default)
+**Results:** 289 passing, 1 skipped (Fig 10 - requires multi-chain data), 28 future placeholders (deselected by default)
 
 **Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `future` (unimplemented features)
 
