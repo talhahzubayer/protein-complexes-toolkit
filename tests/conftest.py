@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 TEST_DATA_DIR = PROJECT_ROOT / "Test_Data"
+TEST_DB_DIR = PROJECT_ROOT / "tests" / "test_data" / "databases"
 TEST_OUTPUT_DIR = PROJECT_ROOT / "tests" / "test_output"
 
 
@@ -263,3 +264,27 @@ def pipeline_csv(test_output_dir, test_data_dir):
 
     write_results_csv(results, str(csv_path), include_interface=True, include_pae=True)
     return csv_path
+
+
+# ── Database Test Data Fixtures ──────────────────────────────────
+
+@pytest.fixture(scope="session")
+def test_db_dir():
+    """Return the path to the tests/test_data/databases/ directory."""
+    assert TEST_DB_DIR.exists(), f"Test database directory not found: {TEST_DB_DIR}"
+    return TEST_DB_DIR
+
+
+@pytest.fixture(scope="session")
+def test_aliases_path(test_db_dir):
+    """Return the path to the test STRING aliases excerpt."""
+    path = test_db_dir / "test_aliases.txt"
+    assert path.exists(), f"Test aliases file not found: {path}"
+    return path
+
+
+@pytest.fixture(scope="session")
+def id_mapper(test_aliases_path):
+    """Session-scoped IDMapper loaded from the test aliases excerpt."""
+    from id_mapper import IDMapper
+    return IDMapper(str(test_aliases_path))

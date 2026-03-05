@@ -17,7 +17,10 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate 10 figures with adaptive rendering for datasets from hundreds to millions of complexes
 - Optional KDE density contour overlays and per-complex PAE heatmaps
-- 177-test regression suite to handle real PDB/PKL data
+- PPI database ingestion: parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
+- Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
+- Database overlap analysis: pairwise and multi-database intersection computation with UpSet-style visualisation
+- 290-test regression suite with real PDB/PKL data and offline database excerpts
 
 
 ## Repository Structure
@@ -29,10 +32,13 @@ protein-complexes-toolkit/
 ├── interface_analysis.py    # Interface analysis module
 ├── toolkit.py               # Batch processing orchestrator
 ├── visualise_results.py     # Visualisation engine
+├── database_loaders.py      # PPI database parsers (STRING, BioGRID, HuRI, HuMAP)
+├── id_mapper.py             # Protein ID cross-referencing (ENSP/ENSG/UniProt/gene symbol)
+├── overlap_analysis.py      # Database overlap computation and UpSet diagrams
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (177 tests)
+├── tests/                   # Test suite (290 tests + 28 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -40,7 +46,11 @@ protein-complexes-toolkit/
 │   ├── test_toolkit.py
 │   ├── test_visualise_results.py
 │   ├── test_integration.py
-│   └── test_future_aims.py
+│   ├── test_future_aims.py
+│   ├── test_database_loaders.py
+│   ├── test_id_mapper.py
+│   └── test_data/
+│       └── databases/       # Small database excerpts for offline testing
 ├── data/                    # External databases (not included in repo)
 │   └── ppi/                 # Protein-protein interaction databases (see "Setting Up PPI Databases")
 └── Test_Data/               # Not included in repo (see "Setting Up Test Data")
@@ -58,6 +68,22 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                      + PAE features)            
 ```
 
+### Phase A: Database Ingestion & ID Mapping Pipeline
+
+```
+PPI Database Files                    STRING Aliases File
+  (STRING, BioGRID,                   (9606.protein.aliases)
+   HuRI, HuMAP)                              │
+       │                                      ▼
+       ▼                               id_mapper.py
+database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
+  (standardised DataFrames)         cross-referencing)
+       │                                      │
+       ▼                                      ▼
+              overlap_analysis.py
+        (pair normalisation, Venn/UpSet diagrams)
+```
+
 ### Script Descriptions
 
 **read_af2_nojax.py**: Loads AlphaFold2 result PKL files using module-level JAX mocking, so JAX does not need to be installed. Extracts ipTM, pTM, ranking_confidence, per-residue pLDDT arrays, and PAE matrices. Supports `.pkl`, `.pkl.gz`, and `.pkl.bz2` formats.
@@ -70,6 +96,11 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
 
 **visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
+**database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0–1000 to 0.0–1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`.
+
+**id_mapper.py**: Protein identifier cross-referencing using the STRING aliases file as a single source of truth. `IDMapper` class builds bidirectional lookup tables for ENSP-to-UniProt, UniProt-to-gene-symbol, and ENSG-to-ENSP mappings. `resolve_id()` accepts any identifier type and resolves to a target namespace. Isoform-aware: preserves full isoform accessions (e.g., `P22607-2`) and prioritises reviewed Swiss-Prot accessions over TrEMBL. Includes `map_dataframe_to_uniprot()` convenience function for batch DataFrame ID conversion.
+
+**overlap_analysis.py**: Computes pairwise protein interaction overlaps across databases after ID normalisation. `normalise_pair()` creates order-independent pair keys. `extract_pair_set()` converts DataFrames to normalised pair sets. `compute_overlaps()` returns per-database counts, pairwise overlaps, triple overlaps, all-database intersections, and unique-to-database sets. Supports UpSet-style intersection visualisation for 4+ databases.
 
 
 ## Installation
@@ -213,6 +244,29 @@ python interface_analysis.py --pdb structure.pdb --json output.json
 python interface_analysis.py --pdb structure.pdb --pkl result.pkl --json output.json
 ```
 
+### Database Ingestion & ID Mapping
+
+```bash
+# Load a specific PPI database
+python database_loaders.py --database string --data-dir data/ppi/
+python database_loaders.py --database biogrid --data-dir data/ppi/
+python database_loaders.py --database huri --data-dir data/ppi/
+python database_loaders.py --database humap --data-dir data/ppi/
+
+# Load all databases and export to CSV
+python database_loaders.py --database all --data-dir data/ppi/ --output all_interactions.csv
+
+# Resolve a protein identifier
+python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve ENSP00000269305
+python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve P04637
+
+# Print mapping statistics
+python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --stats
+
+# Compute database overlaps and generate Venn/UpSet diagram
+python overlap_analysis.py --data-dir data/ppi/ --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn_overlap.png
+```
+
 ### Running Tests
 
 ```bash
@@ -227,6 +281,9 @@ python -m pytest tests/ -m "regression" -v
 
 # Integration tests
 python -m pytest tests/ -m "integration" -v
+
+# Database loading and ID mapping tests
+python -m pytest tests/ -m "database" -v
 
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
@@ -296,10 +353,14 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Roadmap
 
-The following features are planned for future development:
+### Completed
 
-- **Aim 1 - Database Ingestion:** Download and parse interaction databases (STRING, BioGRID, HuRI, HuMAP)
-- **Aim 2 - ID Cross-Referencing:** Build mapping pipeline from Ensembl to UniProt to gene symbol to RefSeq
+- **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 46-column CSV, 10-figure visualisation suite
+- **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
+- **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with cross-database overlap analysis
+
+### Planned
+
 - **Aim 3 - Protein Clustering:** Integrate STRING sequence clusters and Foldseek structural similarity
 - **Aim 4 - Variant Mapping:** Map ClinVar and gnomAD variants onto interface residues with structural context classification
 - **Aim 6 - Stability Scoring:** Integrate ProtVar, EVE scores, and FoldX for predicted structural impact
@@ -310,21 +371,23 @@ The following features are planned for future development:
 
 ## Testing
 
-The test suite contains **177 tests** across 8 modules:
+The test suite contains **318 tests** across 10 modules (290 real + 28 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
-| test_read_af2_nojax.py | 21 | PKL loading, metric extraction |
-| test_pdockq.py | 32 | PDB parsing, pDockQ calculation, multi-chain |
-| test_interface_analysis.py | 35 | Interface geometry, pLDDT, PAE, composite |
-| test_toolkit.py | 24 | File discovery, quality classification, CSV |
+| test_read_af2_nojax.py | 26 | PKL loading, metric extraction |
+| test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
+| test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
+| test_toolkit.py | 37 | File discovery, quality classification, CSV |
 | test_visualise_results.py | 22 | Figure generation, data loading, CLI |
 | test_integration.py | 8 | Cross-module pipeline, data flow |
-| test_future_aims.py | 35 | Placeholders for future features |
+| test_database_loaders.py | 63 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap |
+| test_id_mapper.py | 49 | ID validation, mapping, isoform handling, DataFrame conversion |
+| test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
 
-**Results:** 170 passing, 1 skipped (Fig 10 - requires multi-chain data), 35 future placeholders (deselected by default)
+**Results:** 289 passing, 1 skipped (Fig 10 — requires multi-chain data), 28 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `future` (unimplemented features)
 
 
 ## Acknowledgements

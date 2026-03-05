@@ -1,0 +1,628 @@
+#!/usr/bin/env python3
+"""
+ID Cross-Reference and Mapping Module for Protein Identifiers.
+
+Parses the STRING aliases file to build in-memory lookup dictionaries for
+efficient cross-referencing between Ensembl protein IDs (ENSP), Ensembl
+gene IDs (ENSG), UniProt accessions, and gene symbols.
+
+Isoform-aware: preserves full isoform-specific UniProt accessions (e.g.,
+Q9UKT4-2) as primary keys and uses base accessions (e.g., Q9UKT4) as
+grouping fields.
+
+Usage as module:
+    from id_mapper import IDMapper
+    mapper = IDMapper("data/ppi/9606.protein.aliases.v12.0.txt")
+    mapper.ensembl_to_uniprot("ENSP00000269305")  # -> ['P04637']
+    mapper.uniprot_to_gene_symbol("P04637")        # -> 'TP53'
+    mapper.ensg_to_uniprot("ENSG00000141510")      # -> ['P04637']
+
+Usage as CLI:
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --stats
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --export lookup.csv
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve P04637
+"""
+
+import sys
+import re
+import argparse
+import csv
+from pathlib import Path
+from typing import Optional
+from collections import defaultdict
+
+import pandas as pd
+
+# ── Constants ────────────────────────────────────────────────────────
+
+# UniProt accession pattern (with optional isoform suffix)
+# Matches: P12345, Q9UKT4-2, A0A0B4J2C3, A0A0B4J2C3-1
+UNIPROT_ACCESSION_RE = re.compile(
+    r'^[OPQ][0-9][A-Z0-9]{3}[0-9](-\d+)?$'
+    r'|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}(-\d+)?$'
+)
+
+# Ensembl protein ID pattern
+ENSP_RE = re.compile(r'^ENSP\d{11}$')
+
+# Ensembl gene ID pattern
+ENSG_RE = re.compile(r'^ENSG\d{11}$')
+
+# STRING taxonomy prefix
+STRING_TAXONOMY_PREFIX = '9606.'
+
+# Alias sources to parse from the STRING aliases file (priority order)
+ALIAS_SOURCES_UNIPROT = frozenset({'UniProt_AC', 'Ensembl_UniProt'})
+ALIAS_SOURCES_GENE_SYMBOL = frozenset({'Ensembl_HGNC_symbol'})
+ALIAS_SOURCES_ENSG = frozenset({'Ensembl_gene'})
+ALIAS_SOURCES_PROTEIN_NAME = frozenset({'UniProt_DE_RecName_Full'})
+
+# All relevant sources combined for fast filtering during parsing
+ALL_RELEVANT_SOURCES = (
+    ALIAS_SOURCES_UNIPROT
+    | ALIAS_SOURCES_GENE_SYMBOL
+    | ALIAS_SOURCES_ENSG
+    | ALIAS_SOURCES_PROTEIN_NAME
+)
+
+# Default aliases file path
+DEFAULT_ALIASES_PATH = Path(__file__).parent / "data" / "ppi" / "9606.protein.aliases.v12.0.txt"
+
+
+# ── ID Validation Functions ──────────────────────────────────────────
+
+def is_uniprot_accession(identifier: str) -> bool:
+    """Check if a string matches the UniProt accession format.
+
+    Accepts both canonical (P12345) and isoform-specific (Q9UKT4-2)
+    accessions, including the longer format (A0A0B4J2C3).
+
+    Args:
+        identifier: String to test.
+
+    Returns:
+        True if it matches UniProt accession pattern.
+    """
+    return bool(UNIPROT_ACCESSION_RE.match(identifier))
+
+
+def split_isoform(accession: str) -> tuple[str, Optional[str]]:
+    """Split a UniProt accession into base accession and isoform number.
+
+    Args:
+        accession: UniProt accession, e.g. 'Q9UKT4-2' or 'P12345'.
+
+    Returns:
+        Tuple of (base_accession, isoform_number_or_None).
+        For 'Q9UKT4-2' returns ('Q9UKT4', '2').
+        For 'P12345' returns ('P12345', None).
+    """
+    if '-' in accession:
+        parts = accession.rsplit('-', 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return parts[0], parts[1]
+    return accession, None
+
+
+def detect_id_type(identifier: str) -> str:
+    """Detect the type of a protein/gene identifier.
+
+    Args:
+        identifier: Any protein or gene identifier string.
+
+    Returns:
+        One of: 'uniprot_isoform', 'uniprot', 'ensp', 'ensg', 'unknown'.
+    """
+    if ENSP_RE.match(identifier):
+        return 'ensp'
+    if ENSG_RE.match(identifier):
+        return 'ensg'
+    if is_uniprot_accession(identifier):
+        _, iso = split_isoform(identifier)
+        return 'uniprot_isoform' if iso is not None else 'uniprot'
+    return 'unknown'
+
+
+# ── IDMapper Class ───────────────────────────────────────────────────
+
+class IDMapper:
+    """Cross-reference mapper for protein identifiers.
+
+    Parses the STRING aliases file once and builds in-memory lookup
+    dictionaries for efficient ID resolution. Supports mappings between:
+    - Ensembl protein IDs (ENSP) <-> UniProt accessions
+    - Ensembl protein IDs (ENSP) <-> gene symbols
+    - Ensembl gene IDs (ENSG) <-> Ensembl protein IDs (ENSP)
+    - UniProt accessions <-> gene symbols (via ENSP as bridge)
+
+    Isoform-aware: when mapping from databases that lack isoform specificity
+    (STRING, BioGRID), the mapper flags results as base-accession matches.
+
+    Args:
+        aliases_filepath: Path to STRING aliases file. Defaults to
+            data/ppi/9606.protein.aliases.v12.0.txt.
+        verbose: Print progress during parsing.
+    """
+
+    def __init__(
+        self,
+        aliases_filepath: Optional[str] = None,
+        verbose: bool = False,
+    ) -> None:
+        """Parse the aliases file and build lookup dictionaries."""
+        # ENSP -> list of UniProt accessions
+        self._ensp_to_uniprot: dict[str, list[str]] = defaultdict(list)
+        # UniProt base accession -> list of ENSP IDs
+        self._uniprot_to_ensp: dict[str, list[str]] = defaultdict(list)
+        # ENSP -> gene symbol (one-to-one, last wins)
+        self._ensp_to_symbol: dict[str, str] = {}
+        # gene symbol -> list of ENSP IDs
+        self._symbol_to_ensp: dict[str, list[str]] = defaultdict(list)
+        # ENSG -> list of ENSP IDs
+        self._ensg_to_ensp: dict[str, list[str]] = defaultdict(list)
+        # ENSP -> ENSG (one-to-one)
+        self._ensp_to_ensg: dict[str, str] = {}
+        # ENSP -> protein name (one-to-one, last wins)
+        self._ensp_to_name: dict[str, str] = {}
+
+        filepath = Path(aliases_filepath) if aliases_filepath else DEFAULT_ALIASES_PATH
+        if not filepath.exists():
+            raise FileNotFoundError(f"Aliases file not found: {filepath}")
+
+        self._parse_aliases(filepath, verbose)
+
+    def _parse_aliases(self, filepath: Path, verbose: bool = False) -> None:
+        """Parse the STRING aliases file line by line.
+
+        Reads only rows with source types in the relevant sets.
+        For Ensembl_UniProt rows, additionally filters by UniProt
+        accession regex to exclude gene symbols mixed into this source.
+
+        Args:
+            filepath: Path to the aliases TSV file.
+            verbose: Print progress.
+        """
+        lines_read = 0
+        lines_used = 0
+
+        with open(filepath, encoding='utf-8', errors='replace') as f:
+            # Skip header line
+            next(f)
+            for line in f:
+                lines_read += 1
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) < 3:
+                    continue
+
+                ensp_raw, alias, source = parts[0], parts[1], parts[2]
+
+                if source not in ALL_RELEVANT_SOURCES:
+                    continue
+
+                # Strip 9606. taxonomy prefix
+                ensp = ensp_raw.removeprefix(STRING_TAXONOMY_PREFIX)
+
+                # Route to appropriate dictionary based on source
+                if source in ALIAS_SOURCES_UNIPROT:
+                    # For Ensembl_UniProt, filter by regex (mixed content)
+                    if source == 'Ensembl_UniProt' and not is_uniprot_accession(alias):
+                        continue
+                    if alias not in self._ensp_to_uniprot[ensp]:
+                        self._ensp_to_uniprot[ensp].append(alias)
+                        base, _ = split_isoform(alias)
+                        if ensp not in self._uniprot_to_ensp[base]:
+                            self._uniprot_to_ensp[base].append(ensp)
+
+                elif source in ALIAS_SOURCES_GENE_SYMBOL:
+                    self._ensp_to_symbol[ensp] = alias
+                    if ensp not in self._symbol_to_ensp[alias]:
+                        self._symbol_to_ensp[alias].append(ensp)
+
+                elif source in ALIAS_SOURCES_ENSG:
+                    if ensp not in self._ensg_to_ensp[alias]:
+                        self._ensg_to_ensp[alias].append(ensp)
+                    self._ensp_to_ensg[ensp] = alias
+
+                elif source in ALIAS_SOURCES_PROTEIN_NAME:
+                    self._ensp_to_name[ensp] = alias
+
+                lines_used += 1
+
+        # Sort UniProt accession lists to prioritize reviewed (Swiss-Prot)
+        # accessions. Swiss-Prot entries for humans typically start with
+        # P, Q, or O (6 chars). TrEMBL entries start with other letters
+        # or use the longer A0A0* format (10 chars).
+        def _uniprot_sort_key(acc: str) -> tuple[int, int, str]:
+            is_canonical = acc[0] in 'OPQ' and len(acc) == 6
+            return (0 if is_canonical else 1, len(acc), acc)
+
+        for ensp in self._ensp_to_uniprot:
+            self._ensp_to_uniprot[ensp].sort(key=_uniprot_sort_key)
+
+        # Convert defaultdicts to regular dicts to prevent accidental creation
+        self._ensp_to_uniprot = dict(self._ensp_to_uniprot)
+        self._uniprot_to_ensp = dict(self._uniprot_to_ensp)
+        self._symbol_to_ensp = dict(self._symbol_to_ensp)
+        self._ensg_to_ensp = dict(self._ensg_to_ensp)
+
+        if verbose:
+            print(f"  Aliases: parsed {lines_read:,} lines, used {lines_used:,} relevant entries",
+                  file=sys.stderr)
+            stats = self.get_mapping_stats()
+            for key, count in stats.items():
+                print(f"    {key}: {count:,} entries", file=sys.stderr)
+
+    def ensembl_to_uniprot(self, ensp_id: str) -> list[str]:
+        """Map an Ensembl protein ID to UniProt accession(s).
+
+        Args:
+            ensp_id: Ensembl protein ID, e.g. 'ENSP00000269305'.
+                Accepts with or without '9606.' prefix.
+
+        Returns:
+            List of UniProt accessions mapped to this ENSP ID.
+            Empty list if no mapping found.
+        """
+        ensp = ensp_id.removeprefix(STRING_TAXONOMY_PREFIX)
+        return list(self._ensp_to_uniprot.get(ensp, []))
+
+    def uniprot_to_ensembl(self, uniprot_id: str) -> list[str]:
+        """Map a UniProt accession to Ensembl protein ID(s).
+
+        For isoform accessions (e.g. 'Q9UKT4-2'), looks up the base
+        accession ('Q9UKT4') since STRING lacks isoform specificity.
+
+        Args:
+            uniprot_id: UniProt accession (base or isoform).
+
+        Returns:
+            List of ENSP IDs. Empty list if no mapping found.
+        """
+        base, _ = split_isoform(uniprot_id)
+        return list(self._uniprot_to_ensp.get(base, []))
+
+    def uniprot_to_gene_symbol(self, uniprot_id: str) -> Optional[str]:
+        """Map a UniProt accession to its HGNC gene symbol.
+
+        Chains: UniProt -> ENSP -> gene symbol.
+
+        Args:
+            uniprot_id: UniProt accession (base or isoform).
+
+        Returns:
+            Gene symbol string, or None if no mapping found.
+        """
+        ensp_list = self.uniprot_to_ensembl(uniprot_id)
+        for ensp in ensp_list:
+            symbol = self._ensp_to_symbol.get(ensp)
+            if symbol:
+                return symbol
+        return None
+
+    def ensg_to_uniprot(self, ensg_id: str) -> list[str]:
+        """Map an Ensembl gene ID (ENSG) to UniProt accession(s).
+
+        This is the bridge for HuRI data, which uses ENSG IDs.
+        Chains: ENSG -> ENSP -> UniProt.
+
+        Args:
+            ensg_id: Ensembl gene ID, e.g. 'ENSG00000141510'.
+
+        Returns:
+            List of unique UniProt accessions. Empty list if no mapping found.
+        """
+        ensp_list = self._ensg_to_ensp.get(ensg_id, [])
+        seen = set()
+        result = []
+        for ensp in ensp_list:
+            for uniprot in self._ensp_to_uniprot.get(ensp, []):
+                if uniprot not in seen:
+                    seen.add(uniprot)
+                    result.append(uniprot)
+        return result
+
+    def ensg_to_ensembl(self, ensg_id: str) -> list[str]:
+        """Map an Ensembl gene ID (ENSG) to Ensembl protein ID(s) (ENSP).
+
+        Args:
+            ensg_id: Ensembl gene ID.
+
+        Returns:
+            List of ENSP IDs. Empty list if no mapping found.
+        """
+        return list(self._ensg_to_ensp.get(ensg_id, []))
+
+    def resolve_id(
+        self,
+        identifier: str,
+        target: str = 'uniprot',
+    ) -> Optional[str]:
+        """Master resolution function: accept any ID type, return the target type.
+
+        Detects the input ID type automatically and resolves through the
+        mapping chain to produce the requested target type.
+
+        For isoform-specific UniProt accessions passed as input, the full
+        isoform ID is preserved in the output when target is 'uniprot'.
+
+        Args:
+            identifier: Any protein/gene identifier.
+            target: Target ID type: 'uniprot', 'ensp', 'gene_symbol'.
+
+        Returns:
+            Resolved identifier in the target namespace, or None if unmappable.
+            For 'uniprot' target with one-to-many: returns the first accession.
+        """
+        id_type = detect_id_type(identifier)
+
+        if target == 'uniprot':
+            if id_type in ('uniprot', 'uniprot_isoform'):
+                return identifier  # Already UniProt
+            if id_type == 'ensp':
+                results = self.ensembl_to_uniprot(identifier)
+                return results[0] if results else None
+            if id_type == 'ensg':
+                results = self.ensg_to_uniprot(identifier)
+                return results[0] if results else None
+
+        elif target == 'ensp':
+            if id_type == 'ensp':
+                return identifier
+            if id_type in ('uniprot', 'uniprot_isoform'):
+                results = self.uniprot_to_ensembl(identifier)
+                return results[0] if results else None
+            if id_type == 'ensg':
+                results = self.ensg_to_ensembl(identifier)
+                return results[0] if results else None
+
+        elif target == 'gene_symbol':
+            if id_type in ('uniprot', 'uniprot_isoform'):
+                return self.uniprot_to_gene_symbol(identifier)
+            if id_type == 'ensp':
+                return self._ensp_to_symbol.get(
+                    identifier.removeprefix(STRING_TAXONOMY_PREFIX)
+                )
+            if id_type == 'ensg':
+                ensp_list = self.ensg_to_ensembl(identifier)
+                for ensp in ensp_list:
+                    symbol = self._ensp_to_symbol.get(ensp)
+                    if symbol:
+                        return symbol
+                return None
+
+        return None
+
+    def resolve_pair_to_uniprot(
+        self,
+        id_a: str,
+        id_b: str,
+    ) -> Optional[tuple[str, str, bool]]:
+        """Resolve a pair of identifiers to UniProt accessions.
+
+        Args:
+            id_a: Identifier for protein A (any type).
+            id_b: Identifier for protein B (any type).
+
+        Returns:
+            Tuple of (uniprot_a, uniprot_b, is_base_accession_match) or None
+            if either protein cannot be resolved.
+            is_base_accession_match is True when the source database lacks
+            isoform specificity (mapped via base accession only).
+        """
+        uniprot_a = self.resolve_id(id_a, target='uniprot')
+        uniprot_b = self.resolve_id(id_b, target='uniprot')
+
+        if uniprot_a is None or uniprot_b is None:
+            return None
+
+        # Check if either input was a non-UniProt type (base accession match)
+        type_a = detect_id_type(id_a)
+        type_b = detect_id_type(id_b)
+        is_base = type_a not in ('uniprot', 'uniprot_isoform') or \
+                  type_b not in ('uniprot', 'uniprot_isoform')
+
+        return (uniprot_a, uniprot_b, is_base)
+
+    def get_mapping_stats(self) -> dict[str, int]:
+        """Return counts of entries in each lookup dictionary.
+
+        Returns:
+            Dict with keys like 'ensp_to_uniprot', 'uniprot_to_ensp', etc.
+            and integer counts as values.
+        """
+        return {
+            'ensp_to_uniprot': len(self._ensp_to_uniprot),
+            'uniprot_to_ensp': len(self._uniprot_to_ensp),
+            'ensp_to_symbol': len(self._ensp_to_symbol),
+            'symbol_to_ensp': len(self._symbol_to_ensp),
+            'ensg_to_ensp': len(self._ensg_to_ensp),
+            'ensp_to_ensg': len(self._ensp_to_ensg),
+            'ensp_to_name': len(self._ensp_to_name),
+        }
+
+
+# ── Convenience Functions ────────────────────────────────────────────
+
+def map_dataframe_to_uniprot(
+    df: pd.DataFrame,
+    mapper: IDMapper,
+    source_columns: tuple[str, str] = ('protein_a', 'protein_b'),
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """Map protein IDs in a DataFrame to UniProt accessions.
+
+    Adds columns 'uniprot_a' and 'uniprot_b' to the DataFrame. Rows where
+    either protein cannot be mapped are dropped and counted.
+
+    This is used to normalise HuRI (ENSG IDs) and STRING (ENSP IDs) to
+    UniProt for cross-database comparison. BioGRID and HuMAP already
+    use UniProt accessions.
+
+    Args:
+        df: DataFrame with interaction data.
+        mapper: Initialised IDMapper instance.
+        source_columns: Column names containing protein IDs to map.
+        verbose: Print mapping statistics.
+
+    Returns:
+        Copy of DataFrame with added 'uniprot_a', 'uniprot_b' columns.
+        Rows where mapping failed are dropped.
+    """
+    col_a, col_b = source_columns
+    result = df.copy()
+
+    result['uniprot_a'] = result[col_a].map(
+        lambda x: mapper.resolve_id(x, target='uniprot')
+    )
+    result['uniprot_b'] = result[col_b].map(
+        lambda x: mapper.resolve_id(x, target='uniprot')
+    )
+
+    n_before = len(result)
+    result = result.dropna(subset=['uniprot_a', 'uniprot_b'])
+    n_after = len(result)
+    n_dropped = n_before - n_after
+
+    if verbose and n_dropped > 0:
+        print(f"  ID mapping: {n_dropped:,} rows dropped "
+              f"({n_dropped/n_before*100:.1f}%), "
+              f"{n_after:,} rows retained",
+              file=sys.stderr)
+
+    return result
+
+
+def export_lookup_table(
+    mapper: IDMapper,
+    output_path: str,
+    verbose: bool = False,
+) -> None:
+    """Export the master ID lookup table as a CSV file.
+
+    Produces a table with one row per unique ENSP ID, containing all
+    available cross-references.
+
+    Args:
+        mapper: Initialised IDMapper instance.
+        output_path: Path for the output CSV file.
+        verbose: Print progress.
+    """
+    fieldnames = [
+        'ensembl_protein_id',
+        'uniprot_accessions',
+        'ensembl_gene_id',
+        'gene_symbol',
+        'protein_name',
+    ]
+
+    # Collect all ENSP IDs across all dictionaries
+    all_ensp = set(mapper._ensp_to_uniprot.keys())
+    all_ensp.update(mapper._ensp_to_symbol.keys())
+    all_ensp.update(mapper._ensp_to_ensg.keys())
+    all_ensp.update(mapper._ensp_to_name.keys())
+
+    rows = []
+    for ensp in sorted(all_ensp):
+        uniprots = mapper._ensp_to_uniprot.get(ensp, [])
+        rows.append({
+            'ensembl_protein_id': ensp,
+            'uniprot_accessions': '|'.join(uniprots) if uniprots else '',
+            'ensembl_gene_id': mapper._ensp_to_ensg.get(ensp, ''),
+            'gene_symbol': mapper._ensp_to_symbol.get(ensp, ''),
+            'protein_name': mapper._ensp_to_name.get(ensp, ''),
+        })
+
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    if verbose:
+        print(f"  Exported {len(rows):,} protein entries to {output_path}",
+              file=sys.stderr)
+
+
+# ── CLI ──────────────────────────────────────────────────────────────
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    """Create and return the argument parser for id_mapper."""
+    parser = argparse.ArgumentParser(
+        description="Protein ID cross-reference mapper using STRING aliases.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --stats
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --export lookup.csv
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve P04637
+    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve ENSP00000269305
+        """,
+    )
+
+    parser.add_argument(
+        "--aliases",
+        default=str(DEFAULT_ALIASES_PATH),
+        help="Path to STRING aliases file (default: data/ppi/9606.protein.aliases.v12.0.txt)",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print mapping statistics and exit",
+    )
+    parser.add_argument(
+        "--export",
+        metavar="OUTPUT_CSV",
+        help="Export master lookup table to CSV",
+    )
+    parser.add_argument(
+        "--resolve",
+        metavar="IDENTIFIER",
+        help="Resolve a single identifier and print all mappings",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Print detailed progress information",
+    )
+
+    return parser
+
+
+def main() -> None:
+    """Run the ID mapper CLI."""
+    parser = build_argument_parser()
+    args = parser.parse_args()
+
+    print(f"Loading aliases from: {args.aliases}", file=sys.stderr)
+    mapper = IDMapper(args.aliases, verbose=True)
+
+    if args.stats:
+        stats = mapper.get_mapping_stats()
+        print("\nMapping Statistics:")
+        for key, count in stats.items():
+            print(f"  {key}: {count:,}")
+
+    if args.export:
+        export_lookup_table(mapper, args.export, verbose=True)
+        print(f"\nLookup table exported to: {args.export}")
+
+    if args.resolve:
+        identifier = args.resolve
+        id_type = detect_id_type(identifier)
+        print(f"\nResolving: {identifier} (detected type: {id_type})")
+
+        uniprot = mapper.resolve_id(identifier, target='uniprot')
+        ensp = mapper.resolve_id(identifier, target='ensp')
+        symbol = mapper.resolve_id(identifier, target='gene_symbol')
+
+        print(f"  UniProt:     {uniprot or 'not found'}")
+        print(f"  ENSP:        {ensp or 'not found'}")
+        print(f"  Gene symbol: {symbol or 'not found'}")
+
+        if id_type == 'ensp':
+            all_uniprots = mapper.ensembl_to_uniprot(identifier)
+            if len(all_uniprots) > 1:
+                print(f"  All UniProt:  {', '.join(all_uniprots)}")
+
+
+if __name__ == "__main__":
+    main()
