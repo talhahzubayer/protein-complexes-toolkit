@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-AlphaFold2 Analysis Visualisation Tool (V2)
-
-Generates up to 10 publication-quality figures from AlphaFold2-Multimer batch
+AlphaFold2 Analysis Visualisation Tool (V2) - generates up to 10 publication-quality figures from AlphaFold2-Multimer batch
 results.  Each figure answers one specific question about the dataset.
 
 Rendering approach:
@@ -70,16 +68,12 @@ from scipy.stats import gaussian_kde
 from read_af2_nojax import load_pkl_without_jax
 
 
-# ============================================================================
-# Output Directory (set by main() after argument parsing)
-# ============================================================================
+#------Output Directory---------------------------------------------------
 
 OUTPUT_DIR: str = ""  # Set in main(); all figures save here
 
 
-# ============================================================================
-# Shared Design Constants
-# ============================================================================
+#---------Shared Design Constants---------------------------------------------
 
 # Quality tier colours - consistent across every figure
 TIER_COLORS = {'High': '#2ecc71', 'Medium': '#f39c12', 'Low': '#e74c3c'}
@@ -109,20 +103,15 @@ PAE_VMIN = 0
 PAE_VMAX = 30  # Angstroms
 
 
-# ============================================================================
-# Adaptive Scatter Sizing
-# ============================================================================
+#--------Adaptive Scatter Sizing----------------------------------------------
 
 def _adaptive_scatter_params(n: int) -> Tuple[float, float]:
     """Return (point_size, alpha) scaled to dataset size.
-
     Ensures small datasets show large readable dots while million-scale
     datasets approach a pixel-dot density aesthetic.  All figures use
     scatter() at every scale - no hexbin fallback.
-
     Args:
         n: Number of points to be plotted.
-
     Returns:
         Tuple of (size, alpha) for use in axes.scatter().
     """
@@ -141,17 +130,14 @@ def _adaptive_scatter_params(n: int) -> Tuple[float, float]:
 def _timed_scatter(axes: plt.Axes, x, y, n_points: int,
                    fig_label: str = '', **kwargs) -> object:
     """Wrapper around axes.scatter() with timing and status messages.
-
     For datasets over 10k points, prints an advisory before the blocking
     scatter call so the user knows the script is not stuck.
-
     Args:
         axes: Matplotlib axes to plot on.
         x, y: Data arrays.
         n_points: Total points (used for advisory message).
         fig_label: Short label for the status message (e.g. 'Fig 1').
         **kwargs: Passed through to axes.scatter().
-
     Returns:
         The PathCollection object returned by scatter().
     """
@@ -166,13 +152,10 @@ def _timed_scatter(axes: plt.Axes, x, y, n_points: int,
     return result
 
 
-# ============================================================================
-# Column Detection
-# ============================================================================
+#------Column Detection-------------------------------------------------------
 
 def detect_columns(df: pd.DataFrame) -> dict:
     """Detect which column groups are present in the CSV.
-
     Returns:
         Dictionary of boolean flags indicating available column groups.
     """
@@ -186,26 +169,20 @@ def detect_columns(df: pd.DataFrame) -> dict:
     }
 
 
-# ============================================================================
-# Data Loading
-# ============================================================================
+#---------Data Loading--------------------------------------------------------
 
 def load_data(csv_path: str) -> pd.DataFrame:
     """Load the analysis CSV into a pandas DataFrame.
-
     Numeric columns are coerced (non-numeric values become NaN).
     Rows with missing ipTM are dropped; pDockQ = 0 is retained
     (genuine zero-contact complexes are informative for diagnostics).
-
     Also performs:
       - Case normalisation on complex_type (Homodimer -> homodimer).
       - One-hot expansion of the comma-separated interface_flags column
         so that downstream figures (e.g. Fig 9b) can reference individual
         flag boolean columns directly.
-
     Args:
         csv_path: Path to the CSV produced by toolkit.py.
-
     Returns:
         Cleaned DataFrame.
     """
@@ -275,9 +252,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-# ============================================================================
-# Utility Helpers
-# ============================================================================
+#------Utility Helpers--------------------------------------------------------
 
 def _apply_common_style(axes: plt.Axes, title: str, xlabel: str, ylabel: str,
                         grid: bool = True) -> None:
@@ -331,13 +306,10 @@ def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray,
                           color: str = '#333333', linewidth: float = 0.9,
                           alpha: float = 0.6) -> None:
     """Overlay KDE density contours with percentile labels on a scatter axes.
-
     Contour levels are percentile-based (10th, 30th, 50th, 70th, 90th of
     probability mass).  The innermost ring encloses the top 10% density
     region; the outermost encloses 90% of all points.
-
     Fails silently if too few points or if KDE encounters a singular matrix.
-
     Args:
         axes: Matplotlib axes with scatter data already plotted.
         x, y: 1D arrays of scatter coordinates.
@@ -401,17 +373,13 @@ def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray,
         print("  Note: KDE failed (singular covariance); contours skipped.")
 
 
-# ============================================================================
-# Figure 1 - ipTM vs pDockQ by Quality Tier
-# ============================================================================
+#---------Figure 1-----------------------------------------------------------
 
 def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict,
                               density_mode: bool = False) -> None:
     """Fig 1: Overall prediction quality landscape.
-
     Colours by V2 quality tier when available, otherwise falls back to
     disorder-fraction colouring (RdYlGn_r colourmap).
-
     When density_mode is True, KDE contour overlays are added to show
     where complexes concentrate.  Scatter dots are used at every scale.
     """
@@ -489,7 +457,6 @@ def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict,
 def plot_fig1b_disorder_scatter(df: pd.DataFrame,
                                 density_mode: bool = False) -> None:
     """Fig 1b (supplementary): Disorder-coloured scatter with density contours.
-
     Each point is coloured by its disorder fraction (pLDDT < 50) using the
     RdYlGn_r colourmap.  KDE density contours with percentile labels are
     always overlaid so the reader can see where most complexes concentrate.
@@ -543,9 +510,7 @@ def plot_fig1b_disorder_scatter(df: pd.DataFrame,
     _save_figure(figure, '1b_Quality_Scatter_Disorder.png')
 
 
-# ============================================================================
-# Figure 2 - Global PAE Health Check
-# ============================================================================
+#--------Figure 2------------------------------------------------------------
 
 def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
     """Fig 2: Is the dataset generally well-resolved?"""
@@ -583,9 +548,7 @@ def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
     _save_figure(figure, '2_PAE_Health_Check.png')
 
 
-# ============================================================================
-# Figure 3 - Interface PAE by Quality Tier
-# ============================================================================
+#------Figure 3--------------------------------------------------------------
 
 def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
     """Fig 3: How confident are the contacts that matter for quality assessment?"""
@@ -660,14 +623,11 @@ def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
     _save_figure(figure, '3_Interface_PAE_by_Tier.png')
 
 
-# ============================================================================
-# Figure 4 - Composite Score & Quality Tier Validation
-# ============================================================================
+#---------Figure 4-----------------------------------------------------------
 
 def plot_fig4_composite_validation(df: pd.DataFrame,
                                    density_mode: bool = False) -> None:
     """Fig 4: Why should I trust the quality tier assigned?
-
     Panel (a): Composite score distributions by tier (violin/boxplot).
     Panel (b): Composite vs confident contact fraction scatter.
     """
@@ -782,9 +742,7 @@ def plot_fig4_composite_validation(df: pd.DataFrame,
     _save_figure(figure, '4_Composite_Tier_Validation.png')
 
 
-# ============================================================================
-# Figure 5 - Interface vs Bulk Quality
-# ============================================================================
+#------Figure 5--------------------------------------------------------------
 
 def plot_fig5_interface_vs_bulk(df: pd.DataFrame,
                                 density_mode: bool = False) -> None:
@@ -865,13 +823,10 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame,
     _save_figure(figure, '5_Interface_vs_Bulk.png')
 
 
-# ============================================================================
-# Figure 6 - Paradox Complexes
-# ============================================================================
+#--------Figure 6------------------------------------------------------------
 
 def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
     """Fig 6: Can disordered proteins form confident interfaces?
-
     Three-panel comparison of paradox vs non-paradox High-tier complexes.
     """
     required = ['quality_tier_v2', 'iptm', 'pdockq',
@@ -1006,16 +961,12 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
     _save_figure(figure, '6_Paradox_Spotlight.png')
 
 
-# ============================================================================
-# Figure 7 - Homodimer vs Heterodimer
-# ============================================================================
+#---------Figure 7-----------------------------------------------------------
 
 def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
     """Fig 7: How does prediction quality vary by complex architecture?
-
     Panel (a): Stacked bar chart of tier proportions (Homo / Hetero / Multi-chain).
     Panel (b): Interface symmetry distributions.
-
     Multi-chain complexes (3+ chains) are shown as a third category when the
     n_chains column is available.  The case-normalised complex_type column
     (from load_data) is used for homodimer/heterodimer classification.
@@ -1134,9 +1085,7 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
     _save_figure(figure, '7_Homo_vs_Hetero.png')
 
 
-# ============================================================================
-# Figure 8 - Metric Disagreement
-# ============================================================================
+#------Figure 8--------------------------------------------------------------
 
 def plot_fig8_metric_disagreement(df: pd.DataFrame,
                                   density_mode: bool = False) -> None:
@@ -1208,13 +1157,10 @@ def plot_fig8_metric_disagreement(df: pd.DataFrame,
     _save_figure(figure, '8_Metric_Disagreement.png')
 
 
-# ============================================================================
-# Figure 9 - Correlation & Flag Landscape
-# ============================================================================
+#--------Figure 9------------------------------------------------------------
 
 def plot_fig9_correlation_flags(df: pd.DataFrame) -> None:
     """Fig 9: Metric structure and flag co-occurrence patterns.
-
     Panel (a): Pearson correlation heatmap of key metrics.
     Panel (b): Flag co-occurrence heatmap.
     """
@@ -1358,17 +1304,13 @@ def plot_fig9_correlation_flags(df: pd.DataFrame) -> None:
     _save_figure(figure, '9_Correlation_Flags.png')
 
 
-# ============================================================================
-# Figure 10 - Chain-Count Quality Profile
-# ============================================================================
+#---------Figure 10----------------------------------------------------------
 
 def plot_fig10_chain_count_profile(df: pd.DataFrame,
                                    density_mode: bool = False) -> None:
     """Fig 10: Does prediction quality degrade for multi-chain complexes?
-
     Panel (a): Composite score distributions by chain count (violin + strip).
     Panel (b): ipTM vs pDockQ coloured by chain count.
-
     Requires the n_chains column (added by the multi-chain pipeline fix).
     Complexes are grouped into 2, 3, and 4+ chains.
     """
@@ -1499,18 +1441,13 @@ def plot_fig10_chain_count_profile(df: pd.DataFrame,
     _save_figure(figure, '10_Chain_Count_Profile.png')
 
 
-# ============================================================================
-# PAE Heatmaps (on-demand, --pae-heatmaps)
-# ============================================================================
+#------PAE Heatmaps----------------------------------------------------------
 
 def load_pae_matrix_from_pkl(pkl_path: str) -> Optional[np.ndarray]:
     """Load a PAE matrix from an AlphaFold2 PKL file.
-
     Delegates to read_af2_nojax for JAX-free PKL loading.
-
     Args:
         pkl_path: Path to the PKL file.
-
     Returns:
         2D numpy array of PAE values, or None if not present.
     """
@@ -1522,10 +1459,8 @@ def load_pae_matrix_from_pkl(pkl_path: str) -> Optional[np.ndarray]:
 
 def extract_readable_title(pkl_filename: str) -> str:
     """Shorten a PKL filename into a readable plot title.
-
     Args:
         pkl_filename: The basename of the PKL file.
-
     Returns:
         A shortened, readable title string.
     """
@@ -1536,13 +1471,10 @@ def extract_readable_title(pkl_filename: str) -> str:
 
 def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
     """Generate and save a PAE heatmap for a single AlphaFold2 prediction.
-
     Uses Greens_r colourmap, clamped to 0-30 Å.  On-demand only (--pae-heatmaps).
-
     When a matching PDB file is found alongside the PKL, chain boundaries
     are drawn as dashed lines and the best interacting chain pair's
     cross-chain PAE block is highlighted with a translucent rectangle.
-
     Args:
         pkl_path: Full path to the .pkl file.
         models_dir: Directory to save the heatmap PNG alongside the PKL files.
@@ -1651,20 +1583,15 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
     print(f"  Saved PAE Plot: {output_filename}")
 
 
-# ============================================================================
-# Paradox Detection Helper
-# ============================================================================
+#--------Paradox Detection Helper---------------------------------------------
 
 def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
     """Identify paradox complexes in a DataFrame.
-
     Paradox definition: ipTM >= 0.75 AND pDockQ >= 0.5 AND disorder >= 0.30.
-
     These are complexes where both headline quality metrics indicate a
     confident interaction despite substantial structural disorder - the
     biological hallmark of intrinsically disordered proteins that undergo
     disorder-to-order transitions upon binding.
-
     Returns:
         Boolean Series aligned with the DataFrame index.
     """
@@ -1682,9 +1609,7 @@ def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
     return mask.fillna(False)
 
 
-# ============================================================================
-# Main Execution
-# ============================================================================
+#---------Main Execution-----------------------------------------------------
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
