@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Interface Analysis Module for AlphaFold2 Protein Complex Quality Assessment
-
-Extracts and quantifies interface properties from predicted protein-protein
-complexes.  Designed as both a standalone CLI tool and an importable module
-for integration into the batch processing pipeline.
+Interface Analysis Module - extracts and quantifies interface properties from predicted protein-protein complexes.
+Designed as both a standalone CLI tool and an importable module for integration into the batch processing pipeline.
 
 Phase 1 features (structural):
     - Interface contact identification (CB-CB distance threshold)
@@ -48,7 +45,7 @@ from pdockq import (
 )
 
 
-# ── Constants ────────────────────────────────────────────────────────
+#------Constants----------------------------------------------------
 
 # Interface pLDDT thresholds
 INTERFACE_PLDDT_HIGH = 70       # Residues above this are confidently placed
@@ -93,24 +90,20 @@ PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.2  # below -> likely artefactual
 METRIC_DISAGREEMENT_THRESHOLD = 0.4
 
 
-# ── Phase 1: Interface Contact Identification ────────────────────────
+#---------Phase 1: Interface Contact Identification--------------------------
 
 def identify_interface_contacts(
     chain_coords: dict[str, np.ndarray],
     chain_plddt: dict[str, np.ndarray],
     threshold: float = DEFAULT_CONTACT_THRESHOLD,
 ) -> ContactResult:
-    """
-    Identify all inter-chain contacts and compute pDockQ in one pass.
-    
+    """Identify all inter-chain contacts and compute pDockQ in one pass.
     Wraps calc_pdockq_and_contacts() to provide the unified contact
     extraction used by all downstream interface analysis functions.
-
     Args:
         chain_coords: Dict mapping chain IDs to (N, 3) coordinate arrays.
         chain_plddt: Dict mapping chain IDs to (N,) pLDDT arrays.
         threshold: Distance cutoff in Ångströms.
-
     Returns:
         ContactResult with contacts, distances, interface sets, and pDockQ.
     """
@@ -120,20 +113,16 @@ def identify_interface_contacts(
     return calc_pdockq_and_contacts(chain_coords, chain_plddt, t=threshold)
 
 
-# ── Phase 1: Interface Geometry Features ─────────────────────────────
+#------Phase 1: Interface Geometry Features--------------------------------------
 
 def compute_interface_geometry(contact_result: ContactResult) -> dict:
-    """
-    Compute geometric properties of the protein-protein interface.
-
+    """Compute geometric properties of the protein-protein interface.
     Produces metrics that characterise interface size, shape, and symmetry.
     These features help distinguish genuine biological interfaces (typically
     large, symmetric, dense) from crystal-packing artefacts or prediction
     errors (small, asymmetric, sparse).
-
     Args:
         contact_result: ContactResult from identify_interface_contacts().
-
     Returns:
         Dictionary with keys:
             n_interface_contacts: Total CB-CB contact pairs across chains.
@@ -189,20 +178,16 @@ def compute_interface_geometry(contact_result: ContactResult) -> dict:
     }
 
 
-# ── Phase 1: Interface-Specific pLDDT ────────────────────────────────
+#--------Phase 1: Interface-Specific pLDDT-------------------------------------
 
 def compute_interface_plddt(contact_result: ContactResult) -> dict:
-    """
-    Compare pLDDT confidence at the interface vs the bulk of each chain.
-
+    """Compare pLDDT confidence at the interface vs the bulk of each chain.
     This is the computational replacement for PyMOL eyeballing.  A positive
     interface_vs_bulk_delta indicates the interface is MORE confident than
     the overall structure - characteristic of genuine interactions and the
     "paradox complexes" where disordered proteins fold upon binding.
-
     Args:
         contact_result: ContactResult from identify_interface_contacts().
-
     Returns:
         Dictionary with keys:
             interface_plddt_a: Mean pLDDT of chain A interface residues.
@@ -277,7 +262,7 @@ def compute_interface_plddt(contact_result: ContactResult) -> dict:
     }
 
 
-# ── Phase 2: Interface PAE Mapping ───────────────────────────────────
+#---------Phase 2: Interface PAE Mapping------------------------------------------
 
 def extract_interface_pae(
     contact_result: ContactResult,
@@ -287,21 +272,16 @@ def extract_interface_pae(
     chain_offsets: Optional[tuple[int, int]] = None,
     cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None,
 ) -> Optional[np.ndarray]:
-    """
-    Map interface contacts to the PAE matrix and extract inter-chain PAE values.
-
+    """Map interface contacts to the PAE matrix and extract inter-chain PAE values.
     The PAE matrix from AlphaFold2 has shape (N_total, N_total) where
     N_total is the sum of residues across ALL chains.  This function handles:
-
       - Multi-chain complexes: chain_offsets specify where each chain starts
         in the PAE matrix, rather than assuming a simple dimer layout.
       - CB mismatch: cb_to_ca_maps translate CB-based contact indices into
         full-residue (CA-based) indices matching the PAE matrix.
-
     For backward compatibility, the original chain_lengths parameter is
     still accepted and works correctly for standard dimers where
     CB count == CA count.
-
     Args:
         contact_result: ContactResult with interface contact indices.
         pae_matrix: Full PAE matrix from the PKL file, shape (N, N).
@@ -316,7 +296,6 @@ def extract_interface_pae(
         cb_to_ca_maps: Tuple of (map_A, map_B) where map_A[i] gives the
                        full-residue (CA) index of CB-array position i for
                        chain A.  When None, direct (identity) mapping is assumed.
-
     Returns:
         1D array of PAE values at each interface contact, or None if
         the PAE matrix dimensions don't match or mapping fails.
@@ -324,7 +303,7 @@ def extract_interface_pae(
     if contact_result.n_interface_contacts == 0:
         return None
 
-    # ── Resolve chain offsets ──
+    # Resolve chain offsets
     if chain_offsets is not None:
         offset_a, offset_b = chain_offsets
     elif chain_lengths is not None:
@@ -337,7 +316,7 @@ def extract_interface_pae(
     else:
         return None
 
-    # ── Map CB contact indices -> PAE matrix indices ──
+    # Map CB contact indices -> PAE matrix indices
     contacts = contact_result.contacts
 
     if cb_to_ca_maps is not None:
@@ -358,7 +337,7 @@ def extract_interface_pae(
         pae_row_indices = contacts[:, 0] + offset_a
         pae_col_indices = contacts[:, 1] + offset_b
 
-    # ── Bounds check against PAE matrix ──
+    # Bounds check against PAE matrix
     max_idx = pae_matrix.shape[0]
     if (np.any(pae_row_indices >= max_idx) or np.any(pae_col_indices >= max_idx)
             or np.any(pae_row_indices < 0) or np.any(pae_col_indices < 0)):
@@ -376,12 +355,9 @@ def compute_interface_pae_features(
     chain_offsets: Optional[tuple[int, int]] = None,
     cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None,
 ) -> dict:
-    """
-    Compute PAE-derived interface quality features.
-
+    """Compute PAE-derived interface quality features.
     These features complement pLDDT-based analysis by assessing the predicted
     *relative positioning* between residue pairs, not just per-residue confidence.
-
     Args:
         contact_result: ContactResult from identify_interface_contacts().
         pae_matrix: Full PAE matrix from the PKL file.
@@ -389,7 +365,6 @@ def compute_interface_pae_features(
                        Used as fallback when chain_offsets is not provided.
         chain_offsets: Tuple of (offset_A, offset_B) in the PAE matrix.
         cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
-
     Returns:
         Dictionary with keys:
             interface_pae_mean: Mean PAE across interface contacts.
@@ -459,7 +434,7 @@ def compute_interface_pae_features(
     }
 
 
-# ── Phase 2: Confident Interface Residues (Computational Hot Spots) ──
+#------Phase 2: Confident Interface Residues (Computational Hot Spots)--------
 
 def identify_confident_interface_residues(
     contact_result: ContactResult,
@@ -472,14 +447,11 @@ def identify_confident_interface_residues(
     chain_offsets: Optional[tuple[int, int]] = None,
     cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None,
 ) -> dict:
-    """
-    Identify interface residues that pass both PAE and pLDDT confidence filters.
-
+    """Identify interface residues that pass both PAE and pLDDT confidence filters.
     These are the "computational hot spots" - residue pairs at the interface
     where AlphaFold2 is confident about both the local structure (pLDDT) and
     the relative positioning between chains (PAE).  These are the primary
     drug-discovery-relevant output.
-
     Args:
         contact_result: ContactResult from identify_interface_contacts().
         pae_matrix: Full PAE matrix from the PKL file.
@@ -491,7 +463,6 @@ def identify_confident_interface_residues(
         plddt_threshold: Minimum pLDDT for a confident residue (default 70).
         chain_offsets: Tuple of (offset_A, offset_B) in the PAE matrix.
         cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
-
     Returns:
         Dictionary with keys:
             n_confident_residues_a: Confident unique residues on chain A.
@@ -575,22 +546,18 @@ def identify_confident_interface_residues(
     }
 
 
-# ── Main Analysis Functions (Module Interface) ───────────────────────
+#-----------Main Analysis Functions (Module Interface)-------------------------
 
 def analyse_interface(
     pdb_path: Union[str, Path],
     threshold: float = DEFAULT_CONTACT_THRESHOLD,
 ) -> dict:
-    """
-    Phase 1 analysis: extract all interface features from a PDB file.
-
+    """Phase 1 analysis: extract all interface features from a PDB file.
     This is the main importable function for PDB-only analysis.
     All output values are JSON-serialisable (no raw numpy types).
-
     Args:
         pdb_path: Path to an AlphaFold2 PDB file.
         threshold: Contact distance threshold in Ångströms.
-
     Returns:
         Dictionary combining:
             - pDockQ and PPV scores
@@ -637,20 +604,16 @@ def analyse_interface_with_pae(
     chain_lengths: Optional[tuple[int, int]] = None,
     threshold: float = DEFAULT_CONTACT_THRESHOLD,
 ) -> dict:
-    """
-    Phase 1+2 analysis: PDB features plus PAE-derived interface features.
-
+    """Phase 1+2 analysis: PDB features plus PAE-derived interface features.
     Now uses read_pdb_with_chain_info() for proper multi-chain support
     and CB->CA mapping.  The chain_lengths parameter is accepted for
     backward compatibility but is no longer required.
-
     Args:
         pdb_path: Path to an AlphaFold2 PDB file.
         pae_matrix: PAE matrix from the PKL file, shape (N_total, N_total).
         chain_lengths: DEPRECATED.  Previously required but now computed
                        automatically.  Ignored if provided.
         threshold: Contact distance threshold in Ångströms.
-
     Returns:
         Dictionary combining Phase 1 features with:
             - Interface PAE statistics
@@ -726,12 +689,9 @@ def analyse_interface_from_contact_result(
     chain_offsets: Optional[tuple[int, int]] = None,
     cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None,
 ) -> dict:
-    """
-    Compute interface features from a pre-computed ContactResult.
-
+    """Compute interface features from a pre-computed ContactResult.
     Use this when the batch pipeline has already called
     calc_pdockq_and_contacts() and you want to avoid re-reading the PDB.
-
     Args:
         contact_result: Pre-computed ContactResult.
         pae_matrix: Optional PAE matrix for Phase 2 features.
@@ -741,7 +701,6 @@ def analyse_interface_from_contact_result(
                        Required for multi-chain complexes.
         cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
                        Required when CB count ≠ CA count.
-
     Returns:
         Dictionary of all computed interface features.
     """
@@ -787,15 +746,12 @@ def analyse_interface_from_contact_result(
     return result
 
 
-# ── Flag Computation ─────────────────────────────────────────────────
+#--------Flag Computation-------------------------------------------------
 
 def _compute_flags(features: dict) -> list[str]:
-    """
-    Evaluate quality flags based on computed interface features.
-
+    """Evaluate quality flags based on computed interface features.
     Args:
         features: Dictionary of interface features from analyse_interface().
-
     Returns:
         List of flag strings (empty if no issues detected).
     """
@@ -827,29 +783,23 @@ def _compute_flags(features: dict) -> list[str]:
     return flags
 
 
-# ── Phase 4: Composite Interface Confidence Score ────────────────────
+#---------Phase 4: Composite Interface Confidence Score-----------------------
 
 def compute_interface_confidence(metrics: dict) -> Optional[float]:
-    """
-    Combine interface-level quality indicators into a single confidence score.
-
+    """Combine interface-level quality indicators into a single confidence score.
     The score captures overall interface reliability by weighting four
     normalised components: interface pLDDT (local structural confidence),
     confident contact fraction (PAE-validated positioning), interface
     symmetry (both chains contribute), and contact density (tightly packed).
-
     Weights reflect biological importance: interface pLDDT and confident
     contacts are the strongest indicators of genuine binding, while
     symmetry and density provide supporting evidence.
-
     Requires PAE data (confident_contact_fraction). Returns None when
     PAE features are unavailable.
-
     Args:
         metrics: Dictionary containing at minimum:
             interface_plddt_combined, confident_contact_fraction,
             interface_symmetry, contacts_per_interface_residue.
-
     Returns:
         Score in range 0.0 (no confidence) to 1.0 (highly confident),
         or None if required metrics are missing.
@@ -884,19 +834,15 @@ def compute_extended_flags(
     pdockq: Optional[float] = None,
     disorder_fraction: Optional[float] = None,
 ) -> list[str]:
-    """
-    Evaluate quality flags combining interface features with global metrics.
-
+    """Evaluate quality flags combining interface features with global metrics.
     Extends the basic structural flags from _compute_flags() with paradox
     detection flags that require ipTM, pDockQ, and disorder information
     from the batch pipeline.
-
     Args:
         interface_features: Dictionary of interface features.
         iptm: Interface pTM score (from PKL).
         pdockq: pDockQ score.
         disorder_fraction: Fraction of residues with pLDDT < 50.
-
     Returns:
         List of flag strings (empty if no issues detected).
     """
@@ -926,7 +872,7 @@ def compute_extended_flags(
     return flags
 
 
-# ── Phase 5: Interface Export Record ──────────────────────────────────
+#--------------Phase 5: Interface Export Record-------------------------------
 
 def build_interface_export_record(
     complex_name: str,
@@ -943,17 +889,13 @@ def build_interface_export_record(
     confident_contact_fraction: Optional[float] = None,
     interface_plddt_combined: Optional[float] = None,
 ) -> dict:
-    """
-    Build a structured record for interface residue export.
-
+    """Build a structured record for interface residue export.
     Produces a JSON-serialisable dictionary suitable for JSONL output.
     Each record describes a complex's confident interface residues -
     the computationally identified binding hot-spots that pass both
     PAE and pLDDT confidence filters.
-
     These records feed into downstream analyses: pathway mapping,
     genetic variant analysis, and drug target identification.
-
     Args:
         complex_name: Parsed complex identifier (e.g. "P12345_Q67890").
         protein_a: UniProt ID for chain A.
@@ -970,7 +912,6 @@ def build_interface_export_record(
         n_interface_contacts: Total interface contacts (optional).
         confident_contact_fraction: Fraction of confident contacts (optional).
         interface_plddt_combined: Mean interface pLDDT (optional).
-
     Returns:
         Dictionary with all fields needed for the JSONL export.
     """
@@ -993,7 +934,7 @@ def build_interface_export_record(
     }
 
 
-# ── CLI Entry Point ──────────────────────────────────────────────────
+#-------------------CLI Entry Point-----------------------------------------
 
 def main() -> None:
     """CLI entry point for standalone interface analysis."""
