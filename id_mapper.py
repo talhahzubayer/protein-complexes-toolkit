@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-ID Cross-Reference and Mapping Module for Protein Identifiers.
-
-Parses the STRING aliases file to build in-memory lookup dictionaries for
-efficient cross-referencing between Ensembl protein IDs (ENSP), Ensembl
-gene IDs (ENSG), UniProt accessions, and gene symbols.
-
-Isoform-aware: preserves full isoform-specific UniProt accessions (e.g.,
-Q9UKT4-2) as primary keys and uses base accessions (e.g., Q9UKT4) as
-grouping fields.
+ID Cross-Reference and Mapping Module - parses the STRING aliases file to build in-memory lookup dictionaries for efficient cross-referencing between Ensembl protein IDs (ENSP), Ensembl gene IDs (ENSG), UniProt accessions, and gene symbols.
+Isoform-aware: preserves full isoform-specific UniProt accessions (e.g., Q9UKT4-2) as primary keys and uses base accessions (e.g., Q9UKT4) as grouping fields.
 
 Usage as module:
     from id_mapper import IDMapper
@@ -33,7 +26,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-# ── Constants ────────────────────────────────────────────────────────
+#------Constants----------------------------------------------------
 
 # UniProt accession pattern (with optional isoform suffix)
 # Matches: P12345, Q9UKT4-2, A0A0B4J2C3, A0A0B4J2C3-1
@@ -69,17 +62,14 @@ ALL_RELEVANT_SOURCES = (
 DEFAULT_ALIASES_PATH = Path(__file__).parent / "data" / "ppi" / "9606.protein.aliases.v12.0.txt"
 
 
-# ── ID Validation Functions ──────────────────────────────────────────
+#---------ID Validation Functions------------------------------------------------
 
 def is_uniprot_accession(identifier: str) -> bool:
     """Check if a string matches the UniProt accession format.
-
     Accepts both canonical (P12345) and isoform-specific (Q9UKT4-2)
     accessions, including the longer format (A0A0B4J2C3).
-
     Args:
         identifier: String to test.
-
     Returns:
         True if it matches UniProt accession pattern.
     """
@@ -88,10 +78,8 @@ def is_uniprot_accession(identifier: str) -> bool:
 
 def split_isoform(accession: str) -> tuple[str, Optional[str]]:
     """Split a UniProt accession into base accession and isoform number.
-
     Args:
         accession: UniProt accession, e.g. 'Q9UKT4-2' or 'P12345'.
-
     Returns:
         Tuple of (base_accession, isoform_number_or_None).
         For 'Q9UKT4-2' returns ('Q9UKT4', '2').
@@ -106,10 +94,8 @@ def split_isoform(accession: str) -> tuple[str, Optional[str]]:
 
 def detect_id_type(identifier: str) -> str:
     """Detect the type of a protein/gene identifier.
-
     Args:
         identifier: Any protein or gene identifier string.
-
     Returns:
         One of: 'uniprot_isoform', 'uniprot', 'ensp', 'ensg', 'unknown'.
     """
@@ -123,21 +109,18 @@ def detect_id_type(identifier: str) -> str:
     return 'unknown'
 
 
-# ── IDMapper Class ───────────────────────────────────────────────────
+#--------IDMapper Class-------------------------------------------------
 
 class IDMapper:
     """Cross-reference mapper for protein identifiers.
-
     Parses the STRING aliases file once and builds in-memory lookup
     dictionaries for efficient ID resolution. Supports mappings between:
     - Ensembl protein IDs (ENSP) <-> UniProt accessions
     - Ensembl protein IDs (ENSP) <-> gene symbols
     - Ensembl gene IDs (ENSG) <-> Ensembl protein IDs (ENSP)
     - UniProt accessions <-> gene symbols (via ENSP as bridge)
-
     Isoform-aware: when mapping from databases that lack isoform specificity
     (STRING, BioGRID), the mapper flags results as base-accession matches.
-
     Args:
         aliases_filepath: Path to STRING aliases file. Defaults to
             data/ppi/9606.protein.aliases.v12.0.txt.
@@ -173,11 +156,9 @@ class IDMapper:
 
     def _parse_aliases(self, filepath: Path, verbose: bool = False) -> None:
         """Parse the STRING aliases file line by line.
-
         Reads only rows with source types in the relevant sets.
         For Ensembl_UniProt rows, additionally filters by UniProt
         accession regex to exclude gene symbols mixed into this source.
-
         Args:
             filepath: Path to the aliases TSV file.
             verbose: Print progress.
@@ -254,11 +235,9 @@ class IDMapper:
 
     def ensembl_to_uniprot(self, ensp_id: str) -> list[str]:
         """Map an Ensembl protein ID to UniProt accession(s).
-
         Args:
             ensp_id: Ensembl protein ID, e.g. 'ENSP00000269305'.
                 Accepts with or without '9606.' prefix.
-
         Returns:
             List of UniProt accessions mapped to this ENSP ID.
             Empty list if no mapping found.
@@ -268,13 +247,10 @@ class IDMapper:
 
     def uniprot_to_ensembl(self, uniprot_id: str) -> list[str]:
         """Map a UniProt accession to Ensembl protein ID(s).
-
         For isoform accessions (e.g. 'Q9UKT4-2'), looks up the base
         accession ('Q9UKT4') since STRING lacks isoform specificity.
-
         Args:
             uniprot_id: UniProt accession (base or isoform).
-
         Returns:
             List of ENSP IDs. Empty list if no mapping found.
         """
@@ -283,12 +259,9 @@ class IDMapper:
 
     def uniprot_to_gene_symbol(self, uniprot_id: str) -> Optional[str]:
         """Map a UniProt accession to its HGNC gene symbol.
-
         Chains: UniProt -> ENSP -> gene symbol.
-
         Args:
             uniprot_id: UniProt accession (base or isoform).
-
         Returns:
             Gene symbol string, or None if no mapping found.
         """
@@ -301,13 +274,10 @@ class IDMapper:
 
     def ensg_to_uniprot(self, ensg_id: str) -> list[str]:
         """Map an Ensembl gene ID (ENSG) to UniProt accession(s).
-
         This is the bridge for HuRI data, which uses ENSG IDs.
         Chains: ENSG -> ENSP -> UniProt.
-
         Args:
             ensg_id: Ensembl gene ID, e.g. 'ENSG00000141510'.
-
         Returns:
             List of unique UniProt accessions. Empty list if no mapping found.
         """
@@ -323,10 +293,8 @@ class IDMapper:
 
     def ensg_to_ensembl(self, ensg_id: str) -> list[str]:
         """Map an Ensembl gene ID (ENSG) to Ensembl protein ID(s) (ENSP).
-
         Args:
             ensg_id: Ensembl gene ID.
-
         Returns:
             List of ENSP IDs. Empty list if no mapping found.
         """
@@ -338,17 +306,13 @@ class IDMapper:
         target: str = 'uniprot',
     ) -> Optional[str]:
         """Master resolution function: accept any ID type, return the target type.
-
         Detects the input ID type automatically and resolves through the
         mapping chain to produce the requested target type.
-
         For isoform-specific UniProt accessions passed as input, the full
         isoform ID is preserved in the output when target is 'uniprot'.
-
         Args:
             identifier: Any protein/gene identifier.
             target: Target ID type: 'uniprot', 'ensp', 'gene_symbol'.
-
         Returns:
             Resolved identifier in the target namespace, or None if unmappable.
             For 'uniprot' target with one-to-many: returns the first accession.
@@ -398,11 +362,9 @@ class IDMapper:
         id_b: str,
     ) -> Optional[tuple[str, str, bool]]:
         """Resolve a pair of identifiers to UniProt accessions.
-
         Args:
             id_a: Identifier for protein A (any type).
             id_b: Identifier for protein B (any type).
-
         Returns:
             Tuple of (uniprot_a, uniprot_b, is_base_accession_match) or None
             if either protein cannot be resolved.
@@ -425,22 +387,18 @@ class IDMapper:
 
     def get_secondary_accessions(self, ensp_id: str) -> list[str]:
         """Return non-primary UniProt accessions mapped to an ENSP ID.
-
         Design decision: We use the STRING aliases file rather than the
         UniProt REST API or the 8 GB idmapping.dat download. STRING aliases
         already contain secondary accessions as alternative ENSP mappings.
         Trade-off: proteins removed entirely from UniProt (not just merged)
         are not caught. See Documentation/Research_Project_Roadmap.md for
         the full rationale and future alternatives.
-
         The primary accession is the first entry (prioritised by the
         Swiss-Prot-first sort key). Secondary accessions are all remaining
         entries - these may be older UniProt accessions that have been
         merged into the primary or TrEMBL alternatives.
-
         Args:
             ensp_id: Ensembl protein ID.
-
         Returns:
             List of secondary UniProt accessions (excluding the primary).
             Empty list if ENSP has zero or one mapping.
@@ -451,10 +409,8 @@ class IDMapper:
 
     def get_protein_name(self, ensp_id: str) -> Optional[str]:
         """Return the protein name for an ENSP ID, or None.
-
         Args:
             ensp_id: Ensembl protein ID.
-
         Returns:
             Protein name string, or None if no name is recorded.
         """
@@ -463,7 +419,6 @@ class IDMapper:
 
     def get_mapping_stats(self) -> dict[str, int]:
         """Return counts of entries in each lookup dictionary.
-
         Returns:
             Dict with keys like 'ensp_to_uniprot', 'uniprot_to_ensp', etc.
             and integer counts as values.
@@ -479,7 +434,7 @@ class IDMapper:
         }
 
 
-# ── Convenience Functions ────────────────────────────────────────────
+#---------Convenience Functions------------------------------------------------
 
 def map_dataframe_to_uniprot(
     df: pd.DataFrame,
@@ -488,20 +443,16 @@ def map_dataframe_to_uniprot(
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Map protein IDs in a DataFrame to UniProt accessions.
-
     Adds columns 'uniprot_a' and 'uniprot_b' to the DataFrame. Rows where
     either protein cannot be mapped are dropped and counted.
-
     This is used to normalise HuRI (ENSG IDs) and STRING (ENSP IDs) to
     UniProt for cross-database comparison. BioGRID and HuMAP already
     use UniProt accessions.
-
     Args:
         df: DataFrame with interaction data.
         mapper: Initialised IDMapper instance.
         source_columns: Column names containing protein IDs to map.
         verbose: Print mapping statistics.
-
     Returns:
         Copy of DataFrame with added 'uniprot_a', 'uniprot_b' columns.
         Rows where mapping failed are dropped.
@@ -536,11 +487,9 @@ def export_lookup_table(
     verbose: bool = False,
 ) -> None:
     """Export the master ID lookup table as a CSV file.
-
     Produces a table with one row per unique ENSP ID, containing all
     available cross-references. The primary UniProt accession is the
     reviewed Swiss-Prot entry (sorted first by _uniprot_sort_key).
-
     Args:
         mapper: Initialised IDMapper instance.
         output_path: Path for the output CSV file.
@@ -590,14 +539,11 @@ def export_lookup_table(
 
 def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
     """Build a fast UniProt-keyed lookup dict for enrichment.
-
     Returns a dict keyed by UniProt accession (primary and secondary)
     containing gene symbol, protein name, Ensembl IDs. Used by the
     toolkit to enrich CSV rows without repeated resolve_id() calls.
-
     Args:
         mapper: Initialised IDMapper instance.
-
     Returns:
         Dict mapping UniProt accession -> {
             'gene_symbol': str or '',
@@ -638,7 +584,7 @@ def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
     return lookup
 
 
-# ── CLI ──────────────────────────────────────────────────────────────
+#-------------------CLI-----------------------------------------
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for id_mapper."""
