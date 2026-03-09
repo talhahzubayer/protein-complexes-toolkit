@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-PPI Database Loading Module.
-
-Parses protein-protein interaction data from four databases (STRING, BioGRID,
-HuRI, HuMAP) into standardised DataFrames with columns:
-    protein_a, protein_b, source, confidence_score, evidence_type
-
-Each parser handles the idiosyncrasies of its source format (different
-delimiters, ID systems, organism filtering, score normalisation) and
-produces a uniform output suitable for cross-database comparison.
+PPI Database Loading Module - parses protein-protein interaction data from 4 databases (STRING, BioGRID, HuRI, HuMAP) into standardised DataFrames with columns:
+protein_a, protein_b, source, confidence_score, evidence_type
 
 Usage as module:
     from database_loaders import load_string, load_biogrid, load_huri, load_humap
@@ -33,8 +26,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# ── Constants ────────────────────────────────────────────────────────
-
+#------Constants----------------------------------------------------
 # Default data directory
 DEFAULT_DATA_DIR = Path(__file__).parent / "data" / "ppi"
 
@@ -51,7 +43,10 @@ STRING_MAX_SCORE = 1000
 # BioGRID organism filter
 HUMAN_TAXONOMY_ID = "9606"
 
-# BioGRID columns to read (by name) - avoids loading all 37 columns
+# Chunked reading for large files
+CHUNK_SIZE = 500_000
+
+# BioGRID columns to read by name - this avoids loading all the columns
 BIOGRID_USECOLS = [
     'Organism ID Interactor A',
     'Organism ID Interactor B',
@@ -66,53 +61,41 @@ BIOGRID_USECOLS = [
 # Standardised output column names
 OUTPUT_COLUMNS = ['protein_a', 'protein_b', 'source', 'confidence_score', 'evidence_type']
 
-# UniProt accession pattern (with optional isoform suffix) for HuMAP validation
+# UniProt accession pattern for HuMAP validation with optional isoform suffix
 # Matches: P12345, Q9UKT4-2, A0A0B4J2C3, A0A0B4J2C3-1
 _UNIPROT_RE = re.compile(
     r'^[OPQ][0-9][A-Z0-9]{3}[0-9](-\d+)?$'
     r'|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}(-\d+)?$'
 )
 
-# Chunked reading for large files
-CHUNK_SIZE = 500_000
 
-
-# ── Helper Functions ─────────────────────────────────────────────────
+#---------Helper Functions------------------------------------------------
 
 def _strip_taxonomy_prefix(ensembl_id: str) -> str:
     """Strip '9606.' prefix from STRING Ensembl protein IDs.
-
     Args:
         ensembl_id: STRING-format ID like '9606.ENSP00000000233'.
-
     Returns:
         Bare Ensembl protein ID like 'ENSP00000000233'.
     """
     return ensembl_id.removeprefix('9606.')
 
-
 def _normalise_string_score(score: int) -> float:
     """Normalise STRING combined score from 0-1000 to 0.0-1.0.
-
     Args:
         score: Integer score from STRING (0-1000).
-
     Returns:
         Float score normalised to 0.0-1.0.
     """
     return score / STRING_MAX_SCORE
 
-
 def _extract_first_uniprot(accession_field: str) -> Optional[str]:
     """Extract the first valid UniProt accession from a BioGRID field.
-
     BioGRID SWISS-PROT columns contain a single accession or '-'.
     TREMBL columns may contain pipe-delimited multiple accessions.
-
     Args:
         accession_field: Raw BioGRID accession string,
             e.g. 'P45985' or 'Q59H94|F6THM6' or '-'.
-
     Returns:
         First valid UniProt accession, or None if field is '-' or empty.
     """
@@ -123,25 +106,15 @@ def _extract_first_uniprot(accession_field: str) -> Optional[str]:
     return first if first and first != '-' else None
 
 
-# ── STRING Parser ────────────────────────────────────────────────────
+#--------STRING Parser-------------------------------------------------
 
-def load_string(
-    filepath: Optional[str] = None,
-    min_score: int = 0,
-    verbose: bool = False,
-) -> pd.DataFrame:
+def load_string(filepath: Optional[str] = None, min_score: int = 0, verbose: bool = False) -> pd.DataFrame:
     """Load STRING protein interaction network for human (taxon 9606).
-
-    Reads the SPACE-delimited STRING links file, strips the '9606.' taxonomy
-    prefix from Ensembl protein IDs, and normalises combined scores from
-    0-1000 to 0.0-1.0.
-
+    Read the SPACE-delimited STRING links file, strip the '9606.' taxonomy prefix from Ensembl protein IDs, and normalises combined scores from 0-1000 to 0.0-1.0.
     Args:
         filepath: Path to STRING links file. Defaults to data/ppi/ location.
-        min_score: Minimum combined_score to retain (0-1000 scale,
-            pre-normalisation). Filters at read time to reduce memory.
+        min_score: Minimum combined_score to retain (0-1000 scale, pre-normalisation). Filters at read time to reduce memory.
         verbose: Print progress information.
-
     Returns:
         DataFrame with standardised OUTPUT_COLUMNS.
         protein_a and protein_b contain bare ENSP IDs.
@@ -152,12 +125,7 @@ def load_string(
     if verbose:
         print(f"  Loading STRING from: {filepath}", file=sys.stderr)
 
-    df = pd.read_csv(
-        filepath,
-        sep=' ',
-        dtype={'combined_score': np.int16},
-        engine='c',
-    )
+    df = pd.read_csv(filepath, sep=' ', dtype={'combined_score': np.int16}, engine='c')
 
     if verbose:
         print(f"  STRING raw: {len(df):,} interactions", file=sys.stderr)
@@ -174,40 +142,20 @@ def load_string(
     df['protein2'] = df['protein2'].map(_strip_taxonomy_prefix)
 
     # Build standardised output
-    result = pd.DataFrame({
-        'protein_a': df['protein1'],
-        'protein_b': df['protein2'],
-        'source': 'STRING',
-        'confidence_score': df['combined_score'].map(_normalise_string_score),
-        'evidence_type': 'combined',
-    })
-
+    result = pd.DataFrame({'protein_a': df['protein1'], 'protein_b': df['protein2'], 'source': 'STRING', 'confidence_score': df['combined_score'].map(_normalise_string_score), 'evidence_type': 'combined'})
     return result.reset_index(drop=True)
 
 
-# ── BioGRID Parser ───────────────────────────────────────────────────
+#---------BioGRID Parser-------------------------------------------------
 
-def load_biogrid(
-    filepath: Optional[str] = None,
-    physical_only: bool = True,
-    verbose: bool = False,
-) -> pd.DataFrame:
+def load_biogrid(filepath: Optional[str] = None, physical_only: bool = True, verbose: bool = False) -> pd.DataFrame:
     """Load BioGRID interactions filtered to human (taxonomy 9606).
-
-    Reads the TAB-delimited BioGRID tab3 file in chunks, filters to rows
-    where both interactors are human (Organism ID == 9606), and extracts
-    UniProt accessions from SWISS-PROT and TREMBL columns.
-
-    UniProt accession is resolved by preferring SWISS-PROT (reviewed)
-    over TREMBL (unreviewed). Interactions where neither interactor has
-    a UniProt accession are dropped.
-
+    Reads the TAB-delimited BioGRID tab3 file in chunks, filters to rows where both interactors are human (Organism ID == 9606), and extracts UniProt accessions from SWISS-PROT and TREMBL columns.
+    UniProt accession is resolved by preferring SWISS-PROT (manually reviewed) over TREMBL (not manually reviewed). Interactions where neither interactor has a UniProt accession are dropped.
     Args:
         filepath: Path to BioGRID tab3 file. Defaults to data/ppi/ location.
-        physical_only: If True, filter to 'physical' experimental system
-            type only. Excludes genetic interactions. Default True.
+        physical_only: If True, filter to 'physical' experimental systemtype only. Excludes genetic interactions. Default True.
         verbose: Print progress information.
-
     Returns:
         DataFrame with standardised OUTPUT_COLUMNS.
         protein_a and protein_b contain UniProt accessions.
@@ -220,7 +168,7 @@ def load_biogrid(
     if verbose:
         print(f"  Loading BioGRID from: {filepath}", file=sys.stderr)
 
-    # Read in chunks to manage memory (1.5 GB file, all organisms)
+    # Read in chunks to manage memory (1.5 GB file - all organisms)
     chunks = []
     for chunk in pd.read_csv(
         filepath,
@@ -255,12 +203,10 @@ def load_biogrid(
 
     # Extract UniProt accessions: prefer SWISS-PROT over TREMBL
     df['_uniprot_a'] = df['SWISS-PROT Accessions Interactor A'].map(_extract_first_uniprot)
-    df.loc[df['_uniprot_a'].isna(), '_uniprot_a'] = \
-        df.loc[df['_uniprot_a'].isna(), 'TREMBL Accessions Interactor A'].map(_extract_first_uniprot)
+    df.loc[df['_uniprot_a'].isna(), '_uniprot_a'] = df.loc[df['_uniprot_a'].isna(), 'TREMBL Accessions Interactor A'].map(_extract_first_uniprot)
 
     df['_uniprot_b'] = df['SWISS-PROT Accessions Interactor B'].map(_extract_first_uniprot)
-    df.loc[df['_uniprot_b'].isna(), '_uniprot_b'] = \
-        df.loc[df['_uniprot_b'].isna(), 'TREMBL Accessions Interactor B'].map(_extract_first_uniprot)
+    df.loc[df['_uniprot_b'].isna(), '_uniprot_b'] = df.loc[df['_uniprot_b'].isna(), 'TREMBL Accessions Interactor B'].map(_extract_first_uniprot)
 
     # Drop rows missing UniProt for either interactor
     df = df.dropna(subset=['_uniprot_a', '_uniprot_b'])
@@ -275,36 +221,26 @@ def load_biogrid(
         'confidence_score': np.nan,
         'evidence_type': df['Experimental System'].values,
     })
-
     return result.reset_index(drop=True)
 
 
-# ── HuRI Parser ──────────────────────────────────────────────────────
+#------HuRI Parser------------------------------------------------------
 
-def load_huri(
-    filepath: Optional[str] = None,
-    verbose: bool = False,
-) -> pd.DataFrame:
-    """Load HuRI binary interactome (Y2H screening).
-
-    Reads the TAB-delimited HuRI file (NO header row). Both columns contain
-    Ensembl GENE IDs (ENSG format), not protein IDs. These must be mapped
-    to UniProt accessions via the ID mapper in a separate step.
-
+def load_huri(filepath: Optional[str] = None, verbose: bool = False) -> pd.DataFrame:
+    """Load HuRI binary interactome (Yeast 2-Hybrid {Y2H} screening).
+    Reads the TAB-delimited HuRI file (NO header row). Both columns contain Ensembl GENE IDs (ENSG format), not protein IDs. 
+    These must be mapped to UniProt accessions via the ID mapper in a separate step.
     Args:
         filepath: Path to HuRI.tsv file. Defaults to data/ppi/ location.
         verbose: Print progress information.
-
     Returns:
         DataFrame with standardised OUTPUT_COLUMNS.
         protein_a and protein_b contain Ensembl GENE IDs (ENSG format).
         confidence_score is NaN (binary Y2H has no scores).
         evidence_type is 'Y2H'.
-
     Note:
         protein_a and protein_b contain ENSG IDs, not UniProt accessions.
-        Use id_mapper.map_dataframe_to_uniprot() to convert before
-        cross-database comparison.
+        Use id_mapper.map_dataframe_to_uniprot() to convert before cross-database comparison.
     """
     if filepath is None:
         filepath = str(DEFAULT_DATA_DIR / HURI_FILE)
@@ -329,32 +265,19 @@ def load_huri(
         'confidence_score': np.nan,
         'evidence_type': 'Y2H',
     })
-
     return result.reset_index(drop=True)
 
 
-# ── HuMAP Parser ─────────────────────────────────────────────────────
+#------------------HuMAP Parser-----------------------------------------------------------
 
-def load_humap(
-    filepath: Optional[str] = None,
-    min_probability: float = 0.0,
-    validate_ids: bool = True,
-    verbose: bool = False,
-) -> pd.DataFrame:
+def load_humap(filepath: Optional[str] = None, min_probability: float = 0.0, validate_ids: bool = True, verbose: bool = False) -> pd.DataFrame:
     """Load hu.MAP 2.0 pairwise protein interactions.
-
-    Reads the SPACE-delimited HuMAP pairwise file (NO header row). Columns
-    are protein_a (UniProt), protein_b (UniProt), probability (0.0-1.0).
-
+    Reads the SPACE-delimited HuMAP pairwise file (NO header row). Columns are protein_a (UniProt), protein_b (UniProt) and probability (0.0-1.0).
     Args:
         filepath: Path to HuMAP pairsWprob file. Defaults to data/ppi/ location.
-        min_probability: Minimum probability score to retain. Filters at
-            read time to reduce memory for the 17.5M-row file.
-        validate_ids: If True, verify both protein IDs match the UniProt
-            accession format and skip rows with non-UniProt IDs (e.g.
-            Ensembl gene IDs or gene symbols). Default True.
+        min_probability: Minimum probability score to retain. Filters at read time to reduce memory for the 17.5M-row file.
+        validate_ids: If True, verify both protein IDs match the UniProt accession format and skip rows with non-UniProt IDs (e.g. Ensembl gene IDs or gene symbols). Default True.
         verbose: Print progress information.
-
     Returns:
         DataFrame with standardised OUTPUT_COLUMNS.
         protein_a and protein_b contain UniProt accessions.
@@ -414,32 +337,21 @@ def load_humap(
         'confidence_score': df['probability'],
         'evidence_type': 'mass_spec_cofractionation',
     })
-
     return result.reset_index(drop=True)
 
 
-# ── Unified Loader ───────────────────────────────────────────────────
+#--------------Unified Loader-------------------------------------
 
-def load_all_databases(
-    data_dir: Optional[str] = None,
-    string_min_score: int = 0,
-    humap_min_probability: float = 0.0,
-    biogrid_physical_only: bool = True,
-    verbose: bool = False,
-) -> dict[str, pd.DataFrame]:
-    """Load all four PPI databases and return as a dict of DataFrames.
-
+def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0, humap_min_probability: float = 0.0, biogrid_physical_only: bool = True, verbose: bool = False) -> dict[str, pd.DataFrame]:
+    """Load all 4 PPI databases and return as a dictionary of DataFrames.
     Args:
-        data_dir: Directory containing database files.
-            Defaults to data/ppi/.
+        data_dir: Directory containing database files. Defaults to data/ppi/.
         string_min_score: Minimum STRING combined_score (0-1000).
         humap_min_probability: Minimum HuMAP probability.
         biogrid_physical_only: Filter BioGRID to physical interactions only.
         verbose: Print progress information.
-
     Returns:
-        Dict mapping database name to DataFrame:
-        {'STRING': df, 'BioGRID': df, 'HuRI': df, 'HuMAP': df}.
+        Dict mapping database name to DataFrame: {'STRING': df, 'BioGRID': df, 'HuRI': df, 'HuMAP': df}.
         Each DataFrame has the standard OUTPUT_COLUMNS.
     """
     if data_dir is None:
@@ -482,7 +394,7 @@ def load_all_databases(
     return results
 
 
-# ── CLI ──────────────────────────────────────────────────────────────
+#-------------------CLI-----------------------------------------
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for database_loaders."""
@@ -490,10 +402,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="Load and standardise PPI database files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-    python database_loaders.py --data-dir data/ppi --database all -v
-    python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
-    python database_loaders.py --data-dir data/ppi --database biogrid --output biogrid_human.csv
+    Examples:
+        python database_loaders.py --data-dir data/ppi --database all -v
+        python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
+        python database_loaders.py --data-dir data/ppi --database biogrid --output biogrid_human.csv
         """,
     )
 
@@ -536,7 +448,6 @@ Examples:
         action="store_true",
         help="Print detailed progress information",
     )
-
     return parser
 
 
@@ -592,7 +503,6 @@ def main() -> None:
         if args.output:
             df.to_csv(args.output, index=False)
             print(f"Output saved to: {args.output}")
-
 
 if __name__ == "__main__":
     main()
