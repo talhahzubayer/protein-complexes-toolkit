@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-JAX-Free AlphaFold2 PKL Reader
-
-Extracts metrics from AlphaFold2 result PKL files without requiring JAX.
-Uses module mocking to completely bypass JAX imports during pickle loading.
-Works regardless of JAX version installed or no JAX at all.
+JAX-Free AlphaFold2 PKL Reader - extracts metrics from AlphaFold2 result PKL files without requiring JAX.
+Uses module mocking to completely bypass JAX imports during pickle loading. Works regardless of JAX version installed or no JAX at all.
 
 Usage (standalone):
     python read_af2_nojax.py --pkl result.pkl
@@ -20,7 +17,7 @@ Usage (as importable module):
 import sys
 from typing import Any, Optional, Union
 
-# ── JAX Module Mocking ──────────────────────────────────────────────
+#------JAX Module Mocking------------------------------------------------
 # Mock JAX modules BEFORE any other imports.
 # This prevents pickle from trying to import real JAX modules.
 # Runs once at import time - safe for use across multiprocessing workers
@@ -95,7 +92,7 @@ from pathlib import Path
 
 import numpy as np
 
-# ── Constants ────────────────────────────────────────────────────────
+#------Constants----------------------------------------------------
 
 MAX_RECURSION_DEPTH = 100
 
@@ -105,15 +102,12 @@ PLDDT_HIGH_THRESHOLD = 70
 PLDDT_LOW_THRESHOLD = 50
 
 
-# ── PKL Loading ──────────────────────────────────────────────────────
+#--------PKL Loading-----------------------------------------------------
 
 def load_pkl_without_jax(filepath: Union[str, Path]) -> dict:
-    """
-    Load an AlphaFold2 PKL file without using JAX.
-
+    """Load an AlphaFold2 PKL file without using JAX.
     Args:
         filepath: Path to .pkl, .pkl.gz, or .pkl.bz2 file.
-
     Returns:
         Prediction results dictionary with pure NumPy arrays.
     """
@@ -134,13 +128,10 @@ def load_pkl_without_jax(filepath: Union[str, Path]) -> dict:
 
 
 def _convert_to_numpy(obj: Any, depth: int = 0) -> Any:
-    """
-    Recursively ensure all array-like objects are pure NumPy arrays.
-
+    """Recursively ensure all array-like objects are pure NumPy arrays.
     Args:
         obj: Any Python object, potentially containing JAX arrays.
         depth: Current recursion depth for safety limiting.
-
     Returns:
         The same structure with all arrays converted to np.ndarray.
     """
@@ -164,15 +155,12 @@ def _convert_to_numpy(obj: Any, depth: int = 0) -> Any:
         return obj
 
 
-# ── Metric Extraction ────────────────────────────────────────────────
+#---------Metric Extraction----------------------------------------------
 
 def extract_scalar(value: Any) -> Optional[float]:
-    """
-    Extract a Python float from various scalar or array types.
-
+    """Extract a Python float from various scalar or array types.
     Args:
         value: A scalar, numpy array of size 1, or array-like with .item().
-
     Returns:
         A Python float, or None if conversion is not possible.
     """
@@ -192,12 +180,9 @@ def extract_scalar(value: Any) -> Optional[float]:
 
 
 def extract_metrics(prediction_result: dict) -> dict:
-    """
-    Extract key quality metrics from AlphaFold2 prediction results.
-
+    """Extract key quality metrics from AlphaFold2 prediction results.
     Args:
         prediction_result: Dictionary returned by load_pkl_without_jax().
-
     Returns:
         Dictionary of metrics with Python-native types (JSON-serialisable).
     """
@@ -244,12 +229,9 @@ def extract_metrics(prediction_result: dict) -> dict:
 
 
 def list_keys(prediction_result: dict) -> dict[str, str]:
-    """
-    List all keys in the prediction result with human-readable type descriptions.
-
+    """List all keys in the prediction result with human-readable type descriptions.
     Args:
         prediction_result: Dictionary returned by load_pkl_without_jax().
-
     Returns:
         Dictionary mapping each key to a string describing its type and shape.
     """
@@ -272,12 +254,10 @@ def list_keys(prediction_result: dict) -> dict[str, str]:
     return key_descriptions
 
 
-# ── CLI Entry Point ──────────────────────────────────────────────────
+#----------CLI Entry Point-----------------------------------------------
 
 def main() -> dict:
-    """
-    Parse CLI arguments, load a PKL file, and output extracted metrics.
-
+    """Parse CLI arguments, load a PKL file, and output extracted metrics.
     Returns:
         Dictionary of extracted metrics.
     """
