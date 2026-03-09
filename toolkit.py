@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch Processor for AlphaFold2 Protein Complex Quality Assessment
-
-Processes multiple AlphaFold2 predictions by directly importing analysis
-functions - no subprocess calls, no temp-file round-trips.
+Batch Processor for AlphaFold2 Protein Complex Quality Assessment - processes multiple AlphaFold2 predictions by directly importing analysis functions, no subprocess calls, no temp-file round-trips.
 
 Integrated analysis modules:
     - read_af2_nojax     -> PKL metric extraction (JAX-free)
@@ -70,7 +67,7 @@ except ImportError:
     tqdm = None  # type: ignore[assignment]
 
 
-# ── Checkpoint Constants ──────────────────────────────────────────────
+#------Checkpoint Constants-------------------------------------------------
 
 CHECKPOINT_INTERVAL = 50   # Save checkpoint every N complexes
 CHECKPOINT_SUFFIX = '.checkpoint.jsonl'
@@ -91,7 +88,7 @@ from interface_analysis import (
 )
 
 
-# ── Constants ────────────────────────────────────────────────────────
+#------Constants----------------------------------------------------
 
 IPTM_HIGH_THRESHOLD = 0.75
 IPTM_MEDIUM_THRESHOLD = 0.5
@@ -164,18 +161,14 @@ CSV_FIELDNAMES_INTERFACE_PAE = [
 CSV_FIELDNAMES_FLAGS = ['interface_flags']
 
 
-# ── PDB B-Factor (pLDDT) Extraction ─────────────────────────────────
+#---------PDB B-Factor (pLDDT) Extraction------------------------------------
 
 def extract_plddt_from_pdb(pdb_path: Path) -> Optional[dict]:
-    """
-    Extract per-residue pLDDT from the b-factor column of an AF2 PDB file.
-
+    """Extract per-residue pLDDT from the b-factor column of an AF2 PDB file.
     Uses Cα atoms to get one pLDDT per residue, then computes summary
     statistics and disorder fractions.
-
     Args:
         pdb_path: Path to an AlphaFold2 .pdb file.
-
     Returns:
         Dictionary of pLDDT statistics, or None if parsing fails.
     """
@@ -217,15 +210,12 @@ def extract_plddt_from_pdb(pdb_path: Path) -> Optional[dict]:
         return None
 
 
-# ── File Discovery & Parsing ─────────────────────────────────────────
+#--------File Discovery & Parsing-------------------------------------------------
 
 def parse_complex_name(filename: str) -> tuple[str, str, str, str]:
-    """
-    Parse protein IDs and complex type from an AlphaFold2 output filename.
-
+    """Parse protein IDs and complex type from an AlphaFold2 output filename.
     Args:
         filename: The filename (without directory path) to parse.
-
     Returns:
         Tuple of (complex_name, protein_a_id, protein_b_id, complex_type).
     """
@@ -273,12 +263,9 @@ def parse_complex_name(filename: str) -> tuple[str, str, str, str]:
 
 
 def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
-    """
-    Find matching PDB and PKL files in a directory.
-
+    """Find matching PDB and PKL files in a directory.
     Args:
         directory: Path to the directory containing PDB/PKL files.
-
     Returns:
         Dictionary mapping complex names to dicts with 'pdb' and/or 'pkl' paths.
     """
@@ -299,16 +286,13 @@ def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
     return dict(complexes)
 
 
-# ── Quality Classification ───────────────────────────────────────────
+#------Quality Classification------------------------------------------------------
 
 def classify_prediction_quality(iptm_score: Optional[float], pdockq_score: Optional[float]) -> str:
-    """
-    Classify a prediction into a quality tier based on ipTM and pDockQ.
-
+    """Classify a prediction into a quality tier based on ipTM and pDockQ.
     Args:
         iptm_score: Interface pTM score (or None if unavailable).
         pdockq_score: pDockQ docking quality score (or None if unavailable).
-
     Returns:
         Quality tier string: 'High', 'Medium', or 'Low'.
     """
@@ -335,26 +319,21 @@ def classify_prediction_quality_v2(
     pdockq_score: Optional[float],
     interface_confidence: Optional[float] = None,
 ) -> str:
-    """
-    Enhanced quality classification incorporating interface confidence.
-
+    """Enhanced quality classification incorporating interface confidence.
     Starts from the original two-metric tier and adjusts based on the
     composite interface confidence score.  This catches:
       - False negatives: Low/Medium tier with excellent interface evidence
         (pDockQ is size-sensitive and can penalise small genuine interfaces)
       - False positives: High tier where interface metrics are poor
         (headline scores mask a weak binding site)
-
     Falls back to original v1 classification when the composite score
     is unavailable (no PAE data).
-
     Args:
         iptm_score: Interface pTM score (or None if unavailable).
         pdockq_score: pDockQ docking quality score (or None if unavailable).
         interface_confidence: Composite interface confidence score from
                               compute_interface_confidence() (0.0 to 1.0),
                               or None if unavailable.
-
     Returns:
         Quality tier string: 'High', 'Medium', or 'Low'.
     """
@@ -376,7 +355,7 @@ def classify_prediction_quality_v2(
     return base_tier
 
 
-# ── Core Processing ──────────────────────────────────────────────────
+#---------Core Processing------------------------------------------------
 
 def process_single_complex(
     complex_name: str,
@@ -387,14 +366,11 @@ def process_single_complex(
     export_interfaces: bool = False,
     verbose: bool = False,
 ) -> dict:
-    """
-    Run all analysis steps on a single protein complex.
-
+    """Run all analysis steps on a single protein complex.
     Direct function calls replace all subprocess invocations:
         - load_pkl_without_jax() + extract_metrics() replace subprocess -> JSON round-trip
         - calc_pdockq() / calc_pdockq_and_contacts() replace subprocess -> stdout parsing
         - analyse_interface_from_contact_result() provides new interface features
-
     Args:
         complex_name: Parsed complex identifier.
         file_paths: Dict with optional 'pdb' and 'pkl' Path entries.
@@ -404,7 +380,6 @@ def process_single_complex(
         export_interfaces: Whether to capture confident interface residue data
                            for JSONL export (requires --interface --pae).
         verbose: Whether to print per-step progress.
-
     Returns:
         Dictionary of results for this complex (one CSV row).
     """
@@ -424,7 +399,7 @@ def process_single_complex(
     prediction_result = None  # Will hold full PKL data if loaded
     pae_matrix = None
 
-    # ── PKL Metric Extraction (direct function call) ──
+    # -- PKL Metric Extraction (direct function call) --
     if 'pkl' in file_paths:
         try:
             prediction_result = load_pkl_without_jax(file_paths['pkl'])
@@ -442,7 +417,7 @@ def process_single_complex(
             print(f"  Warning: PKL extraction failed for {file_paths['pkl']}: {error}",
                   file=sys.stderr)
 
-    # ── PDB pLDDT Extraction ──
+    # -- PDB pLDDT Extraction --
     if 'pdb' in file_paths:
         pdb_plddt = extract_plddt_from_pdb(file_paths['pdb'])
         if pdb_plddt:
@@ -459,7 +434,7 @@ def process_single_complex(
                 if verbose:
                     print(f"  PDB -> pLDDT fallback: mean={pdb_plddt['plddt_mean']:.1f}")
 
-    # ── pDockQ Calculation (direct function call) ──
+    # -- pDockQ Calculation (direct function call) --
     # Uses read_pdb_with_chain_info() to support:
     #   - Multi-chain complexes: find_best_chain_pair() selects the
     #     most-interacting pair instead of blindly taking the first two.
@@ -538,7 +513,7 @@ def process_single_complex(
             contact_result = None
             chain_info = None
 
-    # ── Interface Analysis (direct function call, no re-reading PDB) ──
+    # -- Interface Analysis (direct function call, no re-reading PDB) --
     if run_interface and 'pdb' in file_paths:
         try:
             if contact_result is not None and contact_result.n_interface_contacts >= 0:
@@ -603,10 +578,10 @@ def process_single_complex(
             print(f"  Warning: Interface analysis failed for {complex_name}: {error}",
                   file=sys.stderr)
 
-    # ── Quality Tier ──
+    # -- Quality Tier --
     row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
 
-    # ── Quality Tier v2 (interface-aware) ──
+    # -- Quality Tier v2 (interface-aware) --
     row['quality_tier_v2'] = classify_prediction_quality_v2(
         row.get('iptm'),
         row.get('pdockq'),
@@ -620,7 +595,7 @@ def process_single_complex(
     return row
 
 
-# ── Results Output ───────────────────────────────────────────────────
+#--------------Results Output-------------------------------------
 
 def get_csv_fieldnames(
     include_interface: bool = False,
@@ -646,9 +621,7 @@ def write_results_csv(
     include_pae: bool = False,
     include_enrichment: bool = False,
 ) -> None:
-    """
-    Write batch analysis results to a CSV file.
-
+    """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
         output_path: File path for the output CSV.
@@ -670,23 +643,18 @@ def write_interface_exports(
     output_path: str,
     min_tier: str = 'Medium',
 ) -> int:
-    """
-    Export confident interface residue data to a JSONL file.
-
+    """Export confident interface residue data to a JSONL file.
     Each line is a self-contained JSON record describing one complex's
     confident interface residues - the computationally identified binding
     hot-spots that pass both PAE and pLDDT confidence filters.
-
     Only exports complexes that meet the quality tier threshold and have
     confident residue data available.
-
     Args:
         results: List of per-complex result dictionaries from batch processing.
         output_path: File path for the output JSONL file.
         min_tier: Minimum v2 quality tier to export. 'High' exports only
                   High-tier complexes; 'Medium' exports High and Medium;
                   'Low' exports all tiers.
-
     Returns:
         Number of complexes exported.
     """
@@ -735,7 +703,7 @@ def write_interface_exports(
     return exported_count
 
 
-# ── Enrichment (gene symbols, database sources) ─────────────────────
+#------------------Enrichment (gene symbols, database sources)-------------------
 
 def enrich_results(
     results: list[dict],
@@ -744,9 +712,7 @@ def enrich_results(
     database_evidence: Optional[dict[str, set]] = None,
 ) -> None:
     """Enrich result rows with gene symbols, protein names, and database sources.
-
     Modifies the result dicts in-place.
-
     Args:
         results: List of per-complex result dicts from batch processing.
         lookup: UniProt-keyed lookup dict from build_uniprot_lookup().
@@ -813,12 +779,9 @@ def _checkpoint_path(output_path: str) -> Path:
 
 
 def load_checkpoint(output_path: str) -> dict[str, dict]:
-    """
-    Load previously completed results from a checkpoint file.
-
+    """Load previously completed results from a checkpoint file.
     Args:
         output_path: The main output CSV path (checkpoint path derived from it).
-
     Returns:
         Dictionary mapping complex_name -> result dict for already-processed
         complexes.  Returns an empty dict if no checkpoint file exists.
@@ -845,9 +808,7 @@ def load_checkpoint(output_path: str) -> dict[str, dict]:
 
 
 def save_checkpoint(results: list[dict], output_path: str) -> None:
-    """
-    Write all completed results to the checkpoint file (atomic overwrite).
-
+    """Write all completed results to the checkpoint file (atomic overwrite).
     Args:
         results: List of per-complex result dictionaries completed so far.
         output_path: The main output CSV path (checkpoint path derived from it).
@@ -868,9 +829,7 @@ def remove_checkpoint(output_path: str) -> None:
 
 
 def _make_progress_bar(total: int, desc: str = "Processing"):
-    """
-    Create a tqdm progress bar, or a simple fallback counter.
-
+    """Create a tqdm progress bar, or a simple fallback counter.
     Returns a context-manager-compatible object with an ``update()`` method
     and a ``set_postfix_str()`` method (no-op on fallback).
     """
@@ -907,11 +866,10 @@ def _make_progress_bar(total: int, desc: str = "Processing"):
     return _FallbackBar(total)
 
 
-# ── Worker wrapper for multiprocessing ────────────────────────────────
+#-----------Worker wrapper for multiprocessing-----------------------------------------
 
 def _worker_initializer():
     """Run once per worker process on startup.
-
     Forces the module import chain to execute in the worker so that any
     import failure raises BrokenProcessPool immediately rather than
     causing a silent hang.
@@ -920,9 +878,7 @@ def _worker_initializer():
 
 
 def _worker_process_complex(args_tuple: tuple) -> dict:
-    """
-    Top-level wrapper for process_single_complex that unpacks a tuple.
-
+    """Top-level wrapper for process_single_complex that unpacks a tuple.
     ProcessPoolExecutor requires a picklable callable with a single argument.
     This unpacks the argument tuple and forwards to the real function.
     """
@@ -942,9 +898,7 @@ def run_batch_parallel(
     enable_checkpoint: bool,
     resumed_results: list[dict],
 ) -> list[dict]:
-    """
-    Process complexes in parallel with progress tracking and checkpointing.
-
+    """Process complexes in parallel with progress tracking and checkpointing.
     Args:
         sorted_complexes: List of (complex_name, file_paths) tuples to process.
         run_interface: Whether to compute interface features.
@@ -955,7 +909,6 @@ def run_batch_parallel(
         output_path: Output CSV path (used to derive checkpoint path).
         enable_checkpoint: Whether to save periodic checkpoints.
         resumed_results: Already-completed results loaded from a checkpoint.
-
     Returns:
         Complete list of result dictionaries (resumed + newly processed),
         sorted by complex name.
@@ -991,7 +944,7 @@ def run_batch_parallel(
             pbar.update(len(resumed_results))
 
         if workers == 1:
-            # ── Sequential mode (preserves verbose output, easier debugging) ──
+            # -- Sequential mode (preserves verbose output, easier debugging) --
             for complex_name, file_paths, kwargs in work_items:
                 row = process_single_complex(complex_name, file_paths, **kwargs)
                 results.append(row)
@@ -1004,7 +957,7 @@ def run_batch_parallel(
                     save_checkpoint(results, output_path)
 
         else:
-            # ── Parallel mode ──
+            # -- Parallel mode --
             # Note: verbose per-complex output is suppressed in parallel mode
             # because interleaved prints from multiple workers are unreadable.
             print(f"Starting {workers} worker processes...", flush=True)
@@ -1054,9 +1007,7 @@ def run_batch_parallel(
 
 
 def print_summary(results: list[dict], include_interface: bool = False) -> None:
-    """
-    Print a human-readable summary of the batch analysis results.
-
+    """Print a human-readable summary of the batch analysis results.
     Args:
         results: List of per-complex result dictionaries.
         include_interface: Whether to include interface statistics.
@@ -1193,7 +1144,7 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
                   f"{downgrades} downgraded from High")
 
 
-# ── CLI Entry Point ──────────────────────────────────────────────────
+#-------------------CLI Entry Point-----------------------------------------
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for the batch processor."""
