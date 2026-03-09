@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-pDockQ - Predicted DockQ Score Calculator
-
-Calculates predicted DockQ scores for AlphaFold2-predicted protein complexes.
-Uses the FoldDock parameterisation which normalises by the average pLDDT value
-at the interface.
-
+pDockQ - Predicted DockQ Score Calculator for AlphaFold2-predicted protein complexes.
+Uses the FoldDock parameterisation which normalises by the average pLDDT value at the interface.
 Based on: pdockq = L / (1 + exp(-k*(x-x0))) + b
 where L=0.724, x0=152.611, k=0.052, b=0.018, and x = avg_interface_plddt * log10(n_contacts).
 
@@ -32,7 +28,7 @@ from typing import Optional, Union
 import numpy as np
 
 
-# ── Constants (_New: extracted to module-level named constants) ───────
+#------Constants----------------------------------------------------
 
 DEFAULT_CONTACT_THRESHOLD_New = 8  # Ångströms
 
@@ -64,12 +60,11 @@ PDOCKQ_THRESHOLDS_New = np.array([
 ])
 
 
-# ── Data Structures (_New: entirely new additions) ───────────────────
+#---------Data Structures------------------------------------------------
 
 @dataclass
 class ContactResult_New:
     """Extended result from pDockQ calculation with full contact details.
-    
     Attributes:
         pdockq: Predicted DockQ score (0 to ~0.74).
         ppv: Positive predictive value from calibration lookup.
@@ -102,17 +97,12 @@ class ContactResult_New:
     plddt_b: Optional[np.ndarray] = None
 
 
-# ── PDB Parsing ──────────────────────────────────────────────────────
+#--------PDB Parsing-----------------------------------------------------
 
 def parse_atm_record_Edited(line: str) -> dict:
-    """
-    Parse a single ATOM record from a PDB file into a dictionary.
-
-    _Edited: Changed from defaultdict() to plain dict literal; added type hint.
-
+    """Parse a single ATOM record from a PDB file into a dictionary.
     Args:
         line: A single line from a PDB file starting with 'ATOM'.
-
     Returns:
         Dictionary with keys: name, atm_no, atm_name, atm_alt, res_name,
         chain, res_no, insert, resid, x, y, z, occ, B.
@@ -136,18 +126,11 @@ def parse_atm_record_Edited(line: str) -> dict:
 
 
 def read_pdb_Edited(pdbfile: Union[str, Path]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """
-    Read an AlphaFold2 PDB file and extract CB coordinates and pLDDT per chain.
-
-    _Edited: Added type hints, encoding='utf-8' with errors='replace' for
-    Windows compatibility, uses parse_atm_record_Edited.
-
+    """Read an AlphaFold2 PDB file and extract CB coordinates and pLDDT per chain.
     Uses CB atoms (CA for glycine) as the representative atom per residue,
     following the standard approach for contact-based analysis.
-
     Args:
         pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
-
     Returns:
         Tuple of (chain_coords, chain_plddt) where each is a dict mapping
         chain ID to a numpy array. chain_coords values have shape (N, 3),
@@ -186,14 +169,9 @@ def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[
     dict[str, list[int]],
     dict[str, list[str]],
 ]:
-    """
-    Extended PDB reader that also returns residue numbers and names per chain.
-
-    _New: Entirely new function for interface residue export.
-
+    """Extended PDB reader that also returns residue numbers and names per chain.
     Args:
         pdbfile: Path to an AlphaFold2 PDB file.
-
     Returns:
         Tuple of (chain_coords, chain_plddt, chain_residue_numbers, chain_residue_names).
         chain_residue_numbers maps chain ID to list of PDB residue numbers (int).
@@ -232,19 +210,15 @@ def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[
     return chain_coords, chain_plddt, chain_res_numbers, chain_res_names
 
 
-# ── Multi-Chain & CB-Aware PDB Reading (_New) ─────────────────────────
+#-----------Multi-Chain & CB-Aware PDB Reading-------------------------------
 
 @dataclass
 class ChainInfo_New:
     """Full per-chain information for multi-chain and CB-aware PAE mapping.
-
-    _New: Entirely new dataclass for multi-chain support.
-
     Provides the data needed to correctly map CB-based contact indices
     into the full PAE matrix, even when:
       - The complex has 3+ chains (multi-chain offset calculation)
       - Some residues lack CB atoms (CB->CA index mapping)
-
     Attributes:
         chain_ids: Ordered list of chain identifiers found in the PDB.
         cb_coords: Dict mapping chain ID to (N_cb, 3) CB coordinate arrays.
@@ -268,11 +242,7 @@ class ChainInfo_New:
 
 
 def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
-    """
-    Read an AlphaFold2 PDB file and extract full chain information.
-
-    _New: Entirely new two-pass reader for multi-chain PAE support.
-
+    """Read an AlphaFold2 PDB file and extract full chain information.
     This reader solves three problems that the basic readers cannot:
       1. It counts CA atoms per chain (matching PKL residue counts) separately
          from CB atoms (used for contact analysis), resolving the CB mismatch.
@@ -280,10 +250,8 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
          lookup even when some residues lack CB atoms.
       3. It preserves chain ordering and per-chain counts for multi-chain
          PAE offset computation.
-
     Args:
         pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
-
     Returns:
         ChainInfo_New with all per-chain data needed for multi-chain-aware,
         CB-mapped interface analysis.
@@ -370,18 +338,12 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
 def compute_pae_chain_offsets_New(
     chain_info: ChainInfo_New,
 ) -> dict[str, int]:
-    """
-    Compute the starting offset of each chain in the full PAE matrix.
-
-    _New: Entirely new function for multi-chain PAE support.
-
+    """Compute the starting offset of each chain in the full PAE matrix.
     The PAE matrix rows/columns correspond to all residues across all chains,
-    ordered by chain appearance.  Chain A occupies rows [0, ca_count_A),
+    ordered by chain appearance. Chain A occupies rows [0, ca_count_A),
     chain B occupies [ca_count_A, ca_count_A + ca_count_B), etc.
-
     Args:
         chain_info: ChainInfo_New from read_pdb_with_chain_info_New().
-
     Returns:
         Dict mapping chain ID to its starting row/column offset in the PAE matrix.
     """
@@ -397,21 +359,14 @@ def find_best_chain_pair_New(
     chain_info: ChainInfo_New,
     t: float = DEFAULT_CONTACT_THRESHOLD_New,
 ) -> tuple[str, str, 'ContactResult_New']:
-    """
-    Find the chain pair with the most inter-chain contacts.
-
-    _New: Entirely new function for multi-chain complex support.
-
+    """Find the chain pair with the most inter-chain contacts.
     For multi-chain complexes, the first two chains alphabetically may not
-    be the interacting pair.  This function tests all unique pairs and
+    be the interacting pair. This function tests all unique pairs and
     returns the one with the highest contact count (strongest interface).
-
     For standard dimers (2 chains), this simply returns the only pair.
-
     Args:
         chain_info: ChainInfo_New from read_pdb_with_chain_info_New().
         t: Contact distance threshold in Ångströms.
-
     Returns:
         Tuple of (chain_id_A, chain_id_B, ContactResult_New) for the best pair.
         If no pair has any contacts, returns the pair with the two longest chains.
@@ -457,17 +412,12 @@ def find_best_chain_pair_New(
     return best_pair[0], best_pair[1], best_result
 
 
-# ── pDockQ Calculation ───────────────────────────────────────────────
+#----------pDockQ Calculation---------------------------------------------
 
 def _lookup_ppv_New(pdockq_score: float) -> float:
-    """
-    Look up the positive predictive value for a given pDockQ score.
-
-    _New: Extracted from inline logic in the original calc_pdockq.
-
+    """Look up the positive predictive value for a given pDockQ score.
     Args:
         pdockq_score: The computed pDockQ score.
-
     Returns:
         PPV value from the calibration table.
     """
@@ -482,19 +432,12 @@ def calc_pdockq_Edited(
     chain_plddt: dict[str, np.ndarray],
     t: float = DEFAULT_CONTACT_THRESHOLD_New,
 ) -> tuple[float, float]:
-    """
-    Calculate pDockQ and PPV scores for a two-chain complex.
-
-    _Edited: Uses named constants instead of magic numbers; added type hints;
-    delegates PPV lookup to _lookup_ppv_New; returns explicit floats.
-
+    """Calculate pDockQ and PPV scores for a two-chain complex.
     This is the original interface - returns just (pdockq, ppv).
-
     Args:
         chain_coords: Dict mapping chain IDs to (N, 3) coordinate arrays.
         chain_plddt: Dict mapping chain IDs to (N,) pLDDT arrays.
         t: Distance threshold in Ångströms for defining contacts.
-
     Returns:
         Tuple of (pdockq_score, positive_predictive_value).
     """
@@ -531,20 +474,12 @@ def calc_pdockq_and_contacts_New(
     chain_plddt: dict[str, np.ndarray],
     t: float = DEFAULT_CONTACT_THRESHOLD_New,
 ) -> ContactResult_New:
-    """
-    Calculate pDockQ with full contact details for interface analysis.
-
-    _New: Entirely new extended version of calc_pdockq.
-
-    Same core calculation as calc_pdockq_Edited(), but returns a
-    ContactResult_New dataclass with all intermediate data needed by
-    interface_analysis.py.
-
+    """Calculate pDockQ with full contact details for interface analysis.
+    Same core calculation as calc_pdockq_Edited(), but returns a ContactResult_New dataclass with all intermediate data needed by interface_analysis.py.
     Args:
         chain_coords: Dict mapping chain IDs to (N, 3) coordinate arrays.
         chain_plddt: Dict mapping chain IDs to (N,) pLDDT arrays.
         t: Distance threshold in Ångströms for defining contacts.
-
     Returns:
         ContactResult_New with pDockQ, PPV, contacts, distances, and interface sets.
     """
@@ -596,13 +531,10 @@ def calc_pdockq_and_contacts_New(
     return result
 
 
-# ── CLI Entry Point ──────────────────────────────────────────────────
+#-----------CLI Entry Point----------------------------------------------
 
 def main_New() -> None:
-    """CLI entry point - parse arguments, read PDB, calculate and print pDockQ.
-
-    _New: Wrapped original module-level CLI code into a function.
-    """
+    """CLI entry point - parse arguments, read PDB, calculate and print pDockQ."""
     parser = argparse.ArgumentParser(
         description="Calculate a predicted DockQ score for a predicted structure."
     )
