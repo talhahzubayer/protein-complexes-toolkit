@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-Database Overlap Analysis and Venn Diagram Generation.
-
-Computes pairwise and multi-way overlaps between PPI databases (STRING,
-BioGRID, HuRI, HuMAP) after mapping all identifiers to UniProt. Generates
-Venn diagrams and overlap summary statistics.
+Database Overlap Analysis and Venn Diagram Generation - computes pairwise and multi-way overlaps between PPI databases (STRING, BioGRID, HuRI, HuMAP) after mapping all identifiers to UniProt. Generates Venn diagrams and overlap summary statistics.
 
 Usage as module:
     from overlap_analysis import extract_pair_set, compute_overlaps, plot_venn_diagram
@@ -27,8 +23,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# ── Constants ────────────────────────────────────────────────────────
-
+#------Constants----------------------------------------------------
 STRING_CONFIDENCE_THRESHOLDS = [0, 400, 700, 900]
 
 OUTPUT_DPI = 200
@@ -42,15 +37,12 @@ DB_COLOURS = {
 }
 
 
-# ── Pair Normalisation ───────────────────────────────────────────────
-
+#---------Pair Normalisation------------------------------------------------
 def normalise_pair(id_a: str, id_b: str) -> tuple[str, str]:
     """Return a canonical (sorted) pair for symmetric comparison.
-
     Args:
         id_a: First protein identifier.
         id_b: Second protein identifier.
-
     Returns:
         Tuple (min_id, max_id) ensuring A_B == B_A.
     """
@@ -59,15 +51,12 @@ def normalise_pair(id_a: str, id_b: str) -> tuple[str, str]:
 
 def normalise_pair_base(id_a: str, id_b: str) -> tuple[str, str]:
     """Return a canonical sorted pair at base-accession level.
-
     Strips isoform suffixes (e.g., Q9UKT4-2 -> Q9UKT4) before sorting,
     so that isoform-specific and base accessions match in cross-database
     comparisons.
-
     Args:
         id_a: First protein identifier (may include isoform suffix).
         id_b: Second protein identifier.
-
     Returns:
         Tuple (min_base, max_base) ensuring A_B == B_A at base level.
     """
@@ -83,12 +72,10 @@ def extract_pair_set(
     col_b: str = 'protein_b',
 ) -> set[tuple[str, str]]:
     """Extract normalised pair set from a DataFrame.
-
     Args:
         df: DataFrame with protein pair columns.
         col_a: Column name for protein A.
         col_b: Column name for protein B.
-
     Returns:
         Set of (id_a, id_b) tuples, canonically ordered.
     """
@@ -105,16 +92,13 @@ def extract_pair_set_base(
     col_b: str = 'protein_b',
 ) -> set[tuple[str, str]]:
     """Extract normalised pair set at base-accession level.
-
     Like extract_pair_set() but strips isoform suffixes before
     normalising, enabling cross-database comparison where some
     databases (STRING, BioGRID) lack isoform specificity.
-
     Args:
         df: DataFrame with protein pair columns.
         col_a: Column name for protein A.
         col_b: Column name for protein B.
-
     Returns:
         Set of (base_id_a, base_id_b) tuples, canonically ordered.
     """
@@ -125,16 +109,13 @@ def extract_pair_set_base(
     return pairs
 
 
-# ── Overlap Computation ──────────────────────────────────────────────
-
+#--------Overlap Computation-------------------------------------------------
 def compute_overlaps(
     pair_sets: dict[str, set[tuple[str, str]]],
 ) -> dict[str, dict]:
     """Compute overlap statistics across multiple databases.
-
     Args:
         pair_sets: Dict mapping database name to set of normalised pairs.
-
     Returns:
         Dict with keys:
         - 'per_database': {name: count} - unique pair count per DB
@@ -198,7 +179,6 @@ def print_overlap_summary(
     file=None,
 ) -> None:
     """Print a formatted summary of overlap statistics.
-
     Args:
         stats: Output from compute_overlaps().
         file: Output stream (default: stdout).
@@ -229,8 +209,7 @@ def print_overlap_summary(
         print(f"  {name} only: {count:,}", file=file)
 
 
-# ── Venn Diagram Generation ──────────────────────────────────────────
-
+#--------------Venn Diagram Generation-------------------------------------
 def plot_venn_diagram(
     pair_sets: dict[str, set[tuple[str, str]]],
     output_path: str,
@@ -238,11 +217,9 @@ def plot_venn_diagram(
     verbose: bool = False,
 ) -> None:
     """Generate an overlap diagram of databases.
-
     For 2-3 databases, uses matplotlib_venn if available.
     For 4+ databases, generates an UpSet-style bar chart showing
     intersection sizes, which is more readable than a 4-set Venn.
-
     Args:
         pair_sets: Dict mapping database name to set of normalised pairs.
         output_path: Path for the output figure file.
@@ -302,7 +279,6 @@ def _plot_upset_style(
     title: str,
 ) -> None:
     """Plot an UpSet-style intersection bar chart for 4+ databases.
-
     This is more readable than a 4-set Venn diagram and is commonly
     used in bioinformatics publications.
     """
@@ -414,10 +390,8 @@ def plot_threshold_comparison(
     verbose: bool = False,
 ) -> None:
     """Generate overlap comparisons at different STRING confidence thresholds.
-
     Produces a multi-panel figure showing how STRING's overlap with other
     databases changes as the confidence threshold increases.
-
     Args:
         string_filepath: Path to the full STRING links file.
         other_pair_sets: Dict of {name: pair_set} for BioGRID, HuRI, HuMAP.
@@ -468,8 +442,7 @@ def plot_threshold_comparison(
     plt.close(fig)
 
 
-# ── CLI ──────────────────────────────────────────────────────────────
-
+#-------------------CLI-----------------------------------------
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for overlap_analysis."""
     parser = argparse.ArgumentParser(
