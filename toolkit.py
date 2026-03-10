@@ -290,10 +290,10 @@ def classify_prediction_quality(iptm_score: Optional[float], pdockq_score: Optio
     else:
         return 'Low'
 
-# Interface confidence thresholds for tier reclassification — recalibrated from the 9,573-complex dataset
-UPGRADE_LOW_THRESHOLD = 0.64    # Low  -> High when composite score >= 0.64 (P90 of Low-tier scores)
-UPGRADE_MEDIUM_THRESHOLD = 0.80  # Medium -> High when composite score >= 0.80 (P90 of Medium-tier scores)
-DOWNGRADE_HIGH_THRESHOLD = 0.65  # High -> Medium when composite score <= 0.65 (P10 of High-tier scores)
+# Interface confidence thresholds for tier reclassification - calibrated from the 9,573-complex dataset
+UPGRADE_LOW_THRESHOLD = 0.64     # Low    -> High when composite score >= 0.64 (90th percentile of Low-tier scores)
+UPGRADE_MEDIUM_THRESHOLD = 0.80  # Medium -> High when composite score >= 0.80 (90th percentile of Medium-tier scores)
+DOWNGRADE_HIGH_THRESHOLD = 0.65  # High   -> Medium when composite score <= 0.65 (10th percentile of High-tier scores)
 
 def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Optional[float], interface_confidence: Optional[float] = None) -> str:
     """Enhanced quality classification incorporating interface confidence.
@@ -336,12 +336,12 @@ def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interfac
         run_interface_pae: Whether to retain the PAE matrix for downstream interface analysis.
         verbose: Whether to print per-step progress.
     Returns:
-        PAE matrix as a numpy array if available and requested, otherwise None.
+        PAE matrix as a numpy array if available and requested - otherwise None.
     """
     pae_matrix = None
     if 'pkl' not in file_paths:
         return pae_matrix
-
+    
     try:
         prediction_result = load_pkl_without_jax(file_paths['pkl'])
         pkl_metrics = extract_metrics(prediction_result)
@@ -358,7 +358,6 @@ def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interfac
         print(f"  Warning: PKL extraction failed for {file_paths['pkl']}: {error}", file=sys.stderr)
 
     return pae_matrix
-
 
 def _extract_pdb_plddt(file_paths: dict[str, Path], row: dict, *, verbose: bool) -> None:
     """Extract per-residue pLDDT from PDB b-factors as a fallback when PKL is unavailable.
@@ -384,7 +383,6 @@ def _extract_pdb_plddt(file_paths: dict[str, Path], row: dict, *, verbose: bool)
             if verbose:
                 print(f"  PDB -> pLDDT fallback: mean={pdb_plddt['plddt_mean']:.1f}")
 
-
 def _compute_pdockq_and_chain_info(
     file_paths: dict[str, Path],
     row: dict,
@@ -398,11 +396,11 @@ def _compute_pdockq_and_chain_info(
     Args:
         file_paths: Dict with optional 'pdb' and 'pkl' Path entries.
         row: Result dict to update in-place with pDockQ, chain pair, and sequence data.
-        pae_matrix: PAE matrix from PKL (or None if unavailable).
+        pae_matrix: PAE matrix from PKL or None if unavailable.
         run_interface_pae: Whether to compute PAE offsets and CB-to-CA maps.
         verbose: Whether to print per-step progress.
     Returns:
-        Tuple of (contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps).
+        Tuple of contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps.
         Any element may be None if the corresponding step was skipped or failed.
     """
     contact_result = None
@@ -420,7 +418,7 @@ def _compute_pdockq_and_chain_info(
     try:
         chain_info = read_pdb_with_chain_info(str(file_paths['pdb']))
         if len(chain_info.chain_ids) >= 2:
-            # Find the best interacting chain pair (handles multi-chain)
+            # Find the best interacting chain pair - also handles multi-chain 
             ch_a, ch_b, contact_result = find_best_chain_pair(chain_info, t=8)
             row['n_chains'] = len(chain_info.chain_ids)
             row['best_chain_pair'] = f'{ch_a}-{ch_b}'
@@ -576,9 +574,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
     pae_matrix = _extract_pkl_metrics(file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose)
     _extract_pdb_plddt(file_paths, row, verbose=verbose)
-    contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps = _compute_pdockq_and_chain_info(
-        file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose,
-    )
+    contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
 
     if run_interface and 'pdb' in file_paths:
         _compute_interface_features(
@@ -593,7 +589,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
     return row
 
-#--------------Results Output-------------------------------------
+#----------------------------Results Output-------------------------------------
 
 def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
@@ -675,7 +671,7 @@ def write_interface_exports(results: list[dict], output_path: str, min_tier: str
 
     return exported_count
 
-#------------------Enrichment (gene symbols, database sources)-------------------
+#------------------Enrichment (gene symbols, database sources)-----------------------
 
 def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_sets: Optional[dict[str, set]] = None, database_evidence: Optional[dict[str, set]] = None) -> None:
     """Enrich result rows with gene symbols, protein names, and database sources. Modifies the result dictionary in-place.
@@ -817,7 +813,7 @@ def _make_progress_bar(total: int, desc: str = "Processing"):
 
     return _FallbackBar(total)
 
-#-----------Worker wrapper for multiprocessing-----------------------------------------
+#-------------------------Worker wrapper for multiprocessing-----------------------------------------
 
 def _worker_initializer():
     """Run once per worker process on startup.
@@ -890,7 +886,7 @@ def run_batch_parallel(
             pbar.update(len(resumed_results))
 
         if workers == 1:
-            # -- Sequential mode (preserves verbose output, easier debugging) --
+            #-------------------Sequential mode (preserves verbose output)---------------------
             for complex_name, file_paths, kwargs in work_items:
                 row = process_single_complex(complex_name, file_paths, **kwargs)
                 results.append(row)
@@ -903,19 +899,12 @@ def run_batch_parallel(
                     save_checkpoint(results, output_path)
 
         else:
-            # -- Parallel mode --
-            # Note: verbose per-complex output is suppressed in parallel mode
-            # because interleaved prints from multiple workers are unreadable.
+            #----------------------Parallel mode------------------------------------------------
+            # verbose per-complex output is suppressed in parallel mode because interleaved prints from multiple workers are unreadable
+            # Instead we show the most recent complex and its quality tier in the progress bar
             print(f"Starting {workers} worker processes...", flush=True)
-            with ProcessPoolExecutor(
-                max_workers=workers,
-                initializer=_worker_initializer,
-            ) as executor:
-                future_to_name = {
-                    executor.submit(_worker_process_complex, item): item[0]
-                    for item in work_items
-                }
-
+            with ProcessPoolExecutor(max_workers=workers, initializer=_worker_initializer) as executor:
+                future_to_name = {executor.submit(_worker_process_complex, item): item[0] for item in work_items}
                 for future in as_completed(future_to_name):
                     complex_name = future_to_name[future]
                     try:
@@ -934,7 +923,6 @@ def run_batch_parallel(
                             '_error': str(error),
                         })
                     pbar.update(1)
-
                     if enable_checkpoint and newly_processed % CHECKPOINT_INTERVAL == 0:
                         save_checkpoint(results, output_path)
 
@@ -970,23 +958,17 @@ def _aggregate_summary_statistics(results: list[dict], include_interface: bool =
         'quality_low': sum(1 for row in results if row.get('quality_tier') == 'Low'),
         'iptm_values': [row['iptm'] for row in results if row.get('iptm')],
         'pdockq_values': [row['pdockq'] for row in results if row.get('pdockq')],
-        'below50_values': [row['plddt_below50_fraction'] for row in results
-                           if row.get('plddt_below50_fraction') is not None],
-        'below70_values': [row['plddt_below70_fraction'] for row in results
-                           if row.get('plddt_below70_fraction') is not None],
+        'below50_values': [row['plddt_below50_fraction'] for row in results if row.get('plddt_below50_fraction') is not None],
+        'below70_values': [row['plddt_below70_fraction'] for row in results if row.get('plddt_below70_fraction') is not None],
         'pkl_source_count': sum(1 for row in results if row.get('plddt_source') == 'pkl'),
         'pdb_fallback_count': sum(1 for row in results if row.get('plddt_source') == 'pdb'),
         'no_plddt_count': sum(1 for row in results if row.get('plddt_source') is None),
     }
 
     if include_interface:
-        stats['contact_counts'] = [row['n_interface_contacts'] for row in results
-                                   if row.get('n_interface_contacts') is not None]
-        stats['if_plddt_values'] = [row['interface_plddt_combined'] for row in results
-                                    if row.get('interface_plddt_combined') is not None]
-        stats['delta_values'] = [row['interface_vs_bulk_delta'] for row in results
-                                 if row.get('interface_vs_bulk_delta') is not None]
-
+        stats['contact_counts'] = [row['n_interface_contacts'] for row in results if row.get('n_interface_contacts') is not None]
+        stats['if_plddt_values'] = [row['interface_plddt_combined'] for row in results if row.get('interface_plddt_combined') is not None]
+        stats['delta_values'] = [row['interface_vs_bulk_delta'] for row in results if row.get('interface_vs_bulk_delta') is not None]
         all_flags: dict[str, int] = defaultdict(int)
         for row in results:
             flags_str = row.get('interface_flags', '')
@@ -994,24 +976,16 @@ def _aggregate_summary_statistics(results: list[dict], include_interface: bool =
                 for flag in flags_str.split(','):
                     all_flags[flag.strip()] += 1
         stats['all_flags'] = dict(all_flags)
+        stats['confident_fractions'] = [row['confident_contact_fraction'] for row in results if row.get('confident_contact_fraction') is not None]
+        stats['composite_scores'] = [row['interface_confidence_score'] for row in results if row.get('interface_confidence_score') is not None]
 
-        stats['confident_fractions'] = [row['confident_contact_fraction'] for row in results
-                                        if row.get('confident_contact_fraction') is not None]
-        stats['composite_scores'] = [row['interface_confidence_score'] for row in results
-                                     if row.get('interface_confidence_score') is not None]
-
-        v2_tiers = [row.get('quality_tier_v2') for row in results
-                    if row.get('quality_tier_v2') is not None]
+        v2_tiers = [row.get('quality_tier_v2') for row in results if row.get('quality_tier_v2') is not None]
         if v2_tiers:
             stats['v2_high'] = sum(1 for t in v2_tiers if t == 'High')
             stats['v2_medium'] = sum(1 for t in v2_tiers if t == 'Medium')
             stats['v2_low'] = sum(1 for t in v2_tiers if t == 'Low')
-            stats['v2_upgrades'] = sum(1 for r in results
-                                       if r.get('quality_tier') != r.get('quality_tier_v2')
-                                       and r.get('quality_tier_v2') == 'High')
-            stats['v2_downgrades'] = sum(1 for r in results
-                                         if r.get('quality_tier') == 'High'
-                                         and r.get('quality_tier_v2') != 'High')
+            stats['v2_upgrades'] = sum(1 for r in results if r.get('quality_tier') != r.get('quality_tier_v2') and r.get('quality_tier_v2') == 'High')
+            stats['v2_downgrades'] = sum(1 for r in results if r.get('quality_tier') == 'High' and r.get('quality_tier_v2') != 'High')
 
     return stats
 
@@ -1122,32 +1096,32 @@ def build_argument_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic batch analysis (PKL metrics + pDockQ only)
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv
+    # Basic (sequential, no checkpointing)
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae
 
-    # Full analysis - sequential
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae
+    # Full analysis with parallel workers and checkpointing
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --checkpoint
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
 
-    # Full analysis - 4 parallel workers with checkpointing
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae -w 4 --checkpoint
+    # With enrichment (gene symbols, protein names, sequences)
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt"
 
-    # Full analysis + JSONL export - 4 parallel workers with checkpointing
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
+    # With enrichment + database source tagging
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --databases "D:\\protein-complexes-toolkit\\data\\ppi"
 
-    # Resume an interrupted run (picks up where it left off)
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --resume
+    # Resume an interrupted run
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --resume
 
-    # Verbose output (sequential only - suppressed with -w > 1)
-    python toolkit.py --dir "C:\\Users\\Talhah Zubayer\\Downloads\\talhah\\models" --output results.csv --interface --pae -v
+    # Verbose (sequential only - verbose is suppressed with -w > 1)
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -v
         """,
     )
 
     parser.add_argument("--dir", required=True, help="Directory containing PDB/PKL files")
     parser.add_argument("--output", default="batch_results.csv", help="Output CSV file")
-    parser.add_argument("--interface", action="store_true",
-                        help="Compute interface geometry and pLDDT features")
-    parser.add_argument("--pae", action="store_true",
-                        help="Compute PAE-based interface features (requires --interface and PKL files)")
+    parser.add_argument("--interface", action="store_true", help="Compute interface geometry and pLDDT features")
+    parser.add_argument("--pae", action="store_true", help="Compute PAE-based interface features (requires --interface and PKL files)")
     parser.add_argument("--export-interfaces", metavar="PATH",
                         help="Export confident interface residues to a JSONL file "
                              "(one JSON record per line). Requires --interface --pae. "
@@ -1171,7 +1145,6 @@ Examples:
     parser.add_argument("--string-min-score", type=int, default=700,
                         help="Minimum STRING confidence score for database source matching "
                              "(default: 700). Only used with --databases.")
-
     return parser
 
 
@@ -1298,8 +1271,7 @@ def main() -> None:
                 print(f"  {name}: {len(db_pair_sets[name]):,} unique pairs",
                       file=sys.stderr)
 
-            # Pre-compute evidence types per database (avoids scanning
-            # millions of rows per complex inside enrich_results)
+            # Pre-compute evidence types per database (avoids scanning millions of rows per complex inside enrich_results)
             db_evidence = {}
             for name, df in dbs.items():
                 if 'evidence_type' in df.columns:
@@ -1345,7 +1317,6 @@ def main() -> None:
         print("Checkpoint cleared (run completed successfully)")
 
     print_summary(results, include_interface=args.interface)
-
 
 if __name__ == "__main__":
     from multiprocessing import freeze_support
