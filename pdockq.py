@@ -125,19 +125,30 @@ def parse_atm_record_Edited(line: str) -> dict:
     }
 
 
-def read_pdb_Edited(pdbfile: Union[str, Path]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Read an AlphaFold2 PDB file and extract CB coordinates and pLDDT per chain.
+def _read_pdb_cb_atoms(
+    pdbfile: Union[str, Path],
+    include_residue_ids: bool = False,
+) -> tuple:
+    """Core PDB CB-atom reader that extracts coordinates and pLDDT per chain.
     Uses CB atoms (CA for glycine) as the representative atom per residue,
     following the standard approach for contact-based analysis.
     Args:
         pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
+        include_residue_ids: Whether to also collect PDB residue numbers and 3-letter names.
     Returns:
-        Tuple of (chain_coords, chain_plddt) where each is a dict mapping
-        chain ID to a numpy array. chain_coords values have shape (N, 3),
-        chain_plddt values have shape (N,).
+        If include_residue_ids is False:
+            Tuple of (chain_coords, chain_plddt).
+        If include_residue_ids is True:
+            Tuple of (chain_coords, chain_plddt, chain_residue_numbers, chain_residue_names).
+        chain_coords maps chain ID to (N, 3) numpy array.
+        chain_plddt maps chain ID to (N,) numpy array.
+        chain_residue_numbers maps chain ID to list of PDB residue numbers (int).
+        chain_residue_names maps chain ID to list of 3-letter residue names (str).
     """
     chain_coords: dict[str, list] = {}
     chain_plddt: dict[str, list] = {}
+    chain_res_numbers: dict[str, list[int]] = {}
+    chain_res_names: dict[str, list[str]] = {}
 
     with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
         for line in file:
@@ -148,19 +159,41 @@ def read_pdb_Edited(pdbfile: Union[str, Path]) -> tuple[dict[str, np.ndarray], d
             # CB for all residues, CA for glycine (which has no CB)
             if record['atm_name'] == 'CB' or (record['atm_name'] == 'CA' and record['res_name'] == 'GLY'):
                 chain_id = record['chain']
+                coord = [record['x'], record['y'], record['z']]
+
                 if chain_id in chain_coords:
-                    chain_coords[chain_id].append([record['x'], record['y'], record['z']])
+                    chain_coords[chain_id].append(coord)
                     chain_plddt[chain_id].append(record['B'])
+                    if include_residue_ids:
+                        chain_res_numbers[chain_id].append(record['res_no'])
+                        chain_res_names[chain_id].append(record['res_name'])
                 else:
-                    chain_coords[chain_id] = [[record['x'], record['y'], record['z']]]
+                    chain_coords[chain_id] = [coord]
                     chain_plddt[chain_id] = [record['B']]
+                    if include_residue_ids:
+                        chain_res_numbers[chain_id] = [record['res_no']]
+                        chain_res_names[chain_id] = [record['res_name']]
 
     # Convert lists to numpy arrays
     for chain_id in chain_coords:
         chain_coords[chain_id] = np.array(chain_coords[chain_id])
         chain_plddt[chain_id] = np.array(chain_plddt[chain_id])
 
+    if include_residue_ids:
+        return chain_coords, chain_plddt, chain_res_numbers, chain_res_names
     return chain_coords, chain_plddt
+
+
+def read_pdb_Edited(pdbfile: Union[str, Path]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Read an AlphaFold2 PDB file and extract CB coordinates and pLDDT per chain.
+    Args:
+        pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
+    Returns:
+        Tuple of (chain_coords, chain_plddt) where each is a dict mapping
+        chain ID to a numpy array. chain_coords values have shape (N, 3),
+        chain_plddt values have shape (N,).
+    """
+    return _read_pdb_cb_atoms(pdbfile, include_residue_ids=False)
 
 
 def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[
@@ -177,37 +210,7 @@ def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[
         chain_residue_numbers maps chain ID to list of PDB residue numbers (int).
         chain_residue_names maps chain ID to list of 3-letter residue names (str).
     """
-    chain_coords: dict[str, list] = {}
-    chain_plddt: dict[str, list] = {}
-    chain_res_numbers: dict[str, list[int]] = {}
-    chain_res_names: dict[str, list[str]] = {}
-
-    with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
-        for line in file:
-            if not line.startswith('ATOM'):
-                continue
-            record = parse_atm_record_Edited(line)
-
-            if record['atm_name'] == 'CB' or (record['atm_name'] == 'CA' and record['res_name'] == 'GLY'):
-                chain_id = record['chain']
-                coord = [record['x'], record['y'], record['z']]
-
-                if chain_id in chain_coords:
-                    chain_coords[chain_id].append(coord)
-                    chain_plddt[chain_id].append(record['B'])
-                    chain_res_numbers[chain_id].append(record['res_no'])
-                    chain_res_names[chain_id].append(record['res_name'])
-                else:
-                    chain_coords[chain_id] = [coord]
-                    chain_plddt[chain_id] = [record['B']]
-                    chain_res_numbers[chain_id] = [record['res_no']]
-                    chain_res_names[chain_id] = [record['res_name']]
-
-    for chain_id in chain_coords:
-        chain_coords[chain_id] = np.array(chain_coords[chain_id])
-        chain_plddt[chain_id] = np.array(chain_plddt[chain_id])
-
-    return chain_coords, chain_plddt, chain_res_numbers, chain_res_names
+    return _read_pdb_cb_atoms(pdbfile, include_residue_ids=True)
 
 
 #-----------Multi-Chain & CB-Aware PDB Reading-------------------------------
@@ -427,6 +430,32 @@ def _lookup_ppv_New(pdockq_score: float) -> float:
     return float(PPV_VALUES_New[0])
 
 
+def _compute_interchain_contacts(
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+    threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute inter-chain contacts within a distance threshold.
+    Builds a full pairwise distance matrix between two coordinate sets,
+    then extracts the inter-chain block and finds pairs closer than the threshold.
+    Args:
+        coords_a: (N, 3) coordinates for chain A.
+        coords_b: (M, 3) coordinates for chain B.
+        threshold: Distance cutoff in Angstroms.
+    Returns:
+        Tuple of (contacts, interchain_distance_matrix) where contacts is a (K, 2)
+        array of (chain_A_index, chain_B_index) pairs and interchain_distance_matrix
+        is the full (N, M) distance matrix between the two chains.
+    """
+    combined = np.append(coords_a, coords_b, axis=0)
+    pairwise_diff = combined[:, np.newaxis, :] - combined[np.newaxis, :, :]
+    full_distances = np.sqrt(np.sum(pairwise_diff.T ** 2, axis=0)).T
+    n_a = len(coords_a)
+    interchain_distances = full_distances[:n_a, n_a:]
+    contacts = np.argwhere(interchain_distances <= threshold)
+    return contacts, interchain_distances
+
+
 def calc_pdockq_Edited(
     chain_coords: dict[str, np.ndarray],
     chain_plddt: dict[str, np.ndarray],
@@ -446,13 +475,7 @@ def calc_pdockq_Edited(
     coords1, coords2 = chain_coords[ch1], chain_coords[ch2]
     plddt1, plddt2 = chain_plddt[ch1], chain_plddt[ch2]
 
-    # Pairwise distance matrix between all residues
-    mat = np.append(coords1, coords2, axis=0)
-    a_min_b = mat[:, np.newaxis, :] - mat[np.newaxis, :, :]
-    dists = np.sqrt(np.sum(a_min_b.T ** 2, axis=0)).T
-    l1 = len(coords1)
-    contact_dists = dists[:l1, l1:]
-    contacts = np.argwhere(contact_dists <= t)
+    contacts, _ = _compute_interchain_contacts(coords1, coords2, t)
 
     if contacts.shape[0] < 1:
         return 0.0, 0.0
@@ -496,20 +519,14 @@ def calc_pdockq_and_contacts_New(
         plddt_b=plddt2,
     )
 
-    # Pairwise distance matrix
-    mat = np.append(coords1, coords2, axis=0)
-    a_min_b = mat[:, np.newaxis, :] - mat[np.newaxis, :, :]
-    dists = np.sqrt(np.sum(a_min_b.T ** 2, axis=0)).T
-    l1 = len(coords1)
-    contact_dists = dists[:l1, l1:]
-    contacts = np.argwhere(contact_dists <= t)
+    contacts, interchain_distances = _compute_interchain_contacts(coords1, coords2, t)
 
     if contacts.shape[0] < 1:
         return result
 
     # Store contact details
     result.contacts = contacts
-    result.contact_distances = contact_dists[contacts[:, 0], contacts[:, 1]]
+    result.contact_distances = interchain_distances[contacts[:, 0], contacts[:, 1]]
     result.n_interface_contacts = contacts.shape[0]
     result.interface_residues_a = set(np.unique(contacts[:, 0]).tolist())
     result.interface_residues_b = set(np.unique(contacts[:, 1]).tolist())

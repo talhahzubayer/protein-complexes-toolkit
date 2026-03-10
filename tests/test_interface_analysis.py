@@ -53,7 +53,7 @@ EXPECTED_CONFIDENT_FRACTION_1 = 0.5978
 EXPECTED_N_CONFIDENT_CONTACTS_1 = 55
 EXPECTED_N_CONFIDENT_RES_A_1 = 20
 EXPECTED_N_CONFIDENT_RES_B_1 = 14
-EXPECTED_COMPOSITE_SCORE_1 = 0.6726
+EXPECTED_COMPOSITE_SCORE_1 = 0.7007
 
 
 # ── Phase 1: Geometry Tests ──────────────────────────────────────
@@ -347,7 +347,7 @@ class TestComputeExtendedFlags:
     def test_paradox_genuine(self):
         features = {
             'n_interface_contacts': 50,
-            'confident_contact_fraction': 0.7,  # > PARADOX_CONFIDENT_CONTACT_GENUINE (0.5)
+            'confident_contact_fraction': 0.8,  # > PARADOX_CONFIDENT_CONTACT_GENUINE (0.73)
         }
         flags = compute_extended_flags(
             features,
@@ -360,7 +360,7 @@ class TestComputeExtendedFlags:
     def test_paradox_artefactual(self):
         features = {
             'n_interface_contacts': 50,
-            'confident_contact_fraction': 0.1,  # < PARADOX_CONFIDENT_CONTACT_ARTEFACT (0.2)
+            'confident_contact_fraction': 0.4,  # < PARADOX_CONFIDENT_CONTACT_ARTEFACT (0.50)
         }
         flags = compute_extended_flags(
             features,

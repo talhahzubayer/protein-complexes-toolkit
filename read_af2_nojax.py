@@ -14,8 +14,11 @@ Usage (as importable module):
     metrics = extract_metrics(prediction)
 """
 
+import logging
 import sys
 from typing import Any, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 #------JAX Module Mocking------------------------------------------------
 # Mock JAX modules BEFORE any other imports.
@@ -95,6 +98,7 @@ import numpy as np
 #------Constants----------------------------------------------------
 
 MAX_RECURSION_DEPTH = 100
+MAX_VALUE_PREVIEW_LENGTH = 50  # Character limit for value previews in key listing
 
 # pLDDT confidence band boundaries (Ångströms)
 PLDDT_VERY_HIGH_THRESHOLD = 90
@@ -113,6 +117,7 @@ def load_pkl_without_jax(filepath: Union[str, Path]) -> dict:
     """
     filepath = Path(filepath)
     suffix = ''.join(filepath.suffixes).lower()
+    logger.debug("Loading PKL file: %s (suffix: %s)", filepath.name, suffix)
 
     if '.bz2' in suffix:
         opener = lambda path: bz2.BZ2File(path, 'rb')
@@ -124,6 +129,7 @@ def load_pkl_without_jax(filepath: Union[str, Path]) -> dict:
     with opener(filepath) as file_handle:
         result = pickle.load(file_handle)
 
+    logger.debug("PKL loaded: %d top-level keys", len(result) if isinstance(result, dict) else 0)
     return _convert_to_numpy(result)
 
 
@@ -236,7 +242,6 @@ def list_keys(prediction_result: dict) -> dict[str, str]:
         Dictionary mapping each key to a string describing its type and shape.
     """
     key_descriptions: dict[str, str] = {}
-    max_value_preview_length = 50
 
     for key, value in prediction_result.items():
         if isinstance(value, np.ndarray):
@@ -247,8 +252,8 @@ def list_keys(prediction_result: dict) -> dict[str, str]:
             key_descriptions[key] = f"{type(value).__name__}[{len(value)}]"
         else:
             value_preview = str(value)
-            if len(value_preview) > max_value_preview_length:
-                value_preview = value_preview[:max_value_preview_length] + "..."
+            if len(value_preview) > MAX_VALUE_PREVIEW_LENGTH:
+                value_preview = value_preview[:MAX_VALUE_PREVIEW_LENGTH] + "..."
             key_descriptions[key] = f"{type(value).__name__}: {value_preview}"
 
     return key_descriptions

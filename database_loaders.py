@@ -71,6 +71,16 @@ _UNIPROT_RE = re.compile(
 
 #---------Helper Functions------------------------------------------------
 
+def _is_valid_uniprot(identifier: str) -> bool:
+    """Check if a string matches the UniProt accession pattern.
+    Args:
+        identifier: Protein identifier to validate.
+    Returns:
+        True if it matches the UniProt accession regex.
+    """
+    return bool(_UNIPROT_RE.match(str(identifier)))
+
+
 def _strip_taxonomy_prefix(ensembl_id: str) -> str:
     """Strip '9606.' prefix from STRING Ensembl protein IDs.
     Args:
@@ -311,8 +321,8 @@ def load_humap(filepath: Optional[str] = None, min_probability: float = 0.0, val
     # Validate that both IDs are UniProt accessions
     if validate_ids:
         valid_mask = (
-            df['protein_a'].map(lambda x: bool(_UNIPROT_RE.match(str(x)))) &
-            df['protein_b'].map(lambda x: bool(_UNIPROT_RE.match(str(x))))
+            df['protein_a'].map(_is_valid_uniprot) &
+            df['protein_b'].map(_is_valid_uniprot)
         )
         n_invalid = (~valid_mask).sum()
         if n_invalid > 0:

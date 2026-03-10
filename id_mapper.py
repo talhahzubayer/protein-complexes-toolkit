@@ -61,6 +61,12 @@ ALL_RELEVANT_SOURCES = (
 # Default aliases file path
 DEFAULT_ALIASES_PATH = Path(__file__).parent / "data" / "ppi" / "9606.protein.aliases.v12.0.txt"
 
+# Swiss-Prot canonical accession characteristics (for sort priority)
+# Canonical entries start with O/P/Q and are exactly 6 characters.
+# TrEMBL entries use other letters or the longer 10-character A0A format.
+CANONICAL_FIRST_CHARS = frozenset('OPQ')
+CANONICAL_ACCESSION_LENGTH = 6
+
 
 #---------ID Validation Functions------------------------------------------------
 
@@ -214,7 +220,7 @@ class IDMapper:
         # P, Q, or O (6 chars). TrEMBL entries start with other letters
         # or use the longer A0A0* format (10 chars).
         def _uniprot_sort_key(acc: str) -> tuple[int, int, str]:
-            is_canonical = acc[0] in 'OPQ' and len(acc) == 6
+            is_canonical = acc[0] in CANONICAL_FIRST_CHARS and len(acc) == CANONICAL_ACCESSION_LENGTH
             return (0 if is_canonical else 1, len(acc), acc)
 
         for ensp in self._ensp_to_uniprot:

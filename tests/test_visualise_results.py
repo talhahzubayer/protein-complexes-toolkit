@@ -25,10 +25,12 @@ from visualise_results import (
     plot_fig3_interface_pae_by_tier,
     plot_fig4_composite_validation,
     plot_fig5_interface_vs_bulk,
+    plot_fig6_paradox_spotlight,
     plot_fig7_homo_vs_hetero,
     plot_fig8_metric_disagreement,
     plot_fig9_correlation_flags,
     plot_fig10_chain_count_profile,
+    _get_paradox_mask,
     TIER_COLORS,
     TIER_ORDER,
 )
@@ -180,6 +182,15 @@ class TestFigureGeneration:
         plot_fig5_interface_vs_bulk(loaded_df, density_mode=False)
         assert any(f.startswith("5_") for f in os.listdir(figures_dir)), \
             "Fig 5 output file not found"
+
+    def test_fig6_paradox_spotlight(self, loaded_df, col_flags, figures_dir):
+        if not (col_flags['has_v2_data'] and col_flags['has_interface_data']):
+            pytest.skip("Requires V2 + interface data")
+        if _get_paradox_mask(loaded_df).sum() == 0:
+            pytest.skip("No paradox complexes in test data")
+        plot_fig6_paradox_spotlight(loaded_df)
+        assert any(f.startswith("6_") for f in os.listdir(figures_dir)), \
+            "Fig 6 output file not found"
 
     def test_fig7_homo_vs_hetero(self, loaded_df, col_flags, figures_dir):
         if not (col_flags['has_v2_data'] and col_flags['has_interface_data']):

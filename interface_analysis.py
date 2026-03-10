@@ -56,18 +56,18 @@ PAE_CONFIDENT_THRESHOLD = 5.0
 
 # Geometry thresholds for flagging
 MIN_INTERFACE_CONTACTS = 5          # Below this, interface is negligible
-SPARSE_INTERFACE_DENSITY = 1.0      # contacts_per_interface_residue below this
-                                     # (calibrated from 547-complex dataset; median
-                                     #  density is ~1.2-1.4 across all tiers)
+SPARSE_INTERFACE_DENSITY = 1.15     # contacts_per_interface_residue below this
+                                     # (recalibrated from 9,573-complex dataset;
+                                     #  P20 density = 1.15 among contacts >= 5)
 ASYMMETRIC_INTERFACE_RATIO = 0.5    # interface_symmetry below this
 
 # Disorder thresholds
 SUBSTANTIAL_DISORDER_FRACTION = 0.3  # >30% residues below pLDDT 50
 PLDDT_DISORDER_THRESHOLD = 50
 
-# Composite score normalisation (calibrated from 547-complex dataset)
-DENSITY_NORMALIZATION = 3.0          # density / 3.0, capped at 1.0
-                                     # (median density ~1.25; max ~1.8 typical)
+# Composite score normalisation (recalibrated from 9,573-complex dataset)
+DENSITY_NORMALIZATION = 2.0          # density / 2.0, capped at 1.0
+                                     # (P95 density = 1.70; rounded up to 2.0)
 
 # Composite score weights - biological importance ordering:
 #   Interface pLDDT + confident contacts are the strongest indicators,
@@ -80,14 +80,16 @@ WEIGHT_DENSITY = 0.15
 # Paradox detection thresholds (High-quality + substantial disorder)
 PARADOX_IPTM_THRESHOLD = 0.75
 PARADOX_PDOCKQ_THRESHOLD = 0.5
-PARADOX_CONFIDENT_CONTACT_GENUINE = 0.5   # above -> likely genuine binding
-PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.2  # below -> likely artefactual
+PARADOX_CONFIDENT_CONTACT_GENUINE = 0.73  # above -> likely genuine binding
+                                           # (recalibrated: median of 138 paradox complexes)
+PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.50 # below -> likely artefactual
+                                           # (recalibrated: P25 of 138 paradox complexes)
 
 # Metric disagreement threshold (ipTM vs pDockQ)
-# All 212 disagreement cases in 547-complex dataset are ipTM >> pDockQ,
-# indicating pDockQ is systematically more stringent - often penalising
+# All 886 disagreement cases in 9,573-complex dataset are ipTM >> pDockQ,
+# confirming pDockQ is systematically more stringent - often penalising
 # genuine interfaces in disordered complexes.
-METRIC_DISAGREEMENT_THRESHOLD = 0.4
+METRIC_DISAGREEMENT_THRESHOLD = 0.52  # P90 of |iptm - pdockq| distribution
 
 
 #---------Phase 1: Interface Contact Identification--------------------------
@@ -863,7 +865,7 @@ def compute_extended_flags(
             flags.append('paradox_artefactual')
 
     # Metric disagreement: large gap between ipTM and pDockQ
-    # Systematically ipTM >> pDockQ in the 547-complex dataset, indicating
+    # Systematically ipTM >> pDockQ in the 9,573-complex dataset, confirming
     # pDockQ penalises genuine interfaces in disordered complexes.
     if (iptm is not None and pdockq is not None
             and abs(iptm - pdockq) > METRIC_DISAGREEMENT_THRESHOLD):

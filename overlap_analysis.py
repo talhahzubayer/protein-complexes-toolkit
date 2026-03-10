@@ -28,6 +28,15 @@ STRING_CONFIDENCE_THRESHOLDS = [0, 400, 700, 900]
 
 OUTPUT_DPI = 200
 
+# UpSet-style chart layout constants
+UPSET_WIDTH_PER_COLUMN = 0.6
+UPSET_FIGURE_HEIGHT = 8
+UPSET_HEIGHT_RATIOS = [3, 1]
+UPSET_ACTIVE_MARKER_SIZE = 8
+UPSET_INACTIVE_MARKER_SIZE = 6
+UPSET_BAR_LABEL_FONTSIZE = 7
+UPSET_BAR_LABEL_ROTATION = 45
+
 # Database colours for consistent plotting
 DB_COLOURS = {
     'STRING': '#4C72B0',
@@ -273,19 +282,21 @@ def _plot_venn_2_3(
         _plot_upset_style(pair_sets, output_path, title)
 
 
-def _plot_upset_style(
+def _compute_exclusive_intersections(
     pair_sets: dict[str, set[tuple[str, str]]],
-    output_path: str,
-    title: str,
-) -> None:
-    """Plot an UpSet-style intersection bar chart for 4+ databases.
-    This is more readable than a 4-set Venn diagram and is commonly
-    used in bioinformatics publications.
+) -> list[tuple[list[bool], int]]:
+    """Compute exclusive intersection sizes for UpSet-style display.
+    For each combination of databases, computes the number of pairs that appear
+    in exactly that combination and no others, using inclusion-exclusion.
+    Args:
+        pair_sets: Dict mapping database name to set of normalised pairs.
+    Returns:
+        List of (member_flags, size) tuples sorted by size descending.
+        member_flags[i] is True if database i participates in the intersection.
     """
     names = list(pair_sets.keys())
     n = len(names)
 
-    # Compute all intersection sizes using inclusion-exclusion
     intersections = []
     for r in range(1, n + 1):
         for combo in combinations(range(n), r):
@@ -303,17 +314,35 @@ def _plot_upset_style(
                 member_flags = [i in combo for i in range(n)]
                 intersections.append((member_flags, len(result)))
 
-    # Sort by size descending
     intersections.sort(key=lambda x: x[1], reverse=True)
+    return intersections
 
+
+def _plot_upset_style(
+    pair_sets: dict[str, set[tuple[str, str]]],
+    output_path: str,
+    title: str,
+) -> None:
+    """Plot an UpSet-style intersection bar chart for 4+ databases.
+    This is more readable than a 4-set Venn diagram and is commonly
+    used in bioinformatics publications.
+    Args:
+        pair_sets: Dict mapping database name to set of normalised pairs.
+        output_path: File path to save the figure.
+        title: Figure title text.
+    """
+    names = list(pair_sets.keys())
+    n = len(names)
+
+    intersections = _compute_exclusive_intersections(pair_sets)
     if not intersections:
         return
 
     # Plot
     fig, (ax_bar, ax_dots) = plt.subplots(
         2, 1,
-        figsize=(max(10, len(intersections) * 0.6), 8),
-        gridspec_kw={'height_ratios': [3, 1]},
+        figsize=(max(10, len(intersections) * UPSET_WIDTH_PER_COLUMN), UPSET_FIGURE_HEIGHT),
+        gridspec_kw={'height_ratios': UPSET_HEIGHT_RATIOS},
         sharex=True,
     )
 
@@ -342,15 +371,15 @@ def _plot_upset_style(
     for i, size in enumerate(sizes):
         if size > 0:
             ax_bar.text(i, size, f'{size:,}', ha='center', va='bottom',
-                       fontsize=7, rotation=45)
+                       fontsize=UPSET_BAR_LABEL_FONTSIZE, rotation=UPSET_BAR_LABEL_ROTATION)
 
     # Dot matrix showing which databases are in each intersection
     for i, (flags, _) in enumerate(intersections):
         for j, active in enumerate(flags):
             if active:
-                ax_dots.plot(i, j, 'o', color='black', markersize=8)
+                ax_dots.plot(i, j, 'o', color='black', markersize=UPSET_ACTIVE_MARKER_SIZE)
             else:
-                ax_dots.plot(i, j, 'o', color='#DDDDDD', markersize=6)
+                ax_dots.plot(i, j, 'o', color='#DDDDDD', markersize=UPSET_INACTIVE_MARKER_SIZE)
         # Connect active dots with a line
         active_indices = [j for j, a in enumerate(flags) if a]
         if len(active_indices) > 1:
@@ -500,6 +529,28 @@ Examples:
     return parser
 
 
+def _build_pair_sets(
+    dbs: dict[str, 'pd.DataFrame'],
+    extract_func,
+) -> dict[str, set[tuple[str, str]]]:
+    """Build pair sets from database DataFrames using the given extraction function.
+    Automatically uses uniprot_a/uniprot_b columns if present, otherwise falls
+    back to the default protein_a/protein_b columns.
+    Args:
+        dbs: Dict mapping database name to its DataFrame.
+        extract_func: Pair extraction function (extract_pair_set or extract_pair_set_base).
+    Returns:
+        Dict mapping database name to its set of normalised protein pairs.
+    """
+    pair_sets = {}
+    for name, df in dbs.items():
+        if 'uniprot_a' in df.columns:
+            pair_sets[name] = extract_func(df, col_a='uniprot_a', col_b='uniprot_b')
+        else:
+            pair_sets[name] = extract_func(df)
+    return pair_sets
+
+
 def main() -> None:
     """Run the overlap analysis CLI."""
     parser = build_argument_parser()
@@ -529,12 +580,7 @@ def main() -> None:
     dbs['HuRI'] = map_dataframe_to_uniprot(dbs['HuRI'], mapper, verbose=args.verbose)
 
     # Extract pair sets (use uniprot_a/b for mapped DBs, protein_a/b for direct)
-    pair_sets = {}
-    for name, df in dbs.items():
-        if 'uniprot_a' in df.columns:
-            pair_sets[name] = extract_pair_set(df, col_a='uniprot_a', col_b='uniprot_b')
-        else:
-            pair_sets[name] = extract_pair_set(df)
+    pair_sets = _build_pair_sets(dbs, extract_pair_set)
 
     # Compute and display overlaps (isoform-specific level)
     stats = compute_overlaps(pair_sets)
@@ -552,13 +598,7 @@ def main() -> None:
         if args.verbose:
             print("\nComputing base-accession level overlap...", file=sys.stderr)
 
-        base_pair_sets = {}
-        for name, df in dbs.items():
-            if 'uniprot_a' in df.columns:
-                base_pair_sets[name] = extract_pair_set_base(
-                    df, col_a='uniprot_a', col_b='uniprot_b')
-            else:
-                base_pair_sets[name] = extract_pair_set_base(df)
+        base_pair_sets = _build_pair_sets(dbs, extract_pair_set_base)
 
         base_stats = compute_overlaps(base_pair_sets)
         print("\n--- Base-Accession Level (isoform suffixes stripped) ---")

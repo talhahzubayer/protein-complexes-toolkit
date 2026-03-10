@@ -91,7 +91,12 @@ IPTM_HIGH = 0.75
 PDOCKQ_HIGH = 0.5
 PAE_CONFIDENT = 5.0         # Angstroms
 DISORDER_SUBSTANTIAL = 0.30
-METRIC_DISAGREEMENT_GAP = 0.4
+METRIC_DISAGREEMENT_GAP = 0.52  # matches METRIC_DISAGREEMENT_THRESHOLD in interface_analysis.py
+
+# Reclassification thresholds — must match toolkit.py constants
+UPGRADE_LOW_THRESHOLD = 0.64
+UPGRADE_MEDIUM_THRESHOLD = 0.80
+DOWNGRADE_HIGH_THRESHOLD = 0.65
 
 # Scatter plot defaults (used as fallback; prefer _adaptive_scatter_params)
 SCATTER_POINT_SIZE = 80
@@ -256,7 +261,14 @@ def load_data(csv_path: str) -> pd.DataFrame:
 
 def _apply_common_style(axes: plt.Axes, title: str, xlabel: str, ylabel: str,
                         grid: bool = True) -> None:
-    """Apply consistent font sizes and styling to axes."""
+    """Apply consistent font sizes and grid styling to a matplotlib axes.
+    Args:
+        axes: Matplotlib axes to style.
+        title: Axes title text.
+        xlabel: X-axis label text.
+        ylabel: Y-axis label text.
+        grid: Whether to add a dashed grid overlay.
+    """
     axes.set_title(title, fontsize=FONT_TITLE, fontweight='bold', pad=12)
     axes.set_xlabel(xlabel, fontsize=FONT_AXIS_LABEL)
     axes.set_ylabel(ylabel, fontsize=FONT_AXIS_LABEL)
@@ -266,7 +278,12 @@ def _apply_common_style(axes: plt.Axes, title: str, xlabel: str, ylabel: str,
 
 
 def _save_figure(figure: plt.Figure, filename: str) -> None:
-    """Save figure to OUTPUT_DIR and close it, with timing."""
+    """Save a figure to OUTPUT_DIR at standard DPI and close it.
+    Prints the filename on completion, with elapsed time if saving takes over 2 seconds.
+    Args:
+        figure: Matplotlib Figure to save.
+        filename: File name (not full path) within OUTPUT_DIR.
+    """
     output_path = os.path.join(OUTPUT_DIR, filename)
     figure.tight_layout()
     t0 = time.time()
@@ -280,7 +297,12 @@ def _save_figure(figure: plt.Figure, filename: str) -> None:
 
 
 def _build_tier_legend_handles(df: pd.DataFrame) -> list:
-    """Build legend handles with tier counts."""
+    """Build legend Line2D handles with per-tier counts from a DataFrame.
+    Args:
+        df: DataFrame with a 'quality_tier_v2' column.
+    Returns:
+        List of matplotlib Line2D handles suitable for axes.legend().
+    """
     handles = []
     for tier in TIER_ORDER:
         count = (df['quality_tier_v2'] == tier).sum()
@@ -677,9 +699,9 @@ def plot_fig4_composite_validation(df: pd.DataFrame,
 
     # Decision threshold lines
     thresholds = [
-        (0.75, 'Low -> High upgrade', '#e74c3c'),
-        (0.80, 'Medium -> High upgrade', '#f39c12'),
-        (0.55, 'High -> Medium downgrade', '#2ecc71'),
+        (UPGRADE_LOW_THRESHOLD, 'Low -> High upgrade', '#e74c3c'),
+        (UPGRADE_MEDIUM_THRESHOLD, 'Medium -> High upgrade', '#f39c12'),
+        (DOWNGRADE_HIGH_THRESHOLD, 'High -> Medium downgrade', '#2ecc71'),
     ]
     for val, label, colour in thresholds:
         ax_a.axhline(y=val, color=colour, linestyle=':', linewidth=1.2,
@@ -827,54 +849,43 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame,
 
 def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
     """Fig 6: Can disordered proteins form confident interfaces?
-    Three-panel comparison of paradox vs non-paradox High-tier complexes.
+    Three-panel comparison of paradox vs non-paradox complexes.
+    Paradox: ipTM >= 0.75, pDockQ >= 0.5, disorder >= 0.30 (no tier filter).
     """
-    required = ['quality_tier_v2', 'iptm', 'pdockq',
-                'plddt_below50_fraction', 'interface_vs_bulk_delta',
+    required = ['iptm', 'pdockq', 'plddt_below50_fraction',
+                'interface_vs_bulk_delta',
                 'confident_contact_fraction', 'interface_symmetry']
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 6: missing required columns.")
         return
 
-    # Count paradox complexes in the FULL dataset before any filtering,
-    # so we can report how many are lost to (a) not being High-tier and
-    # (b) missing interface data for the three panels.
-    n_paradox_all_tiers = int(_get_paradox_mask(df).sum())
+    # Count paradox complexes before dropping rows with missing panel data,
+    # so we can report how many are lost to incomplete interface metrics.
+    n_paradox_before_dropna = int(_get_paradox_mask(df).sum())
 
-    all_high = df[df['quality_tier_v2'] == 'High'].copy()
-    n_paradox_in_high_before_dropna = int(_get_paradox_mask(all_high).sum())
-
-    high_tier = all_high.dropna(subset=required).copy()
-    if len(high_tier) == 0:
-        print("  Skipping Fig 6: no High-tier complexes.")
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 6: no complexes with complete interface data.")
         return
 
-    paradox_mask = _get_paradox_mask(high_tier)
-    paradox = high_tier[paradox_mask]
-    non_paradox = high_tier[~paradox_mask]
+    paradox_mask = _get_paradox_mask(plot_df)
+    paradox = plot_df[paradox_mask]
+    non_paradox = plot_df[~paradox_mask]
 
     n_paradox = len(paradox)
     n_non_paradox = len(non_paradox)
-    n_paradox_not_high = n_paradox_all_tiers - n_paradox_in_high_before_dropna
-    n_paradox_missing_data = n_paradox_in_high_before_dropna - n_paradox
-    n_paradox_excluded = n_paradox_all_tiers - n_paradox
+    n_paradox_missing_data = n_paradox_before_dropna - n_paradox
 
-    if n_paradox_excluded > 0:
-        parts = []
-        if n_paradox_not_high > 0:
-            parts.append(f"{n_paradox_not_high} in non-High tiers")
-        if n_paradox_missing_data > 0:
-            parts.append(f"{n_paradox_missing_data} missing interface data")
-        reason = ', '.join(parts)
-        print(f"  Note: {n_paradox_excluded} of {n_paradox_all_tiers} paradox complexes "
-              f"excluded from Fig 6 ({reason})")
+    if n_paradox_missing_data > 0:
+        print(f"  Note: {n_paradox_missing_data} of {n_paradox_before_dropna} paradox "
+              f"complexes excluded from Fig 6 (missing interface data)")
 
     if n_paradox == 0:
         print("  Skipping Fig 6: no paradox complexes found.")
         return
 
     colour_paradox = '#9b59b6'
-    colour_non_paradox = TIER_COLORS['High']
+    colour_non_paradox = '#3498db'
 
     figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
 
@@ -951,9 +962,11 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
         fontsize=14, fontweight='bold', y=1.04)
 
     subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
-                f"non-paradox High-tier complexes"
-                f" ({n_paradox_excluded} paradox complexes excluded due to incomplete interface data)")
-    
+                f"non-paradox complexes")
+    if n_paradox_missing_data > 0:
+        subtitle += (f" ({n_paradox_missing_data} paradox complexes excluded "
+                     f"due to incomplete interface data)")
+
     figure.text(0.5, 0.99, subtitle,
                 ha='center', fontsize=FONT_AXIS_LABEL, style='italic',
                 color='#555555')
