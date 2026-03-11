@@ -18,7 +18,7 @@ Scalability features:
 Enrichment features:
     - --enrich           -> Adds gene symbols, protein names, Ensembl IDs, amino acid sequences via id_mapper.py (requires STRING aliases file)
     - --databases        -> Tags each complex with source databases (STRING, BioGRID, HuRI, HuMAP) and evidence types via database_loaders.py
-    - Base output: 46 columns; enriched output: up to 60 columns
+    - Base output is 46 columns and enriched output is up to 60 columns
 
 Usage:
     # Basic (sequential, no checkpointing)
