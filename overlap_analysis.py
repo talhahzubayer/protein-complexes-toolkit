@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 """
-Database Overlap Analysis and Venn Diagram Generation - computes pairwise and multi-way overlaps between PPI databases (STRING, BioGRID, HuRI, HuMAP) after mapping all identifiers to UniProt. Generates Venn diagrams and overlap summary statistics.
+Database Overlap Analysis and Venn Diagram Generation.
+Computes pairwise and multi-way overlaps between PPI databases (STRING, BioGRID, HuRI, HuMAP) after mapping all identifiers to UniProt and generates UpSet or Venn diagrams and overlap summary statistics.
 
-Usage as module:
+Features:
+    - Pair normalisation: canonical ordering for symmetric comparison
+    - Pairwise and multi-way overlap computation across 2-4 databases
+    - Base-accession level analysis (isoform-collapsed comparisons)
+    - Venn diagram generation (2/3/4-way) with proportional sizing
+    - STRING threshold comparison figures
+    - Full overlap statistics report export
+
+Usage (as importable module):
     from overlap_analysis import extract_pair_set, compute_overlaps, plot_venn_diagram
     pair_sets = {name: extract_pair_set(df) for name, df in databases.items()}
     stats = compute_overlaps(pair_sets)
     plot_venn_diagram(pair_sets, "output/venn_overlap.png")
 
-Usage as CLI:
-    python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn.png -v
+Usage (standalone):
+    python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn_overlap.png -v
+    python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --string-min-score 700 --output Output/venn_overlap_700.png
 """
 
 import sys
@@ -17,15 +27,13 @@ import argparse
 from pathlib import Path
 from typing import Optional
 from itertools import combinations
-
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-#------Constants----------------------------------------------------
-STRING_CONFIDENCE_THRESHOLDS = [0, 400, 700, 900]
-
+#-----------Constants-------------------------------
+STRING_CONFIDENCE_THRESHOLDS = [150, 400, 700, 900]
 OUTPUT_DPI = 200
 
 # UpSet-style chart layout constants
@@ -45,8 +53,8 @@ DB_COLOURS = {
     'HuMAP': '#C44E52',
 }
 
+#---------P----------------air Normalisation---------------------------------
 
-#---------Pair Normalisation------------------------------------------------
 def normalise_pair(id_a: str, id_b: str) -> tuple[str, str]:
     """Return a canonical (sorted) pair for symmetric comparison.
     Args:
@@ -57,12 +65,9 @@ def normalise_pair(id_a: str, id_b: str) -> tuple[str, str]:
     """
     return (min(id_a, id_b), max(id_a, id_b))
 
-
 def normalise_pair_base(id_a: str, id_b: str) -> tuple[str, str]:
     """Return a canonical sorted pair at base-accession level.
-    Strips isoform suffixes (e.g., Q9UKT4-2 -> Q9UKT4) before sorting,
-    so that isoform-specific and base accessions match in cross-database
-    comparisons.
+    Strips isoform suffixes (e.g., Q9UKT4-2 -> Q9UKT4) before sorting so that isoform-specific and base accessions match in cross-database comparisons.
     Args:
         id_a: First protein identifier (may include isoform suffix).
         id_b: Second protein identifier.
@@ -74,12 +79,7 @@ def normalise_pair_base(id_a: str, id_b: str) -> tuple[str, str]:
     base_b = split_isoform(id_b)[0]
     return (min(base_a, base_b), max(base_a, base_b))
 
-
-def extract_pair_set(
-    df: pd.DataFrame,
-    col_a: str = 'protein_a',
-    col_b: str = 'protein_b',
-) -> set[tuple[str, str]]:
+def extract_pair_set(df: pd.DataFrame, col_a: str = 'protein_a', col_b: str = 'protein_b') -> set[tuple[str, str]]:
     """Extract normalised pair set from a DataFrame.
     Args:
         df: DataFrame with protein pair columns.
@@ -94,16 +94,9 @@ def extract_pair_set(
             pairs.add(normalise_pair(a, b))
     return pairs
 
-
-def extract_pair_set_base(
-    df: pd.DataFrame,
-    col_a: str = 'protein_a',
-    col_b: str = 'protein_b',
-) -> set[tuple[str, str]]:
+def extract_pair_set_base(df: pd.DataFrame, col_a: str = 'protein_a', col_b: str = 'protein_b') -> set[tuple[str, str]]:
     """Extract normalised pair set at base-accession level.
-    Like extract_pair_set() but strips isoform suffixes before
-    normalising, enabling cross-database comparison where some
-    databases (STRING, BioGRID) lack isoform specificity.
+    Like extract_pair_set() but strips isoform suffixes before normalising, enabling cross-database comparison where some databases (STRING, BioGRID) lack isoform specificity.
     Args:
         df: DataFrame with protein pair columns.
         col_a: Column name for protein A.
@@ -117,11 +110,9 @@ def extract_pair_set_base(
             pairs.add(normalise_pair_base(a, b))
     return pairs
 
+#----------------------------------Overlap Computation----------------------------------------
 
-#--------Overlap Computation-------------------------------------------------
-def compute_overlaps(
-    pair_sets: dict[str, set[tuple[str, str]]],
-) -> dict[str, dict]:
+def compute_overlaps(pair_sets: dict[str, set[tuple[str, str]]]) -> dict[str, dict]:
     """Compute overlap statistics across multiple databases.
     Args:
         pair_sets: Dict mapping database name to set of normalised pairs.
@@ -182,11 +173,7 @@ def compute_overlaps(
 
     return stats
 
-
-def print_overlap_summary(
-    stats: dict[str, dict],
-    file=None,
-) -> None:
+def print_overlap_summary(stats: dict[str, dict], file=None) -> None:
     """Print a formatted summary of overlap statistics.
     Args:
         stats: Output from compute_overlaps().
@@ -197,7 +184,6 @@ def print_overlap_summary(
 
     print("\n=== PPI Database Overlap Summary ===", file=file)
     print(f"\nTotal unique pairs (union): {stats['union']:,}", file=file)
-
     print("\nPer-database pair counts:", file=file)
     for name, count in stats['per_database'].items():
         print(f"  {name}: {count:,}", file=file)
@@ -217,77 +203,11 @@ def print_overlap_summary(
     for name, count in stats['unique_to'].items():
         print(f"  {name} only: {count:,}", file=file)
 
+#--------------UpSet & Venn Diagram Generation-------------------------------------
 
-#--------------Venn Diagram Generation-------------------------------------
-def plot_venn_diagram(
-    pair_sets: dict[str, set[tuple[str, str]]],
-    output_path: str,
-    title: str = "PPI Database Overlap",
-    verbose: bool = False,
-) -> None:
-    """Generate an overlap diagram of databases.
-    For 2-3 databases, uses matplotlib_venn if available.
-    For 4+ databases, generates an UpSet-style bar chart showing
-    intersection sizes, which is more readable than a 4-set Venn.
-    Args:
-        pair_sets: Dict mapping database name to set of normalised pairs.
-        output_path: Path for the output figure file.
-        title: Figure title.
-        verbose: Print overlap statistics.
-    """
-    names = list(pair_sets.keys())
-    stats = compute_overlaps(pair_sets)
-
-    if verbose:
-        print_overlap_summary(stats, file=sys.stderr)
-
-    if len(names) <= 3:
-        _plot_venn_2_3(pair_sets, output_path, title)
-    else:
-        _plot_upset_style(pair_sets, output_path, title)
-
-
-def _plot_venn_2_3(
-    pair_sets: dict[str, set[tuple[str, str]]],
-    output_path: str,
-    title: str,
-) -> None:
-    """Plot a 2-set or 3-set Venn diagram."""
-    names = list(pair_sets.keys())
-
-    try:
-        if len(names) == 2:
-            from matplotlib_venn import venn2
-            fig, ax = plt.subplots(figsize=(8, 6))
-            venn2(
-                [pair_sets[names[0]], pair_sets[names[1]]],
-                set_labels=names,
-                ax=ax,
-            )
-        else:
-            from matplotlib_venn import venn3
-            fig, ax = plt.subplots(figsize=(8, 6))
-            venn3(
-                [pair_sets[names[0]], pair_sets[names[1]], pair_sets[names[2]]],
-                set_labels=names,
-                ax=ax,
-            )
-        ax.set_title(title, fontsize=14)
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=OUTPUT_DPI, bbox_inches='tight')
-        plt.close(fig)
-    except ImportError:
-        print("  matplotlib-venn not installed, falling back to bar chart",
-              file=sys.stderr)
-        _plot_upset_style(pair_sets, output_path, title)
-
-
-def _compute_exclusive_intersections(
-    pair_sets: dict[str, set[tuple[str, str]]],
-) -> list[tuple[list[bool], int]]:
+def _compute_exclusive_intersections(pair_sets: dict[str, set[tuple[str, str]]]) -> list[tuple[list[bool], int]]:
     """Compute exclusive intersection sizes for UpSet-style display.
-    For each combination of databases, computes the number of pairs that appear
-    in exactly that combination and no others, using inclusion-exclusion.
+    For each combination of databases, computes the number of pairs that appear in exactly that combination and no others, using inclusion-exclusion.
     Args:
         pair_sets: Dict mapping database name to set of normalised pairs.
     Returns:
@@ -296,7 +216,6 @@ def _compute_exclusive_intersections(
     """
     names = list(pair_sets.keys())
     n = len(names)
-
     intersections = []
     for r in range(1, n + 1):
         for combo in combinations(range(n), r):
@@ -317,15 +236,8 @@ def _compute_exclusive_intersections(
     intersections.sort(key=lambda x: x[1], reverse=True)
     return intersections
 
-
-def _plot_upset_style(
-    pair_sets: dict[str, set[tuple[str, str]]],
-    output_path: str,
-    title: str,
-) -> None:
-    """Plot an UpSet-style intersection bar chart for 4+ databases.
-    This is more readable than a 4-set Venn diagram and is commonly
-    used in bioinformatics publications.
+def _plot_upset_style(pair_sets: dict[str, set[tuple[str, str]]], output_path: str, title: str) -> None:
+    """Plot an UpSet-style intersection bar chart for 4+ databases as it is more readable than a 4-set Venn diagram.
     Args:
         pair_sets: Dict mapping database name to set of normalised pairs.
         output_path: File path to save the figure.
@@ -333,18 +245,12 @@ def _plot_upset_style(
     """
     names = list(pair_sets.keys())
     n = len(names)
-
     intersections = _compute_exclusive_intersections(pair_sets)
     if not intersections:
         return
 
     # Plot
-    fig, (ax_bar, ax_dots) = plt.subplots(
-        2, 1,
-        figsize=(max(10, len(intersections) * UPSET_WIDTH_PER_COLUMN), UPSET_FIGURE_HEIGHT),
-        gridspec_kw={'height_ratios': UPSET_HEIGHT_RATIOS},
-        sharex=True,
-    )
+    fig, (ax_bar, ax_dots) = plt.subplots(2, 1, figsize=(max(10, len(intersections) * UPSET_WIDTH_PER_COLUMN), UPSET_FIGURE_HEIGHT), gridspec_kw={'height_ratios': UPSET_HEIGHT_RATIOS}, sharex=True)
 
     x = range(len(intersections))
     sizes = [s for _, s in intersections]
@@ -370,8 +276,7 @@ def _plot_upset_style(
     # Add count labels on top of bars
     for i, size in enumerate(sizes):
         if size > 0:
-            ax_bar.text(i, size, f'{size:,}', ha='center', va='bottom',
-                       fontsize=UPSET_BAR_LABEL_FONTSIZE, rotation=UPSET_BAR_LABEL_ROTATION)
+            ax_bar.text(i, size, f'{size:,}', ha='center', va='bottom', fontsize=UPSET_BAR_LABEL_FONTSIZE, rotation=UPSET_BAR_LABEL_ROTATION)
 
     # Dot matrix showing which databases are in each intersection
     for i, (flags, _) in enumerate(intersections):
@@ -383,11 +288,7 @@ def _plot_upset_style(
         # Connect active dots with a line
         active_indices = [j for j, a in enumerate(flags) if a]
         if len(active_indices) > 1:
-            ax_dots.plot(
-                [i] * len(active_indices),
-                active_indices,
-                '-', color='black', linewidth=1.5,
-            )
+            ax_dots.plot([i] * len(active_indices), active_indices, '-', color='black', linewidth=1.5)
 
     ax_dots.set_yticks(range(n))
     ax_dots.set_yticklabels(names, fontsize=10)
@@ -399,35 +300,61 @@ def _plot_upset_style(
     # Add database totals on the right
     for j, name in enumerate(names):
         total = len(pair_sets[name])
-        ax_dots.text(
-            len(intersections) + 0.3, j,
-            f'{total:,}',
-            va='center', fontsize=9, color='#555555',
-        )
+        ax_dots.text(len(intersections) + 0.3, j, f'{total:,}', va='center', fontsize=9, color='#555555')
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=OUTPUT_DPI, bbox_inches='tight')
     plt.close(fig)
 
+def _plot_venn_2_3(pair_sets: dict[str, set[tuple[str, str]]], output_path: str, title: str) -> None:
+    """Plot a 2-set or 3-set Venn diagram."""
+    names = list(pair_sets.keys())
+    try:
+        if len(names) == 2:
+            from matplotlib_venn import venn2
+            fig, ax = plt.subplots(figsize=(8, 6))
+            venn2([pair_sets[names[0]], pair_sets[names[1]]], set_labels=names, ax=ax)
+        else:
+            from matplotlib_venn import venn3
+            fig, ax = plt.subplots(figsize=(8, 6))
+            venn3([pair_sets[names[0]], pair_sets[names[1]], pair_sets[names[2]]], set_labels=names, ax=ax)
+        ax.set_title(title, fontsize=14)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=OUTPUT_DPI, bbox_inches='tight')
+        plt.close(fig)
+    except ImportError:
+        print("  matplotlib-venn not installed, falling back to bar chart", file=sys.stderr)
+        _plot_upset_style(pair_sets, output_path, title)
 
-def plot_threshold_comparison(
-    string_filepath: str,
-    other_pair_sets: dict[str, set[tuple[str, str]]],
-    mapper,
-    output_path: str,
-    thresholds: Optional[list[int]] = None,
-    verbose: bool = False,
-) -> None:
+def plot_venn_diagram(pair_sets: dict[str, set[tuple[str, str]]], output_path: str, title: str = "PPI Database Overlap", verbose: bool = False) -> None:
+    """Generate an overlap diagram of databases.
+    For 2-3 databases, uses matplotlib_venn if available.
+    For 4+ databases, generates an UpSet-style bar chart showing intersection sizes, which is more readable than a 4-set Venn.
+    Args:
+        pair_sets: Dict mapping database name to set of normalised pairs.
+        output_path: Path for the output figure file.
+        title: Figure title.
+        verbose: Print overlap statistics.
+    """
+    names = list(pair_sets.keys())
+    stats = compute_overlaps(pair_sets)
+    if verbose:
+        print_overlap_summary(stats, file=sys.stderr)
+
+    if len(names) <= 3:
+        _plot_venn_2_3(pair_sets, output_path, title)
+    else:
+        _plot_upset_style(pair_sets, output_path, title)
+
+def plot_threshold_comparison(string_filepath: str, other_pair_sets: dict[str, set[tuple[str, str]]], mapper, output_path: str, thresholds: Optional[list[int]] = None, verbose: bool = False) -> None:
     """Generate overlap comparisons at different STRING confidence thresholds.
-    Produces a multi-panel figure showing how STRING's overlap with other
-    databases changes as the confidence threshold increases.
+    Produces a multi-panel figure showing how STRING's overlap with other databases changes as the confidence threshold increases.
     Args:
         string_filepath: Path to the full STRING links file.
         other_pair_sets: Dict of {name: pair_set} for BioGRID, HuRI, HuMAP.
         mapper: IDMapper instance for ENSP-to-UniProt mapping.
         output_path: Path for the output figure file.
-        thresholds: STRING score thresholds to compare.
-            Defaults to [0, 400, 700, 900].
+        thresholds: STRING score thresholds to compare, defaults to 700 but user has options -> [0, 400, 700, 900].
         verbose: Print progress.
     """
     from database_loaders import load_string
@@ -470,18 +397,24 @@ def plot_threshold_comparison(
     fig.savefig(output_path, dpi=OUTPUT_DPI, bbox_inches='tight')
     plt.close(fig)
 
+#-------------------CLI Entry Point-----------------------------------------
 
-#-------------------CLI-----------------------------------------
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for overlap_analysis."""
     parser = argparse.ArgumentParser(
-        description="Compute PPI database overlaps and generate Venn diagrams.",
+        description="Compute PPI database overlaps and generate Venn or Upset diagrams.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+Usage (as importable module):
+    from overlap_analysis import extract_pair_set, compute_overlaps, plot_venn_diagram
+    pair_sets = {name: extract_pair_set(df) for name, df in databases.items()}
+    stats = compute_overlaps(pair_sets)
+    plot_venn_diagram(pair_sets, "output/venn_overlap.png")
+
+Usage (standalone):
     python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn.png -v
     python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --string-min-score 700 --output Output/venn_700.png
-        """,
+""",
     )
 
     parser.add_argument(
@@ -503,7 +436,8 @@ Examples:
         "--string-min-score",
         type=int,
         default=700,
-        help="STRING minimum score for main analysis (default: 700)",
+        help="STRING minimum combined score for main analysis (default: 700). "
+             "Confidence tiers: 150 (low), 400 (medium), 700 (high), 900 (highest)",
     )
     parser.add_argument(
         "--threshold-comparison",
@@ -528,14 +462,9 @@ Examples:
 
     return parser
 
-
-def _build_pair_sets(
-    dbs: dict[str, 'pd.DataFrame'],
-    extract_func,
-) -> dict[str, set[tuple[str, str]]]:
+def _build_pair_sets(dbs: dict[str, 'pd.DataFrame'], extract_func) -> dict[str, set[tuple[str, str]]]:
     """Build pair sets from database DataFrames using the given extraction function.
-    Automatically uses uniprot_a/uniprot_b columns if present, otherwise falls
-    back to the default protein_a/protein_b columns.
+    Automatically uses uniprot_a/uniprot_b columns if present, otherwise falls back to the default protein_a/protein_b columns.
     Args:
         dbs: Dict mapping database name to its DataFrame.
         extract_func: Pair extraction function (extract_pair_set or extract_pair_set_base).
@@ -549,7 +478,6 @@ def _build_pair_sets(
         else:
             pair_sets[name] = extract_func(df)
     return pair_sets
-
 
 def main() -> None:
     """Run the overlap analysis CLI."""
@@ -588,9 +516,7 @@ def main() -> None:
 
     # Generate Venn diagram
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    plot_venn_diagram(pair_sets, args.output,
-                      title="PPI Database Overlap (Isoform-Specific)",
-                      verbose=args.verbose)
+    plot_venn_diagram(pair_sets, args.output, title="PPI Database Overlap (Isoform-Specific)", verbose=args.verbose)
     print(f"\nVenn diagram saved to: {args.output}")
 
     # Base-accession level overlap (strips isoform suffixes)
@@ -608,9 +534,7 @@ def main() -> None:
         base_output = Path(args.output)
         base_output_path = str(
             base_output.parent / f"{base_output.stem}_base{base_output.suffix}")
-        plot_venn_diagram(base_pair_sets, base_output_path,
-                          title="PPI Database Overlap (Base Accession)",
-                          verbose=args.verbose)
+        plot_venn_diagram(base_pair_sets, base_output_path, title="PPI Database Overlap (Base Accession)", verbose=args.verbose)
         print(f"Base-level Venn diagram saved to: {base_output_path}")
 
     # Write report file

@@ -3,14 +3,22 @@
 ID Cross-Reference and Mapping Module - parses the STRING aliases file to build in-memory lookup dictionaries for efficient cross-referencing between Ensembl protein IDs (ENSP), Ensembl gene IDs (ENSG), UniProt accessions, and gene symbols.
 Isoform-aware: preserves full isoform-specific UniProt accessions (e.g., Q9UKT4-2) as primary keys and uses base accessions (e.g., Q9UKT4) as grouping fields.
 
-Usage as module:
+Features:
+    - ENSP → UniProt cross-referencing via STRING aliases
+    - ENSG → UniProt cross-referencing via ENSP intermediary
+    - UniProt → gene symbol and protein name resolution
+    - Secondary accession detection and canonical accession prioritisation
+    - Master lookup table export (CSV) with all cross-references
+    - Single-identifier resolution for interactive debugging
+
+Usage (as importable module):
     from id_mapper import IDMapper
     mapper = IDMapper("data/ppi/9606.protein.aliases.v12.0.txt")
     mapper.ensembl_to_uniprot("ENSP00000269305")  # -> ['P04637']
     mapper.uniprot_to_gene_symbol("P04637")        # -> 'TP53'
     mapper.ensg_to_uniprot("ENSG00000141510")      # -> ['P04637']
 
-Usage as CLI:
+Usage (standalone):
     python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --stats
     python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --export lookup.csv
     python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve P04637
@@ -590,7 +598,7 @@ def build_uniprot_lookup(mapper: IDMapper) -> dict[str, dict]:
     return lookup
 
 
-#-------------------CLI-----------------------------------------
+#-------------------CLI Entry Point-----------------------------------------
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for id_mapper."""

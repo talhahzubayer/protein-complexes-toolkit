@@ -4,3 +4,4 @@ matplotlib>=3.7
 scipy>=1.10
 tqdm>=4.60
 pytest>=7.0
+matplotlib-venn>=1.1.2

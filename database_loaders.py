@@ -3,14 +3,21 @@
 PPI Database Loading Module - parses protein-protein interaction data from 4 databases (STRING, BioGRID, HuRI, HuMAP) into standardised DataFrames with columns:
 protein_a, protein_b, source, confidence_score, evidence_type
 
-Usage as module:
+Features:
+    - STRING: combined-score filtering, automatic species-prefix stripping (Ensembl protein IDs)
+    - BioGRID: column-name-based loading, human-only filtering (taxonomy ID 9606)
+    - HuRI: binary TSV loading with Ensembl gene IDs
+    - HuMAP: probability-based filtering with optional UniProt ID validation
+    - Unified loader: loads all four databases in one call with configurable thresholds
+
+Usage (as importable module):
     from database_loaders import load_string, load_biogrid, load_huri, load_humap
     df = load_string("data/ppi/9606.protein.links.v12.0.txt", min_score=700)
     df = load_biogrid("data/ppi/BIOGRID-ALL-5.0.253.tab3.txt")
     df = load_huri("data/ppi/HuRI.tsv")
     df = load_humap("data/ppi/humap2_ppis_ACC_20200821.pairsWprob", min_probability=0.5)
 
-Usage as CLI:
+Usage (standalone):
     python database_loaders.py --data-dir data/ppi --database all --output interactions.csv -v
     python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
 """
@@ -404,7 +411,7 @@ def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0
     return results
 
 
-#-------------------CLI-----------------------------------------
+#-------------------CLI Entry Point-----------------------------------------
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for database_loaders."""
@@ -412,10 +419,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="Load and standardise PPI database files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-    Examples:
-        python database_loaders.py --data-dir data/ppi --database all -v
-        python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
-        python database_loaders.py --data-dir data/ppi --database biogrid --output biogrid_human.csv
+Examples:
+    python database_loaders.py --data-dir data/ppi --database all -v
+    python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
+    python database_loaders.py --data-dir data/ppi --database biogrid --output biogrid_human.csv
         """,
     )
 
@@ -439,7 +446,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--min-string-score",
         type=int,
         default=0,
-        help="Minimum STRING combined_score (0-1000). Default: 0",
+        help="Minimum STRING combined_score (0-1000). Default: 0. "
+             "Confidence tiers: 150 (low), 400 (medium), 700 (high), 900 (highest)",
     )
     parser.add_argument(
         "--min-humap-prob",

@@ -12,7 +12,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 58-column CSV output with automated quality flags, paradox detection, and optional enrichment
+- 60-column CSV output with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate 10 figures with adaptive rendering for datasets from hundreds to millions of complexes
