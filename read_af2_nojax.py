@@ -20,37 +20,27 @@ from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
-#------JAX Module Mocking------------------------------------------------
-# Mock JAX modules BEFORE any other imports.
-# This prevents pickle from trying to import real JAX modules.
-# Runs once at import time - safe for use across multiprocessing workers
-# when each worker imports this module independently.
+#----------------------------------JAX Module Mocking------------------------------------------------
+# Mock JAX modules BEFORE any other imports. This prevents pickle from trying to import real JAX modules.
+# Runs once at import time - safe for use across multiprocessing workers when each worker imports this module independently.
 
 class _MockJaxArray:
     """Mock JAX array that passes through numpy arrays during unpickling."""
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.data = args[0] if args else None
 
     def __array__(self) -> Any:
         return self.data
 
-
 class _MockJaxModule:
     """Mock module that returns passthrough functions for all JAX calls.
-    
-    Python's dunder/special methods bypass __getattr__ entirely - the
-    interpreter looks them up directly on the *type*, not the instance.
-    Pickle's object-reconstruction machinery may call __call__, iterate
-    with __iter__, index with __getitem__, or test truthiness with
-    __bool__ on the mock objects it receives.  Without explicit dunder
-    definitions those operations raise TypeError instead of gracefully
-    passing through, producing errors like:
+    Python's dunder/special methods bypass __getattr__ entirely - the interpreter looks them up directly on the *type*, not the instance.
+    Pickle's object-reconstruction machinery may call __call__, iterate with __iter__, index with __getitem__, or test truthiness with __bool__ on the mock objects it receives.  
+    Without explicit dunder definitions those operations raise TypeError instead of gracefully passing through, producing errors like:
         '_MockJaxModule' object is not iterable
         '_MockJaxModule' object is not callable
     The methods below cover every protocol pickle (and numpy) might use.
     """
-
     def __getattr__(self, name: str) -> Any:
         if name == '_reconstruct_array':
             return lambda x, *args, **kwargs: x
@@ -95,7 +85,7 @@ from pathlib import Path
 
 import numpy as np
 
-#------Constants----------------------------------------------------
+#------------------Constants---------------------------
 
 MAX_RECURSION_DEPTH = 100
 MAX_VALUE_PREVIEW_LENGTH = 50  # Character limit for value previews in key listing
@@ -106,7 +96,7 @@ PLDDT_HIGH_THRESHOLD = 70
 PLDDT_LOW_THRESHOLD = 50
 
 
-#--------PKL Loading-----------------------------------------------------
+#----------------------PKL Loading---------------------------------------
 
 def load_pkl_without_jax(filepath: Union[str, Path]) -> dict:
     """Load an AlphaFold2 PKL file without using JAX.
@@ -161,7 +151,7 @@ def _convert_to_numpy(obj: Any, depth: int = 0) -> Any:
         return obj
 
 
-#---------Metric Extraction----------------------------------------------
+#------------------Metric Extraction-------------------------------------------
 
 def extract_scalar(value: Any) -> Optional[float]:
     """Extract a Python float from various scalar or array types.
@@ -193,7 +183,6 @@ def extract_metrics(prediction_result: dict) -> dict:
         Dictionary of metrics with Python-native types (JSON-serialisable).
     """
     metrics: dict = {}
-
     scalar_keys = ['iptm', 'ptm', 'ranking_confidence', 'max_predicted_aligned_error']
     for key in scalar_keys:
         if key in prediction_result:
@@ -203,21 +192,15 @@ def extract_metrics(prediction_result: dict) -> dict:
 
     if 'plddt' in prediction_result:
         plddt_scores = np.asarray(prediction_result['plddt']).flatten()
-
         metrics['plddt_mean'] = float(np.mean(plddt_scores))
         metrics['plddt_median'] = float(np.median(plddt_scores))
         metrics['plddt_min'] = float(np.min(plddt_scores))
         metrics['plddt_max'] = float(np.max(plddt_scores))
         metrics['plddt_std'] = float(np.std(plddt_scores))
         metrics['num_residues'] = int(len(plddt_scores))
-
         metrics['plddt_very_high'] = int(np.sum(plddt_scores >= PLDDT_VERY_HIGH_THRESHOLD))
-        metrics['plddt_high'] = int(np.sum(
-            (plddt_scores >= PLDDT_HIGH_THRESHOLD) & (plddt_scores < PLDDT_VERY_HIGH_THRESHOLD)
-        ))
-        metrics['plddt_low'] = int(np.sum(
-            (plddt_scores >= PLDDT_LOW_THRESHOLD) & (plddt_scores < PLDDT_HIGH_THRESHOLD)
-        ))
+        metrics['plddt_high'] = int(np.sum((plddt_scores >= PLDDT_HIGH_THRESHOLD) & (plddt_scores < PLDDT_VERY_HIGH_THRESHOLD)))
+        metrics['plddt_low'] = int(np.sum((plddt_scores >= PLDDT_LOW_THRESHOLD) & (plddt_scores < PLDDT_HIGH_THRESHOLD)))
         metrics['plddt_very_low'] = int(np.sum(plddt_scores < PLDDT_LOW_THRESHOLD))
 
     if 'predicted_aligned_error' in prediction_result:
@@ -259,7 +242,7 @@ def list_keys(prediction_result: dict) -> dict[str, str]:
     return key_descriptions
 
 
-#----------CLI Entry Point-----------------------------------------------
+#----------------CLI Entry Point-------------------------------------------
 
 def main() -> dict:
     """Parse CLI arguments, load a PKL file, and output extracted metrics.
@@ -267,8 +250,20 @@ def main() -> dict:
         Dictionary of extracted metrics.
     """
     parser = argparse.ArgumentParser(
-        description="Read AlphaFold2 PKL files without requiring JAX"
-    )
+        description="Read AlphaFold2 PKL files without requiring JAX",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Usage (standalone):
+    python read_af2_nojax.py --pkl result.pkl
+    python read_af2_nojax.py --pkl result.pkl --json metrics.json
+    python read_af2_nojax.py --pkl result.pkl --keys
+
+Usage (as importable module):
+    from read_af2_nojax import load_pkl_without_jax, extract_metrics
+    prediction = load_pkl_without_jax("result.pkl")
+    metrics = extract_metrics(prediction)
+""",
+)
     parser.add_argument("--pkl", required=True, help="PKL file path")
     parser.add_argument("--keys", action="store_true", help="List all keys in the PKL file")
     parser.add_argument("--json", help="Save metrics to a JSON file")
