@@ -2,8 +2,7 @@
 """
 pDockQ - Predicted DockQ Score Calculator for AlphaFold2-predicted protein complexes.
 Uses the FoldDock parameterisation which normalises by the average pLDDT value at the interface.
-Based on: pdockq = L / (1 + exp(-k*(x-x0))) + b
-where L=0.724, x0=152.611, k=0.052, b=0.018, and x = avg_interface_plddt * log10(n_contacts).
+Based on: pdockq = L / (1 + exp(-k*(x-x0))) + b where L=0.724, x0=152.611, k=0.052, b=0.018, and x = avg_interface_plddt * log10(n_contacts).
 
 Usage (standalone):
     python pdockq.py --pdbfile structure.pdb
@@ -13,9 +12,9 @@ Usage (as importable module):
     chain_coords, chain_plddt = read_pdb_Edited("structure.pdb")
     pdockq, ppv = calc_pdockq_Edited(chain_coords, chain_plddt, t=8)
 
-    # Extended version with full contact details (for interface analysis):
-    result = calc_pdockq_and_contacts_New(chain_coords, chain_plddt, t=8)
+Extended version with full contact details (for interface analysis):
     # result.contacts, result.avg_if_plddt, result.chain_ids, etc.
+    result = calc_pdockq_and_contacts_New(chain_coords, chain_plddt, t=8) 
 """
 
 import sys
@@ -24,11 +23,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
-
 import numpy as np
 
-
-#------Constants----------------------------------------------------
+#----------------Constants-----------------------------------------
 
 DEFAULT_CONTACT_THRESHOLD_New = 8  # Ångströms
 
@@ -38,7 +35,7 @@ PDOCKQ_X0_New = 152.611
 PDOCKQ_K_New = 0.052
 PDOCKQ_B_New = 0.018
 
-# PPV lookup table - maps pDockQ thresholds to positive predictive values
+# PPV lookup table maps pDockQ thresholds to positive predictive values
 PPV_VALUES_New = np.array([
     0.98128027, 0.96322524, 0.95333044, 0.94001920,
     0.93172991, 0.92420274, 0.91629946, 0.90952562, 0.90043139,
@@ -60,7 +57,7 @@ PDOCKQ_THRESHOLDS_New = np.array([
 ])
 
 
-#---------Data Structures------------------------------------------------
+#--------------------Data Structures-------------------------------
 
 @dataclass
 class ContactResult_New:
@@ -69,9 +66,7 @@ class ContactResult_New:
         pdockq: Predicted DockQ score (0 to ~0.74).
         ppv: Positive predictive value from calibration lookup.
         chain_ids: Tuple of (chain_A_id, chain_B_id).
-        contacts: Nx2 array of contact indices - contacts[:,0] are chain A
-                  residue indices, contacts[:,1] are chain B residue indices.
-                  Empty (0,2) array if no contacts found.
+        contacts: Nx2 array of contact indices - contacts[:,0] are chain A residue indices, contacts[:,1] are chain B residue indices. Empty (0,2) array if no contacts found.
         contact_distances: 1D array of distances for each contact pair.
         n_interface_contacts: Total number of inter-chain contacts.
         interface_residues_a: Set of chain A residue indices at the interface.
@@ -96,16 +91,14 @@ class ContactResult_New:
     plddt_a: Optional[np.ndarray] = None
     plddt_b: Optional[np.ndarray] = None
 
-
-#--------PDB Parsing-----------------------------------------------------
+#---------------------------------------PDB Parsing-----------------------------------------------
 
 def parse_atm_record_Edited(line: str) -> dict:
     """Parse a single ATOM record from a PDB file into a dictionary.
     Args:
         line: A single line from a PDB file starting with 'ATOM'.
     Returns:
-        Dictionary with keys: name, atm_no, atm_name, atm_alt, res_name,
-        chain, res_no, insert, resid, x, y, z, occ, B.
+        Dictionary with keys: name, atm_no, atm_name, atm_alt, res_name, chain, res_no, insert, resid, x, y, z, occ, B.
     """
     return {
         'name': line[0:6].strip(),
@@ -124,14 +117,9 @@ def parse_atm_record_Edited(line: str) -> dict:
         'B': float(line[60:66]),
     }
 
-
-def _read_pdb_cb_atoms(
-    pdbfile: Union[str, Path],
-    include_residue_ids: bool = False,
-) -> tuple:
+def _read_pdb_cb_atoms(pdbfile: Union[str, Path], include_residue_ids: bool = False) -> tuple:
     """Core PDB CB-atom reader that extracts coordinates and pLDDT per chain.
-    Uses CB atoms (CA for glycine) as the representative atom per residue,
-    following the standard approach for contact-based analysis.
+    Uses CB atoms (CA for glycine) as the representative atom per residue, following the standard approach for contact-based analysis.
     Args:
         pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
         include_residue_ids: Whether to also collect PDB residue numbers and 3-letter names.
@@ -183,25 +171,17 @@ def _read_pdb_cb_atoms(
         return chain_coords, chain_plddt, chain_res_numbers, chain_res_names
     return chain_coords, chain_plddt
 
-
 def read_pdb_Edited(pdbfile: Union[str, Path]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Read an AlphaFold2 PDB file and extract CB coordinates and pLDDT per chain.
     Args:
         pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
     Returns:
-        Tuple of (chain_coords, chain_plddt) where each is a dict mapping
-        chain ID to a numpy array. chain_coords values have shape (N, 3),
-        chain_plddt values have shape (N,).
+        Tuple of (chain_coords, chain_plddt) where each is a dict mapping chain ID to a numpy array. 
+        chain_coords values have shape (N, 3) and chain_plddt values have shape (N,).
     """
     return _read_pdb_cb_atoms(pdbfile, include_residue_ids=False)
 
-
-def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
-    dict[str, list[int]],
-    dict[str, list[str]],
-]:
+def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, list[int]], dict[str, list[str]]]:
     """Extended PDB reader that also returns residue numbers and names per chain.
     Args:
         pdbfile: Path to an AlphaFold2 PDB file.
@@ -212,28 +192,22 @@ def read_pdb_with_residue_ids_New(pdbfile: Union[str, Path]) -> tuple[
     """
     return _read_pdb_cb_atoms(pdbfile, include_residue_ids=True)
 
-
-#-----------Multi-Chain & CB-Aware PDB Reading-------------------------------
+#-------------------------------------Multi-Chain & CB-Aware PDB Reading----------------------------------
 
 @dataclass
 class ChainInfo_New:
     """Full per-chain information for multi-chain and CB-aware PAE mapping.
-    Provides the data needed to correctly map CB-based contact indices
-    into the full PAE matrix, even when:
+    Provides the data needed to correctly map CB-based contact indices into the full PAE matrix, even when:
       - The complex has 3+ chains (multi-chain offset calculation)
-      - Some residues lack CB atoms (CB->CA index mapping)
+      - Some residues lack CB atoms (CB -> CA index mapping)
     Attributes:
         chain_ids: Ordered list of chain identifiers found in the PDB.
         cb_coords: Dict mapping chain ID to (N_cb, 3) CB coordinate arrays.
         cb_plddt: Dict mapping chain ID to (N_cb,) pLDDT arrays (CB residues).
-        ca_counts: Dict mapping chain ID to total CA residue count.
-                   This matches the PKL per-residue indexing.
-        cb_to_ca_map: Dict mapping chain ID to list where cb_to_ca_map[chain][i]
-                      gives the CA (full-residue) index for CB array position i.
-        chain_res_numbers: Dict mapping chain ID to list of PDB residue numbers
-                           (one per CB atom, for interface export).
-        chain_res_names: Dict mapping chain ID to list of 3-letter residue names
-                         (one per CB atom).
+        ca_counts: Dict mapping chain ID to total CA residue count. This matches the PKL per-residue indexing.
+        cb_to_ca_map: Dict mapping chain ID to list where cb_to_ca_map[chain][i] gives the CA (full-residue) index for CB array position i.
+        chain_res_numbers: Dict mapping chain ID to list of PDB residue numbers (one per CB atom, for interface export).
+        chain_res_names: Dict mapping chain ID to list of 3-letter residue names (one per CB atom).
     """
     chain_ids: list[str] = field(default_factory=list)
     cb_coords: dict[str, np.ndarray] = field(default_factory=dict)
@@ -246,31 +220,22 @@ class ChainInfo_New:
 
 def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
     """Read an AlphaFold2 PDB file and extract full chain information.
-    This reader solves three problems that the basic readers cannot:
-      1. It counts CA atoms per chain (matching PKL residue counts) separately
-         from CB atoms (used for contact analysis), resolving the CB mismatch.
-      2. It builds a CB->CA index mapping per chain, allowing correct PAE matrix
-         lookup even when some residues lack CB atoms.
-      3. It preserves chain ordering and per-chain counts for multi-chain
-         PAE offset computation.
+    This reader solves 3 problems that the basic readers cannot:
+      1. It counts CA atoms per chain (matching PKL residue counts) separately from CB atoms (used for contact analysis), resolving the CB mismatch.
+      2. It builds a CB->CA index mapping per chain, allowing correct PAE matrix lookup even when some residues lack CB atoms.
+      3. It preserves chain ordering and per-chain counts for multi-chain PAE offset computation.
     Args:
         pdbfile: Path to an AlphaFold2 PDB file with pLDDT in the B-factor column.
     Returns:
-        ChainInfo_New with all per-chain data needed for multi-chain-aware,
-        CB-mapped interface analysis.
+        ChainInfo_New with all per-chain data needed for multi-chain-aware, CB-mapped interface analysis.
     """
-    # First pass: collect CA residues per chain (ordered by residue number).
-    # This establishes the full residue indexing that matches the PKL/PAE matrix.
-    # Second pass: collect CB atoms and build the CB->CA mapping.
-    #
-    # We do this in two passes for clarity, though a single-pass approach
-    # is possible. At PDB-parsing scale, the overhead is negligible.
+    # 1st pass: collect CA residues per chain (ordered by residue number) - this establishes the full residue indexing that matches the PKL/PAE matrix.
+    # 2nd pass: collect CB atoms and build the CB -> CA mapping - we do this in 2 passes for clarity, though a single-pass approach is possible, at PDB-parsing scale, the overhead is negligible.
 
-    # -- Pass 1: CA atoms (all residues) --
-    # Track unique (chain, resid) to handle multi-atom residues.
+    #---------1st pass: CA atoms (all residues)---------------------
+    # Track unique (chain, resid) to handle multi-atom residues
     chain_ca_residues: dict[str, list[str]] = defaultdict(list)  # chain -> [resid, ...]
     seen_ca: set[tuple[str, str]] = set()
-
     with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
         for line in file:
             if not line.startswith('ATOM'):
@@ -285,15 +250,14 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
                 seen_ca.add(key)
                 chain_ca_residues[chain_id].append(resid)
 
-    # -- Pass 2: CB atoms (contact representatives) --
-    # For each CB atom, record its position in the CA array (the CB->CA map).
+    #---------2nd pass: CB atoms (contact representatives)---------------------
+    # For each CB atom, record its position in the CA array (the CB -> CA map).
     chain_cb_coords: dict[str, list[list[float]]] = defaultdict(list)
     chain_cb_plddt: dict[str, list[float]] = defaultdict(list)
     chain_cb_to_ca: dict[str, list[int]] = defaultdict(list)
     chain_cb_res_numbers: dict[str, list[int]] = defaultdict(list)
     chain_cb_res_names: dict[str, list[str]] = defaultdict(list)
     seen_cb: set[tuple[str, str]] = set()
-
     with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
         for line in file:
             if not line.startswith('ATOM'):
@@ -307,7 +271,6 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
                 if key in seen_cb:
                     continue
                 seen_cb.add(key)
-
                 chain_cb_coords[chain_id].append([record['x'], record['y'], record['z']])
                 chain_cb_plddt[chain_id].append(record['B'])
                 chain_cb_res_numbers[chain_id].append(record['res_no'])
@@ -318,8 +281,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
                     ca_index = chain_ca_residues[chain_id].index(resid)
                     chain_cb_to_ca[chain_id].append(ca_index)
                 except ValueError:
-                    # CB atom without a matching CA - shouldn't happen but
-                    # use the CB count as a fallback (direct 1:1 mapping).
+                    # CB atom without a matching CA - shouldn't happen but using the CB count as a fallback (direct 1:1 mapping).
                     chain_cb_to_ca[chain_id].append(len(chain_cb_to_ca[chain_id]))
 
     # Build result with stable chain ordering (preserves PDB order)
@@ -337,14 +299,10 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
 
     return info
 
-
-def compute_pae_chain_offsets_New(
-    chain_info: ChainInfo_New,
-) -> dict[str, int]:
+def compute_pae_chain_offsets_New(chain_info: ChainInfo_New) -> dict[str, int]:
     """Compute the starting offset of each chain in the full PAE matrix.
-    The PAE matrix rows/columns correspond to all residues across all chains,
-    ordered by chain appearance. Chain A occupies rows [0, ca_count_A),
-    chain B occupies [ca_count_A, ca_count_A + ca_count_B), etc.
+    The PAE matrix rows/columns correspond to all residues across all chains, ordered by chain appearance. 
+    Chain A occupies rows [0, ca_count_A), chain B occupies [ca_count_A, ca_count_A + ca_count_B), etc.
     Args:
         chain_info: ChainInfo_New from read_pdb_with_chain_info_New().
     Returns:
@@ -357,22 +315,16 @@ def compute_pae_chain_offsets_New(
         cumulative += chain_info.ca_counts[ch]
     return offsets
 
-
-def find_best_chain_pair_New(
-    chain_info: ChainInfo_New,
-    t: float = DEFAULT_CONTACT_THRESHOLD_New,
-) -> tuple[str, str, 'ContactResult_New']:
+def find_best_chain_pair_New(chain_info: ChainInfo_New, t: float = DEFAULT_CONTACT_THRESHOLD_New) -> tuple[str, str, 'ContactResult_New']:
     """Find the chain pair with the most inter-chain contacts.
-    For multi-chain complexes, the first two chains alphabetically may not
-    be the interacting pair. This function tests all unique pairs and
-    returns the one with the highest contact count (strongest interface).
+    For multi-chain complexes, the first 2 chains alphabetically may not be the interacting pair. 
+    This function tests all unique pairs and returns the one with the highest contact count (strongest interface).
     For standard dimers (2 chains), this simply returns the only pair.
     Args:
         chain_info: ChainInfo_New from read_pdb_with_chain_info_New().
         t: Contact distance threshold in Ångströms.
     Returns:
-        Tuple of (chain_id_A, chain_id_B, ContactResult_New) for the best pair.
-        If no pair has any contacts, returns the pair with the two longest chains.
+        Tuple of (chain_id_A, chain_id_B, ContactResult_New) for the best pair. If no pair has any contacts, returns the pair with the 2 longest chains.
     """
     chains_with_coords = [ch for ch in chain_info.chain_ids if ch in chain_info.cb_coords]
 
@@ -414,8 +366,7 @@ def find_best_chain_pair_New(
 
     return best_pair[0], best_pair[1], best_result
 
-
-#----------pDockQ Calculation---------------------------------------------
+#---------------------------pDockQ Calculation---------------------------------------------
 
 def _lookup_ppv_New(pdockq_score: float) -> float:
     """Look up the positive predictive value for a given pDockQ score.
@@ -429,23 +380,15 @@ def _lookup_ppv_New(pdockq_score: float) -> float:
         return float(PPV_VALUES_New[indices[-1]][0])
     return float(PPV_VALUES_New[0])
 
-
-def _compute_interchain_contacts(
-    coords_a: np.ndarray,
-    coords_b: np.ndarray,
-    threshold: float,
-) -> tuple[np.ndarray, np.ndarray]:
+def _compute_interchain_contacts(coords_a: np.ndarray, coords_b: np.ndarray, threshold: float) -> tuple[np.ndarray, np.ndarray]:
     """Compute inter-chain contacts within a distance threshold.
-    Builds a full pairwise distance matrix between two coordinate sets,
-    then extracts the inter-chain block and finds pairs closer than the threshold.
+    Builds a full pairwise distance matrix between two coordinate sets, then extracts the inter-chain block and finds pairs closer than the threshold.
     Args:
         coords_a: (N, 3) coordinates for chain A.
         coords_b: (M, 3) coordinates for chain B.
         threshold: Distance cutoff in Angstroms.
     Returns:
-        Tuple of (contacts, interchain_distance_matrix) where contacts is a (K, 2)
-        array of (chain_A_index, chain_B_index) pairs and interchain_distance_matrix
-        is the full (N, M) distance matrix between the two chains.
+        Tuple of (contacts, interchain_distance_matrix) where contacts is a (K, 2) array of (chain_A_index, chain_B_index) pairs and interchain_distance_matrix is the full (N, M) distance matrix between the two chains.
     """
     combined = np.append(coords_a, coords_b, axis=0)
     pairwise_diff = combined[:, np.newaxis, :] - combined[np.newaxis, :, :]
@@ -455,14 +398,9 @@ def _compute_interchain_contacts(
     contacts = np.argwhere(interchain_distances <= threshold)
     return contacts, interchain_distances
 
-
-def calc_pdockq_Edited(
-    chain_coords: dict[str, np.ndarray],
-    chain_plddt: dict[str, np.ndarray],
-    t: float = DEFAULT_CONTACT_THRESHOLD_New,
-) -> tuple[float, float]:
+def calc_pdockq_Edited(chain_coords: dict[str, np.ndarray], chain_plddt: dict[str, np.ndarray], t: float = DEFAULT_CONTACT_THRESHOLD_New) -> tuple[float, float]:
     """Calculate pDockQ and PPV scores for a two-chain complex.
-    This is the original interface - returns just (pdockq, ppv).
+    This is the original interface and returns just pdockq and ppv.
     Args:
         chain_coords: Dict mapping chain IDs to (N, 3) coordinate arrays.
         chain_plddt: Dict mapping chain IDs to (N,) pLDDT arrays.
@@ -480,23 +418,14 @@ def calc_pdockq_Edited(
     if contacts.shape[0] < 1:
         return 0.0, 0.0
 
-    avg_if_plddt = np.average(np.concatenate([
-        plddt1[np.unique(contacts[:, 0])],
-        plddt2[np.unique(contacts[:, 1])],
-    ]))
+    avg_if_plddt = np.average(np.concatenate([plddt1[np.unique(contacts[:, 0])], plddt2[np.unique(contacts[:, 1])]]))
     n_if_contacts = contacts.shape[0]
     x = avg_if_plddt * np.log10(n_if_contacts)
     pdockq = PDOCKQ_L_New / (1 + np.exp(-PDOCKQ_K_New * (x - PDOCKQ_X0_New))) + PDOCKQ_B_New
     ppv = _lookup_ppv_New(pdockq)
-
     return float(pdockq), float(ppv)
 
-
-def calc_pdockq_and_contacts_New(
-    chain_coords: dict[str, np.ndarray],
-    chain_plddt: dict[str, np.ndarray],
-    t: float = DEFAULT_CONTACT_THRESHOLD_New,
-) -> ContactResult_New:
+def calc_pdockq_and_contacts_New(chain_coords: dict[str, np.ndarray], chain_plddt: dict[str, np.ndarray], t: float = DEFAULT_CONTACT_THRESHOLD_New) -> ContactResult_New:
     """Calculate pDockQ with full contact details for interface analysis.
     Same core calculation as calc_pdockq_Edited(), but returns a ContactResult_New dataclass with all intermediate data needed by interface_analysis.py.
     Args:
@@ -520,7 +449,6 @@ def calc_pdockq_and_contacts_New(
     )
 
     contacts, interchain_distances = _compute_interchain_contacts(coords1, coords2, t)
-
     if contacts.shape[0] < 1:
         return result
 
@@ -532,10 +460,7 @@ def calc_pdockq_and_contacts_New(
     result.interface_residues_b = set(np.unique(contacts[:, 1]).tolist())
 
     # Interface pLDDT
-    avg_if_plddt = np.average(np.concatenate([
-        plddt1[np.unique(contacts[:, 0])],
-        plddt2[np.unique(contacts[:, 1])],
-    ]))
+    avg_if_plddt = np.average(np.concatenate([plddt1[np.unique(contacts[:, 0])], plddt2[np.unique(contacts[:, 1])]]))
     result.avg_if_plddt = float(avg_if_plddt)
 
     # pDockQ calculation
@@ -544,25 +469,36 @@ def calc_pdockq_and_contacts_New(
     pdockq = PDOCKQ_L_New / (1 + np.exp(-PDOCKQ_K_New * (x - PDOCKQ_X0_New))) + PDOCKQ_B_New
     result.pdockq = float(pdockq)
     result.ppv = _lookup_ppv_New(pdockq)
-
     return result
 
 
-#-----------CLI Entry Point----------------------------------------------
+#----------------------------------------CLI Entry Point----------------------------------------------
 
 def main_New() -> None:
     """CLI entry point - parse arguments, read PDB, calculate and print pDockQ."""
     parser = argparse.ArgumentParser(
-        description="Calculate a predicted DockQ score for a predicted structure."
-    )
+        description="Calculate a predicted DockQ score for a predicted structure.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Usage (standalone):
+    python pdockq.py --pdbfile structure.pdb
+
+Usage (as importable module):
+    from pdockq import read_pdb_Edited, calc_pdockq_Edited, calc_pdockq_and_contacts_New
+    chain_coords, chain_plddt = read_pdb_Edited("structure.pdb")
+    pdockq, ppv = calc_pdockq_Edited(chain_coords, chain_plddt, t=8)
+
+Extended version with full contact details (for interface analysis):
+    # result.contacts, result.avg_if_plddt, result.chain_ids, etc.
+    result = calc_pdockq_and_contacts_New(chain_coords, chain_plddt, t=8)
+""",
+)
     parser.add_argument(
         '--pdbfile', nargs=1, type=str, default=sys.stdin,
         help='Path to PDB file. B-factor column must contain pLDDT scores from AlphaFold.',
     )
     args = parser.parse_args()
-
     chain_coords, chain_plddt = read_pdb_Edited(args.pdbfile[0])
-
     if len(chain_coords.keys()) < 2:
         print('Only one chain in pdbfile', args.pdbfile[0])
         sys.exit()
