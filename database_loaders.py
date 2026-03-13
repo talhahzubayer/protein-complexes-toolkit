@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PPI Database Loading Module - parses protein-protein interaction data from 4 databases (STRING, BioGRID, HuRI, HuMAP) into standardised DataFrames with columns:
-protein_a, protein_b, source, confidence_score, evidence_type
+PPI Database Loading Module.
+Parses protein-protein interaction data from 4 databases (STRING, BioGRID, HuRI, HuMAP) into standardised DataFrames with columns: protein_a, protein_b, source, confidence_score, evidence_type
 
 Features:
     - STRING: combined-score filtering, automatic species-prefix stripping (Ensembl protein IDs)
@@ -29,11 +29,10 @@ import csv
 import warnings
 from pathlib import Path
 from typing import Optional
-
 import numpy as np
 import pandas as pd
 
-#------Constants----------------------------------------------------
+#-------------------Constants----------------------------
 # Default data directory
 DEFAULT_DATA_DIR = Path(__file__).parent / "data" / "ppi"
 
@@ -75,8 +74,7 @@ _UNIPROT_RE = re.compile(
     r'|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}(-\d+)?$'
 )
 
-
-#---------Helper Functions------------------------------------------------
+#--------------------Helper Functions-------------------------------
 
 def _is_valid_uniprot(identifier: str) -> bool:
     """Check if a string matches the UniProt accession pattern.
@@ -108,7 +106,7 @@ def _normalise_string_score(score: int) -> float:
 
 def _extract_first_uniprot(accession_field: str) -> Optional[str]:
     """Extract the first valid UniProt accession from a BioGRID field.
-    BioGRID SWISS-PROT columns contain a single accession or '-'.
+    BioGRID SWISS-PROT columns contain a single accession or '-' if missing.
     TREMBL columns may contain pipe-delimited multiple accessions.
     Args:
         accession_field: Raw BioGRID accession string,
@@ -122,8 +120,7 @@ def _extract_first_uniprot(accession_field: str) -> Optional[str]:
     first = accession_field.split('|')[0].strip()
     return first if first and first != '-' else None
 
-
-#--------STRING Parser-------------------------------------------------
+#---------------------------------------STRING Parser-------------------------------------------------
 
 def load_string(filepath: Optional[str] = None, min_score: int = 0, verbose: bool = False) -> pd.DataFrame:
     """Load STRING protein interaction network for human (taxon 9606).
@@ -162,8 +159,7 @@ def load_string(filepath: Optional[str] = None, min_score: int = 0, verbose: boo
     result = pd.DataFrame({'protein_a': df['protein1'], 'protein_b': df['protein2'], 'source': 'STRING', 'confidence_score': df['combined_score'].map(_normalise_string_score), 'evidence_type': 'combined'})
     return result.reset_index(drop=True)
 
-
-#---------BioGRID Parser-------------------------------------------------
+#----------------------------------BioGRID Parser-------------------------------------------------
 
 def load_biogrid(filepath: Optional[str] = None, physical_only: bool = True, verbose: bool = False) -> pd.DataFrame:
     """Load BioGRID interactions filtered to human (taxonomy 9606).
@@ -241,7 +237,7 @@ def load_biogrid(filepath: Optional[str] = None, physical_only: bool = True, ver
     return result.reset_index(drop=True)
 
 
-#------HuRI Parser------------------------------------------------------
+#----------------------------------HuRI Parser------------------------------------------------------
 
 def load_huri(filepath: Optional[str] = None, verbose: bool = False) -> pd.DataFrame:
     """Load HuRI binary interactome (Yeast 2-Hybrid {Y2H} screening).
@@ -285,7 +281,7 @@ def load_huri(filepath: Optional[str] = None, verbose: bool = False) -> pd.DataF
     return result.reset_index(drop=True)
 
 
-#------------------HuMAP Parser-----------------------------------------------------------
+#----------------------------------------HuMAP Parser-----------------------------------------------------------
 
 def load_humap(filepath: Optional[str] = None, min_probability: float = 0.0, validate_ids: bool = True, verbose: bool = False) -> pd.DataFrame:
     """Load hu.MAP 2.0 pairwise protein interactions.
@@ -357,7 +353,7 @@ def load_humap(filepath: Optional[str] = None, min_probability: float = 0.0, val
     return result.reset_index(drop=True)
 
 
-#--------------Unified Loader-------------------------------------
+#------------------------------------------------Unified Loader--------------------------------------------------------
 
 def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0, humap_min_probability: float = 0.0, biogrid_physical_only: bool = True, verbose: bool = False) -> dict[str, pd.DataFrame]:
     """Load all 4 PPI databases and return as a dictionary of DataFrames.
@@ -411,7 +407,7 @@ def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0
     return results
 
 
-#-------------------CLI Entry Point-----------------------------------------
+#-------------------------------CLI Entry Point-----------------------------------------
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """Create and return the argument parser for database_loaders."""
@@ -419,13 +415,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="Load and standardise PPI database files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-    python database_loaders.py --data-dir data/ppi --database all -v
-    python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
-    python database_loaders.py --data-dir data/ppi --database biogrid --output biogrid_human.csv
-        """,
-    )
+Usage (as importable module):
+    from database_loaders import load_string, load_biogrid, load_huri, load_humap
+    df = load_string("data/ppi/9606.protein.links.v12.0.txt", min_score=700)
+    df = load_biogrid("data/ppi/BIOGRID-ALL-5.0.253.tab3.txt")
+    df = load_huri("data/ppi/HuRI.tsv")
+    df = load_humap("data/ppi/humap2_ppis_ACC_20200821.pairsWprob", min_probability=0.5)
 
+Usage (standalone):
+    python database_loaders.py --data-dir data/ppi --database all --output interactions.csv -v
+    python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
+""",
+)
     parser.add_argument(
         "--data-dir",
         default=str(DEFAULT_DATA_DIR),
