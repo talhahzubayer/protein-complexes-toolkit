@@ -56,11 +56,12 @@ protein-complexes-toolkit/
 │   ├── test_multiprocessing.py
 │   ├── test_string_api.py   
 │   └── offline_test_data/
-│       └── databases/                   # Small database excerpts for offline testing
-│           └── string_api_responses/    # Pre-captured API responses (7 JSON files)
-└── data/                                # External databases (not included in repo)
-    ├── ppi/                             # PPI databases (see "Setting Up Data")
-    └── clusters/                        # STRING sequence clusters (see "Setting Up Data")
+│       └── databases/                    # Small database excerpts for offline testing
+│           └── string_api_responses/     # Pre-captured API responses (7 JSON files)
+├── data/                                 # External databases (not included in repo)
+│    ├── ppi/                             # PPI databases (see "Setting Up Data")
+│    └── clusters/                        # STRING sequence clusters (see "Setting Up Data")
+└── Test_Data/							  # Not included in repo (see "Setting Up Test Data")
 ```
 
 
