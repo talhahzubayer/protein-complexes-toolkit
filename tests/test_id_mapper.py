@@ -1,7 +1,7 @@
 """
 Tests for id_mapper.py - ID cross-referencing and resolution.
 
-Uses test_aliases.txt excerpt in tests/test_data/databases/ for offline testing.
+Uses test_aliases.txt excerpt in tests/offline_test_data/databases/ for offline testing.
 """
 
 import pytest
@@ -21,7 +21,7 @@ from id_mapper import (
 # ── Test Data Paths ──────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(r"C:\Users\Talhah Zubayer\Documents\protein-complexes-toolkit")
-TEST_ALIASES = PROJECT_ROOT / "tests" / "test_data" / "databases" / "test_aliases.txt"
+TEST_ALIASES = PROJECT_ROOT / "tests" / "offline_test_data" / "databases" / "test_aliases.txt"
 
 
 # ── ID Validation Tests (pure unit, no I/O) ──────────────────────────

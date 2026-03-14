@@ -9,6 +9,7 @@ __pycache__/
 # Pytest
 .pytest_cache/
 tests/test_output/
+tests/__pycache__
 
 # Generated pipeline output
 Output/

@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 TEST_DATA_DIR = PROJECT_ROOT / "Test_Data"
-TEST_DB_DIR = PROJECT_ROOT / "tests" / "test_data" / "databases"
+TEST_DB_DIR = PROJECT_ROOT / "tests" / "offline_test_data" / "databases"
 TEST_OUTPUT_DIR = PROJECT_ROOT / "tests" / "test_output"
 
 
@@ -270,7 +270,7 @@ def pipeline_csv(test_output_dir, test_data_dir):
 
 @pytest.fixture(scope="session")
 def test_db_dir():
-    """Return the path to the tests/test_data/databases/ directory."""
+    """Return the path to the tests/offline_test_data/databases/ directory."""
     assert TEST_DB_DIR.exists(), f"Test database directory not found: {TEST_DB_DIR}"
     return TEST_DB_DIR
 

@@ -54,14 +54,13 @@ protein-complexes-toolkit/
 │   ├── test_database_loaders.py
 │   ├── test_id_mapper.py
 │   ├── test_multiprocessing.py
-│   ├── test_string_api.py   # 56 mocked STRING API tests
-│   └── test_data/
-│       └── databases/       # Small database excerpts for offline testing
-│           └── string_api_responses/  # Pre-captured API responses (7 JSON files)
-├── data/                    # External databases (not included in repo)
-│   ├── ppi/                 # Protein-protein interaction databases (see "Setting Up PPI Databases")
-│   └── string_api_cache/    # Auto-created API response cache (gitignored)
-└── Test_Data/               # Not included in repo (see "Setting Up Test Data")
+│   ├── test_string_api.py   
+│   └── offline_test_data/
+│       └── databases/                   # Small database excerpts for offline testing
+│           └── string_api_responses/    # Pre-captured API responses (7 JSON files)
+└── data/                                # External databases (not included in repo)
+    ├── ppi/                             # PPI databases (see "Setting Up Data")
+    └── clusters/                        # STRING sequence clusters (see "Setting Up Data")
 ```
 
 
@@ -143,13 +142,13 @@ pip install -r requirements.txt
 > **Note:** JAX is **not** required. The toolkit uses module-level mocking to read AlphaFold2 PKL files without a JAX installation.
 
 
-## Setting Up PPI Databases
+## Setting Up Data
 
 The `data/` directory is **not included** in this repository due to the large size of external database files. These files are required for Phase A (Database Ingestion & ID Mapping) and later phases. To set up:
 
 1. Create the directory structure:
 ```bash
-mkdir -p data/ppi
+mkdir -p data/ppi data/clusters
 ```
 
 2. Download the following files into `data/ppi/`:
@@ -162,14 +161,23 @@ mkdir -p data/ppi
 | `HuRI.tsv` | HuRI | [interactome-atlas.org/download](https://interactome-atlas.org/download) - download `HuRI.tsv` |
 | `humap2_ppis_ACC_20200821.pairsWprob` | HuMAP 2.0 | [humap2.proteincomplexes.org/download](https://humap2.proteincomplexes.org/download) - download "Protein Interaction Network with probability scores (Uniprot gzip)", decompress |
 
-3. Verify the directory contents:
+3. Download the STRING protein clusters file into `data/clusters/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `9606.clusters.proteins.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.clusters.proteins.v12.0.txt.gz`, decompress |
+
+4. Verify the directory contents:
 ```
-data/ppi/
-├── 9606.protein.links.v12.0.txt          (~616 MB)
-├── 9606.protein.aliases.v12.0.txt        (~195 MB)
-├── BIOGRID-ALL-5.0.253.tab3.txt          (~1.48 GB)
-├── HuRI.tsv                              (~1.6 MB)
-└── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
+data/
+├── ppi/
+│   ├── 9606.protein.links.v12.0.txt          (~616 MB)
+│   ├── 9606.protein.aliases.v12.0.txt        (~195 MB)
+│   ├── BIOGRID-ALL-5.0.253.tab3.txt          (~1.48 GB)
+│   ├── HuRI.tsv                              (~1.6 MB)
+│   └── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
+└── clusters/
+    └── 9606.clusters.proteins.v12.0.txt      (~40 MB)
 ```
 
 
@@ -271,8 +279,7 @@ python interface_analysis.py --pdb structure.pdb --pkl result.pkl --json output.
 ### Enriched Pipeline (Gene Symbols, Database Sources, Sequences)
 
 ```bash
-# Full pipeline with enrichment (adds gene symbols, protein names, sequences, species, structure source)
-# STRING API validation is on by default — unresolved IDs are checked against the API
+# Full pipeline with enrichment (adds gene symbols, protein names, sequences, species, structure source) - STRING API validation is on by default so unresolved IDs are checked against the API
 python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt -w 4
 
 # Full pipeline with enrichment + database source tagging
@@ -428,7 +435,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 46-column CSV, 10-figure visualisation suite
 - **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
-- **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading — on by default with `--no-api` opt-out
+- **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
 
 ### Planned
 

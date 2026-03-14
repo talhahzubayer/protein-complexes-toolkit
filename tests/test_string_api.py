@@ -3,7 +3,7 @@ Tests for the STRING API client module (string_api.py).
 
 All tests use mocked HTTP responses — no live network calls are made.
 Pre-captured JSON responses are loaded from
-tests/test_data/databases/string_api_responses/ via the
+tests/offline_test_data/databases/string_api_responses/ via the
 string_api_responses fixture in conftest.py.
 
 Test counts by class:

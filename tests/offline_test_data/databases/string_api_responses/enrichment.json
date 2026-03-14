@@ -1,0 +1,100 @@
+[
+  {
+    "category": "Process",
+    "term": "GO:1902749",
+    "number_of_genes": 3,
+    "number_of_genes_in_background": 111,
+    "ncbiTaxonId": 9606,
+    "inputGenes": [
+      "Q9UKT4",
+      "P04637",
+      "P38398"
+    ],
+    "preferredNames": [
+      "FBXO5",
+      "TP53",
+      "BRCA1"
+    ],
+    "p_value": 7.51e-07,
+    "fdr": 0.0118,
+    "description": "Regulation of cell cycle G2/M phase transition"
+  },
+  {
+    "category": "Process",
+    "term": "GO:0007406",
+    "number_of_genes": 2,
+    "number_of_genes_in_background": 9,
+    "ncbiTaxonId": 9606,
+    "inputGenes": [
+      "P04637",
+      "P21359"
+    ],
+    "preferredNames": [
+      "TP53",
+      "NF1"
+    ],
+    "p_value": 1.7e-06,
+    "fdr": 0.0133,
+    "description": "Negative regulation of neuroblast proliferation"
+  },
+  {
+    "category": "Process",
+    "term": "GO:1901991",
+    "number_of_genes": 3,
+    "number_of_genes_in_background": 167,
+    "ncbiTaxonId": 9606,
+    "inputGenes": [
+      "Q9UKT4",
+      "P04637",
+      "P38398"
+    ],
+    "preferredNames": [
+      "FBXO5",
+      "TP53",
+      "BRCA1"
+    ],
+    "p_value": 2.51e-06,
+    "fdr": 0.0133,
+    "description": "Negative regulation of mitotic cell cycle phase transition"
+  },
+  {
+    "category": "Process",
+    "term": "GO:0014009",
+    "number_of_genes": 2,
+    "number_of_genes_in_background": 27,
+    "ncbiTaxonId": 9606,
+    "inputGenes": [
+      "P04637",
+      "P21359"
+    ],
+    "preferredNames": [
+      "TP53",
+      "NF1"
+    ],
+    "p_value": 1.25e-05,
+    "fdr": 0.0185,
+    "description": "Glial cell proliferation"
+  },
+  {
+    "category": "Process",
+    "term": "GO:0051248",
+    "number_of_genes": 4,
+    "number_of_genes_in_background": 1038,
+    "ncbiTaxonId": 9606,
+    "inputGenes": [
+      "Q9UKT4",
+      "P04637",
+      "P21359",
+      "P38398"
+    ],
+    "preferredNames": [
+      "FBXO5",
+      "TP53",
+      "NF1",
+      "BRCA1"
+    ],
+    "p_value": 7.78e-06,
+    "fdr": 0.0185,
+    "description": "Negative regulation of protein metabolic process"
+  }
+]

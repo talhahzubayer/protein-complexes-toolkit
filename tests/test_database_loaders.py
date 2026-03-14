@@ -1,7 +1,7 @@
 """
 Tests for database_loaders.py - PPI database parsing and standardisation.
 
-Uses small excerpt files in tests/test_data/databases/ for offline testing.
+Uses small excerpt files in tests/offline_test_data/databases/ for offline testing.
 Full-file tests are marked @pytest.mark.slow.
 """
 
@@ -24,7 +24,7 @@ from database_loaders import (
 # ── Test Data Paths ──────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(r"C:\Users\Talhah Zubayer\Documents\protein-complexes-toolkit")
-TEST_DB_DIR = PROJECT_ROOT / "tests" / "test_data" / "databases"
+TEST_DB_DIR = PROJECT_ROOT / "tests" / "offline_test_data" / "databases"
 
 # Known counts from test excerpts
 EXPECTED_STRING_ROWS = 304
