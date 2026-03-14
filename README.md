@@ -21,7 +21,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
 - Database overlap analysis: dual-level (isoform-specific + base-accession) intersection computation with UpSet-style visualisation
 - CSV enrichment: gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types
-- 325-test regression suite with real PDB/PKL data and offline database excerpts
+- 365-test suite (337 real + 28 future placeholders) with real PDB/PKL data and offline database excerpts
 
 
 ## Repository Structure
@@ -39,7 +39,7 @@ protein-complexes-toolkit/
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (325 tests + 28 future placeholders)
+├── tests/                   # Test suite (337 tests + 28 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -50,6 +50,7 @@ protein-complexes-toolkit/
 │   ├── test_future_aims.py
 │   ├── test_database_loaders.py
 │   ├── test_id_mapper.py
+│   ├── test_multiprocessing.py
 │   └── test_data/
 │       └── databases/       # Small database excerpts for offline testing
 ├── data/                    # External databases (not included in repo)
@@ -100,7 +101,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 46-column base CSV (58 columns with `--enrich`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags.
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 columns with `--enrich`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags.
 
 **visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
@@ -336,7 +337,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (46 base columns, 58 with enrichment)
+### CSV (48 base columns, 60 with enrichment)
 
 The main output CSV groups columns into:
 
@@ -396,23 +397,24 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **353 tests** across 10 modules (325 real + 28 future placeholders):
+The test suite contains **365 tests** across 11 modules (337 real + 28 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
 | test_read_af2_nojax.py | 26 | PKL loading, metric extraction |
 | test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
 | test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
-| test_toolkit.py | 52 | File discovery, quality classification, CSV, enrichment, sequences |
-| test_visualise_results.py | 22 | Figure generation, data loading, CLI |
+| test_toolkit.py | 54 | File discovery, quality classification, CSV, enrichment, sequences |
+| test_visualise_results.py | 23 | Figure generation, data loading, CLI |
 | test_integration.py | 8 | Cross-module pipeline, data flow |
 | test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
-| test_id_mapper.py | 62 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
+| test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
+| test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
 | test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
 
-**Results:** 324 passing, 1 skipped (Fig 10 - requires multi-chain data), 28 future placeholders (deselected by default)
+**Results:** 336 passing, 1 skipped (Fig 10 - all test complexes are dimers), 28 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `future` (unimplemented features)
 
 
 ## Acknowledgements
