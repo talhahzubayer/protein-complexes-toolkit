@@ -21,7 +21,9 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
 - Database overlap analysis: dual-level (isoform-specific + base-accession) intersection computation with UpSet-style visualisation
 - CSV enrichment: gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types
-- 365-test suite (337 real + 28 future placeholders) with real PDB/PKL data and offline database excerpts
+- Centralised STRING API client with rate limiting, retry/backoff, and response caching
+- Automatic API validation: ID resolution, enrichment, and database loading fall back to the STRING API when local data is incomplete (disable with `--no-api`)
+- 421-test suite (393 real + 28 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -36,10 +38,11 @@ protein-complexes-toolkit/
 ├── database_loaders.py      # PPI database parsers (STRING, BioGRID, HuRI, HuMAP)
 ├── id_mapper.py             # Protein ID cross-referencing (ENSP/ENSG/UniProt/gene symbol)
 ├── overlap_analysis.py      # Database overlap computation and UpSet diagrams
+├── string_api.py            # Centralised STRING API client (rate limiting, caching, retry)
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (337 tests + 28 future placeholders)
+├── tests/                   # Test suite (393 tests + 28 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -51,10 +54,13 @@ protein-complexes-toolkit/
 │   ├── test_database_loaders.py
 │   ├── test_id_mapper.py
 │   ├── test_multiprocessing.py
+│   ├── test_string_api.py   # 56 mocked STRING API tests
 │   └── test_data/
 │       └── databases/       # Small database excerpts for offline testing
+│           └── string_api_responses/  # Pre-captured API responses (7 JSON files)
 ├── data/                    # External databases (not included in repo)
-│   └── ppi/                 # Protein-protein interaction databases (see "Setting Up PPI Databases")
+│   ├── ppi/                 # Protein-protein interaction databases (see "Setting Up PPI Databases")
+│   └── string_api_cache/    # Auto-created API response cache (gitignored)
 └── Test_Data/               # Not included in repo (see "Setting Up Test Data")
 ```
 
@@ -74,6 +80,13 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                               id_mapper.py   database_loaders.py
                                             (gene symbols,   (source tagging,
                                              protein names)   evidence types)
+                                                    │             │
+                                                    └──────┬──────┘
+                                                           ▼
+                                                    string_api.py
+                                                  (automatic API fallback
+                                                   for unresolved IDs;
+                                                   disable with --no-api)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -101,15 +114,17 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 columns with `--enrich`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags.
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 columns with `--enrich`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. STRING API validation is on by default during enrichment (disable with `--no-api`).
 
 **visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
-**database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`.
+**database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`. `validate_with_api()` spot-checks loaded IDs against the STRING API (disable with `--no-api`).
 
-**id_mapper.py**: Protein identifier cross-referencing using the STRING aliases file as a single source of truth. `IDMapper` class builds bidirectional lookup tables for ENSP-to-UniProt, UniProt-to-gene-symbol, and ENSG-to-ENSP mappings. `resolve_id()` accepts any identifier type and resolves to a target namespace. Isoform-aware: preserves full isoform accessions (e.g., `P22607-2`) and prioritises reviewed Swiss-Prot accessions over TrEMBL. Includes `map_dataframe_to_uniprot()` for batch DataFrame ID conversion, `build_uniprot_lookup()` for efficient enrichment, and `export_lookup_table()` for structured CSV export with primary/secondary accession columns.
+**id_mapper.py**: Protein identifier cross-referencing using the STRING aliases file as a single source of truth. `IDMapper` class builds bidirectional lookup tables for ENSP-to-UniProt, UniProt-to-gene-symbol, and ENSG-to-ENSP mappings. `resolve_id()` accepts any identifier type and resolves to a target namespace, with automatic STRING API fallback when local lookup fails (`api_fallback=True` by default; disable with `--no-api`). Isoform-aware: preserves full isoform accessions (e.g., `P22607-2`) and prioritises reviewed Swiss-Prot accessions over TrEMBL. Includes `map_dataframe_to_uniprot()` for batch DataFrame ID conversion, `build_uniprot_lookup()` for efficient enrichment, and `export_lookup_table()` for structured CSV export with primary/secondary accession columns.
 
 **overlap_analysis.py**: Computes pairwise protein interaction overlaps across databases after ID normalisation. `normalise_pair()` and `normalise_pair_base()` create order-independent pair keys at isoform-specific and base-accession levels respectively. `extract_pair_set()` and `extract_pair_set_base()` convert DataFrames to normalised pair sets. `compute_overlaps()` returns per-database counts, pairwise overlaps, triple overlaps, all-database intersections, and unique-to-database sets. Supports UpSet-style intersection visualisation for 4+ databases. CLI supports dual-level analysis (`--base-level`), report generation (`--report`), and STRING threshold comparison.
+
+**string_api.py**: Centralised STRING database API client. All STRING API interactions are routed through this module. Architecture is offline-first: local flat files remain the primary data source; the API is an automatic supplement for unresolved identifiers and validation. Features rate-limited requests (1s between calls), automatic retry with exponential backoff on HTTP 429/5xx, SHA256-keyed response caching (auto-enabled to `data/string_api_cache/`), and caller identity injection per STRING API TOS. Provides 7 public functions: `get_string_ids()`, `get_interaction_partners()`, `query_homology()`, `query_enrichment()`, `query_ppi_enrichment()`, `query_network()`, `get_version()`. Raises `StringAPIError` on failure for clean error propagation.
 
 
 ## Installation
@@ -257,10 +272,14 @@ python interface_analysis.py --pdb structure.pdb --pkl result.pkl --json output.
 
 ```bash
 # Full pipeline with enrichment (adds gene symbols, protein names, sequences, species, structure source)
+# STRING API validation is on by default — unresolved IDs are checked against the API
 python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt -w 4
 
 # Full pipeline with enrichment + database source tagging
 python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ -w 4
+
+# Offline-only mode (disable all STRING API calls)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --no-api
 ```
 
 ### Database Ingestion & ID Mapping
@@ -292,6 +311,28 @@ python overlap_analysis.py --data-dir data/ppi/ --aliases data/ppi/9606.protein.
 python overlap_analysis.py --data-dir data/ppi/ --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn_overlap.png --base-level --report Output/overlap_report.txt
 ```
 
+### STRING API
+
+```bash
+# Resolve identifiers to STRING IDs
+python string_api.py --resolve P04637,Q9UKT4 --species 9606
+
+# Check STRING database version
+python string_api.py --version
+
+# Functional enrichment analysis
+python string_api.py --enrichment P04637,P38398,Q9UKT4 --species 9606
+
+# Retrieve interaction partners
+python string_api.py --interaction-partners P04637 --species 9606
+
+# Query protein network
+python string_api.py --network TP53,MDM2,BRCA1 --network-type physical
+
+# Use a custom cache directory
+python string_api.py --resolve P04637 --cache-dir /tmp/my_cache
+```
+
 ### Running Tests
 
 ```bash
@@ -309,6 +350,9 @@ python -m pytest tests/ -m "integration" -v
 
 # Database loading and ID mapping tests
 python -m pytest tests/ -m "database" -v
+
+# STRING API tests (mocked, no network)
+python -m pytest tests/ -m "api" -v
 
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
@@ -384,6 +428,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 46-column CSV, 10-figure visualisation suite
 - **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
+- **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading — on by default with `--no-api` opt-out
 
 ### Planned
 
@@ -397,7 +442,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **365 tests** across 11 modules (337 real + 28 future placeholders):
+The test suite contains **421 tests** across 12 modules (393 real + 28 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -410,11 +455,12 @@ The test suite contains **365 tests** across 11 modules (337 real + 28 future pl
 | test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
 | test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
 | test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
+| test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
 | test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
 
-**Results:** 336 passing, 1 skipped (Fig 10 - all test complexes are dimers), 28 future placeholders (deselected by default)
+**Results:** 392 passing, 1 skipped (Fig 10 - all test complexes are dimers), 28 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `future` (unimplemented features)
 
 
 ## Acknowledgements

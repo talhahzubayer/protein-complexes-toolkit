@@ -673,13 +673,15 @@ def write_interface_exports(results: list[dict], output_path: str, min_tier: str
 
 #------------------Enrichment (gene symbols, database sources)-----------------------
 
-def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_sets: Optional[dict[str, set]] = None, database_evidence: Optional[dict[str, set]] = None) -> None:
+def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_sets: Optional[dict[str, set]] = None, database_evidence: Optional[dict[str, set]] = None, mapper=None) -> None:
     """Enrich result rows with gene symbols, protein names, and database sources. Modifies the result dictionary in-place.
     Args:
         results: List of per-complex result dicts from batch processing.
         lookup: UniProt-keyed lookup dict from build_uniprot_lookup().
         database_pair_sets: Optional dict of {db_name: set of normalised UniProt pairs} for "source of complex" tagging.
         database_evidence: Optional dict of {db_name: set of evidence type strings}, pre-computed once to avoid scanning large DataFrames per complex.
+        mapper: Optional IDMapper instance for API-backed resolution of
+            proteins missing from the lookup table.
     """
     from overlap_analysis import normalise_pair
 
@@ -688,6 +690,23 @@ def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_s
         prot_b = row.get('protein_b', '')
         info_a = lookup.get(prot_a, {})
         info_b = lookup.get(prot_b, {})
+
+        # API fallback: if protein not in lookup, try resolving via mapper
+        if not info_a and mapper is not None and prot_a:
+            resolved = mapper.resolve_id(prot_a, target='ensp')
+            if resolved:
+                # Check lookup by ENSP-linked UniProt entries
+                for acc, info in lookup.items():
+                    if info.get('ensembl_protein_id') == resolved:
+                        info_a = info
+                        break
+        if not info_b and mapper is not None and prot_b:
+            resolved = mapper.resolve_id(prot_b, target='ensp')
+            if resolved:
+                for acc, info in lookup.items():
+                    if info.get('ensembl_protein_id') == resolved:
+                        info_b = info
+                        break
         row['gene_symbol_a'] = info_a.get('gene_symbol', '')
         row['gene_symbol_b'] = info_b.get('gene_symbol', '')
         row['protein_name_a'] = info_a.get('protein_name', '')
@@ -1145,6 +1164,9 @@ Examples:
     parser.add_argument("--string-min-score", type=int, default=700,
                         help="Minimum STRING confidence score for database source matching "
                              "(default: 700). Only used with --databases.")
+    parser.add_argument("--no-api", action="store_true",
+                        help="Disable STRING API validation fallback. Use only offline "
+                             "data files for ID resolution and enrichment.")
     return parser
 
 
@@ -1233,7 +1255,7 @@ def main() -> None:
         enrich_start = time.time()
         from id_mapper import IDMapper, build_uniprot_lookup
         print(f"Loading ID mapper from: {args.enrich}", file=sys.stderr)
-        mapper = IDMapper(args.enrich, verbose=True)
+        mapper = IDMapper(args.enrich, verbose=True, api_fallback=not args.no_api)
         lookup = build_uniprot_lookup(mapper)
         print(f"  Lookup table: {len(lookup):,} UniProt entries", file=sys.stderr)
 
@@ -1250,6 +1272,7 @@ def main() -> None:
                 args.databases,
                 string_min_score=args.string_min_score,
                 verbose=True,
+                api_validate=not args.no_api,
             )
 
             # Map STRING and HuRI to UniProt for pair matching
@@ -1286,7 +1309,8 @@ def main() -> None:
                   f"{len(db_pair_sets)} databases", file=sys.stderr)
 
         print(f"Enriching {len(results):,} complexes...", file=sys.stderr)
-        enrich_results(results, lookup, db_pair_sets, db_evidence)
+        enrich_results(results, lookup, db_pair_sets, db_evidence,
+                       mapper=mapper if not args.no_api else None)
         include_enrichment = True
         enrich_elapsed = time.time() - enrich_start
         print(f"Enrichment complete: {len(results)} complexes annotated "

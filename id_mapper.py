@@ -35,6 +35,7 @@ import sys
 import re
 import argparse
 import csv
+import warnings
 from pathlib import Path
 from typing import Optional
 from collections import defaultdict
@@ -141,9 +142,12 @@ class IDMapper:
     Args:
         aliases_filepath: Path to STRING aliases file. Defaults to data/ppi/9606.protein.aliases.v12.0.txt.
         verbose: Print progress during parsing.
+        api_fallback: If True (default), attempt STRING API resolution when
+            local lookup fails. Set to False to disable all API calls.
     """
 
-    def __init__(self, aliases_filepath: Optional[str] = None, verbose: bool = False) -> None:
+    def __init__(self, aliases_filepath: Optional[str] = None, verbose: bool = False,
+                 api_fallback: bool = True) -> None:
         """Parse the aliases file and build lookup dictionaries."""
         # ENSP -> list of UniProt accessions
         self._ensp_to_uniprot: dict[str, list[str]] = defaultdict(list)
@@ -159,6 +163,10 @@ class IDMapper:
         self._ensp_to_ensg: dict[str, str] = {}
         # ENSP -> protein name (one-to-one, last wins)
         self._ensp_to_name: dict[str, str] = {}
+
+        # API fallback state
+        self._api_fallback = api_fallback
+        self._api_available = True  # Latches to False after first StringAPIError
 
         filepath = Path(aliases_filepath) if aliases_filepath else DEFAULT_ALIASES_PATH
         if not filepath.exists():
@@ -311,12 +319,30 @@ class IDMapper:
         """Master resolution function: accept any ID type, return the target type.
         Detects the input ID type automatically and resolves through the mapping chain to produce the requested target type.
         For isoform-specific UniProt accessions passed as input, the full isoform ID is preserved in the output when target is 'uniprot'.
+        Falls back to the STRING API when local lookup fails and api_fallback is True.
         Args:
             identifier: Any protein/gene identifier.
             target: Target ID type: 'uniprot', 'ensp', 'gene_symbol'.
         Returns:
             Resolved identifier in the target namespace, or None if unmappable.
             For 'uniprot' target with one-to-many: returns the first accession.
+        """
+        result = self._resolve_id_local(identifier, target)
+        if result is not None:
+            return result
+
+        # API fallback: if local resolution returned None, try STRING API
+        if self._api_fallback and self._api_available:
+            return self._resolve_via_api(identifier, target)
+        return None
+
+    def _resolve_id_local(self, identifier: str, target: str = 'uniprot') -> Optional[str]:
+        """Local-only ID resolution (no API calls).
+        Args:
+            identifier: Any protein/gene identifier.
+            target: Target ID type: 'uniprot', 'ensp', 'gene_symbol'.
+        Returns:
+            Resolved identifier or None if not found in local data.
         """
         id_type = detect_id_type(identifier)
 
@@ -353,9 +379,63 @@ class IDMapper:
                     symbol = self._ensp_to_symbol.get(ensp)
                     if symbol:
                         return symbol
-                return None
 
         return None
+
+    def _resolve_via_api(self, identifier: str, target: str) -> Optional[str]:
+        """Attempt to resolve an identifier via the STRING API.
+        Called automatically when local resolution fails and api_fallback is True.
+        On the first StringAPIError, sets _api_available to False to avoid
+        repeated failed API calls within the same session.
+        Args:
+            identifier: Protein/gene identifier that failed local lookup.
+            target: Target ID type: 'uniprot', 'ensp', or 'gene_symbol'.
+        Returns:
+            Resolved identifier in the target namespace, or None.
+        """
+        try:
+            from string_api import get_string_ids, StringAPIError
+        except ImportError:
+            self._api_available = False
+            return None
+
+        try:
+            api_result = get_string_ids([identifier])
+            if api_result.empty:
+                return None
+
+            row = api_result.iloc[0]
+            string_id = row.get('stringId', '')
+            preferred_name = row.get('preferredName', '')
+
+            # Extract ENSP from stringId (format: "9606.ENSP00000269305")
+            ensp = string_id.removeprefix(STRING_TAXONOMY_PREFIX) if string_id else ''
+
+            if target == 'ensp':
+                return ensp if ENSP_RE.match(ensp) else None
+            elif target == 'gene_symbol':
+                return preferred_name if preferred_name else None
+            elif target == 'uniprot':
+                # Check if preferredName is a UniProt accession
+                if preferred_name and is_uniprot_accession(preferred_name):
+                    return preferred_name
+                # Try local ENSP->UniProt mapping with the API-resolved ENSP
+                if ensp and ENSP_RE.match(ensp):
+                    results = self.ensembl_to_uniprot(ensp)
+                    if results:
+                        return results[0]
+            return None
+
+        except Exception as e:
+            # Check if it's a StringAPIError to latch off API
+            from string_api import StringAPIError
+            if isinstance(e, StringAPIError):
+                self._api_available = False
+                warnings.warn(
+                    f"STRING API unavailable, disabling API fallback: {e}",
+                    stacklevel=2,
+                )
+            return None
 
     def resolve_pair_to_uniprot(self, id_a: str, id_b: str) -> Optional[tuple[str, str, bool]]:
         """Resolve a pair of identifiers to UniProt accessions.
@@ -605,6 +685,33 @@ Usage (standalone):
         action="store_true",
         help="Print detailed progress information",
     )
+    parser.add_argument(
+        "--no-api",
+        action="store_true",
+        help="Disable STRING API fallback for ID resolution. Use only local "
+             "aliases file data.",
+    )
+    parser.add_argument(
+        "--validate-ids-api",
+        action="store_true",
+        help=(
+            "After local resolution, pass any unresolved identifiers through "
+            "the STRING API get_string_ids endpoint as a fallback. Requires "
+            "network access. Used with --resolve to validate IDs that fail "
+            "local lookup against the aliases file."
+        ),
+    )
+    parser.add_argument(
+        "--cross-validate-api",
+        type=int,
+        metavar="N",
+        default=0,
+        help=(
+            "Cross-validate N randomly sampled local STRING interactions "
+            "against the live STRING API interaction_partners endpoint. "
+            "Reports agreement/disagreement counts. Requires network access."
+        ),
+    )
 
     return parser
 
@@ -615,7 +722,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"Loading aliases from: {args.aliases}", file=sys.stderr)
-    mapper = IDMapper(args.aliases, verbose=True)
+    mapper = IDMapper(args.aliases, verbose=True, api_fallback=not args.no_api)
 
     if args.stats:
         stats = mapper.get_mapping_stats()
@@ -644,6 +751,74 @@ def main() -> None:
             all_uniprots = mapper.ensembl_to_uniprot(identifier)
             if len(all_uniprots) > 1:
                 print(f"  All UniProt:  {', '.join(all_uniprots)}")
+
+        # A.4.1: Validate unresolved IDs against STRING API
+        if args.validate_ids_api and not uniprot:
+            try:
+                import warnings
+                from string_api import get_string_ids, get_version, StringAPIError
+
+                print(f"\n  Local resolution failed. Querying STRING API...",
+                      file=sys.stderr)
+                version = get_version()
+                print(f"  STRING API version: {version.get('string_version', 'unknown')}",
+                      file=sys.stderr)
+
+                api_result = get_string_ids([identifier])
+                if len(api_result) > 0:
+                    print(f"\n  STRING API result:")
+                    for _, row in api_result.iterrows():
+                        print(f"    stringId:      {row.get('stringId', 'N/A')}")
+                        print(f"    preferredName: {row.get('preferredName', 'N/A')}")
+                        print(f"    annotation:    {str(row.get('annotation', 'N/A'))[:100]}...")
+                else:
+                    print(f"  STRING API: identifier not found")
+            except ImportError:
+                print("  Warning: string_api module not available", file=sys.stderr)
+            except Exception as e:
+                print(f"  Warning: STRING API query failed: {e}", file=sys.stderr)
+
+    # A.4.2: Cross-validate local interactions against STRING API
+    if args.cross_validate_api > 0:
+        try:
+            import random
+            from string_api import get_interaction_partners, get_version, StringAPIError
+
+            version = get_version()
+            print(f"\nCross-validation against STRING API v{version.get('string_version', '?')}",
+                  file=sys.stderr)
+
+            stats = mapper.get_mapping_stats()
+            ensp_ids = list(mapper._ensp_to_uniprot.keys())
+            if not ensp_ids:
+                print("  No ENSP IDs available for cross-validation", file=sys.stderr)
+            else:
+                sample_size = min(args.cross_validate_api, len(ensp_ids))
+                sampled = random.sample(ensp_ids, sample_size)
+                agree, disagree, api_fail = 0, 0, 0
+
+                for ensp in sampled:
+                    full_id = f"9606.{ensp}"
+                    try:
+                        partners = get_interaction_partners(
+                            [full_id], required_score=700, limit=5,
+                        )
+                        if len(partners) > 0:
+                            agree += 1
+                        else:
+                            disagree += 1
+                    except Exception:
+                        api_fail += 1
+
+                print(f"\n  Cross-validation results ({sample_size} proteins):")
+                print(f"    Has API partners (score>=700): {agree}")
+                print(f"    No API partners:               {disagree}")
+                print(f"    API errors:                    {api_fail}")
+
+        except ImportError:
+            print("  Warning: string_api module not available", file=sys.stderr)
+        except Exception as e:
+            print(f"  Warning: cross-validation failed: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

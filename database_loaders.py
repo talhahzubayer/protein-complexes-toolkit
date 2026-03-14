@@ -355,7 +355,7 @@ def load_humap(filepath: Optional[str] = None, min_probability: float = 0.0, val
 
 #------------------------------------------------Unified Loader--------------------------------------------------------
 
-def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0, humap_min_probability: float = 0.0, biogrid_physical_only: bool = True, verbose: bool = False) -> dict[str, pd.DataFrame]:
+def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0, humap_min_probability: float = 0.0, biogrid_physical_only: bool = True, verbose: bool = False, api_validate: bool = True) -> dict[str, pd.DataFrame]:
     """Load all 4 PPI databases and return as a dictionary of DataFrames.
     Args:
         data_dir: Directory containing database files. Defaults to data/ppi/.
@@ -363,6 +363,8 @@ def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0
         humap_min_probability: Minimum HuMAP probability.
         biogrid_physical_only: Filter BioGRID to physical interactions only.
         verbose: Print progress information.
+        api_validate: If True (default), spot-check loaded IDs against the
+            STRING API. Warns if match rate is below 80%.
     Returns:
         Dict mapping database name to DataFrame: {'STRING': df, 'BioGRID': df, 'HuRI': df, 'HuMAP': df}.
         Each DataFrame has the standard OUTPUT_COLUMNS.
@@ -404,7 +406,81 @@ def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0
         for name, df in results.items():
             print(f"  {name}: {len(df):,} interactions", file=sys.stderr)
 
+    # Optional API validation of loaded data
+    if api_validate:
+        for name, df in results.items():
+            report = validate_with_api(df, name, verbose=verbose)
+            if report.get('api_error'):
+                if verbose:
+                    print(f"  {name}: API validation skipped (API unavailable)",
+                          file=sys.stderr)
+            elif verbose and report.get('total_checked', 0) > 0:
+                rate = report['match_rate']
+                if rate < 0.8:
+                    print(f"  WARNING: {name} API validation match rate "
+                          f"{rate:.0%} — check data file version",
+                          file=sys.stderr)
+
     return results
+
+
+def validate_with_api(df: pd.DataFrame, source_name: str,
+                      sample_size: int = 50,
+                      verbose: bool = False) -> dict:
+    """Spot-check loaded database IDs against the STRING API.
+    Samples up to ``sample_size`` protein IDs from the DataFrame, resolves
+    them via get_string_ids(), and reports the match rate. This catches
+    issues like stale ID versions or incorrect file parsing.
+    Args:
+        df: Loaded interaction DataFrame.
+        source_name: Database name for logging (e.g. 'STRING', 'BioGRID').
+        sample_size: Number of IDs to sample-check.
+        verbose: Print validation report to stderr.
+    Returns:
+        Dict with keys: 'total_checked', 'matched', 'unmatched',
+        'match_rate', 'api_error'.
+    """
+    if df.empty:
+        return {'total_checked': 0, 'matched': 0, 'unmatched': 0,
+                'match_rate': 1.0, 'api_error': False}
+
+    try:
+        from string_api import get_string_ids, StringAPIError
+    except ImportError:
+        return {'total_checked': 0, 'matched': 0, 'unmatched': 0,
+                'match_rate': 0.0, 'api_error': True}
+
+    # Collect unique protein IDs to sample
+    col = 'protein_a' if 'protein_a' in df.columns else df.columns[0]
+    all_ids = list(df[col].dropna().unique())
+    n = min(sample_size, len(all_ids))
+    if n == 0:
+        return {'total_checked': 0, 'matched': 0, 'unmatched': 0,
+                'match_rate': 1.0, 'api_error': False}
+
+    import random
+    sampled = random.sample(all_ids, n)
+
+    try:
+        api_result = get_string_ids(sampled)
+        returned_queries = set(api_result['queryItem'].tolist()) if 'queryItem' in api_result.columns else set()
+        matched = sum(1 for s in sampled if s in returned_queries)
+        unmatched = n - matched
+        rate = matched / n if n > 0 else 1.0
+
+        if verbose:
+            print(f"  {source_name}: API validation {matched}/{n} IDs matched "
+                  f"({rate:.0%})", file=sys.stderr)
+
+        return {'total_checked': n, 'matched': matched, 'unmatched': unmatched,
+                'match_rate': rate, 'api_error': False}
+
+    except Exception:
+        if verbose:
+            print(f"  {source_name}: API validation failed (API unavailable)",
+                  file=sys.stderr)
+        return {'total_checked': 0, 'matched': 0, 'unmatched': 0,
+                'match_rate': 0.0, 'api_error': True}
 
 
 #-------------------------------CLI Entry Point-----------------------------------------
@@ -467,6 +543,11 @@ Usage (standalone):
         action="store_true",
         help="Print detailed progress information",
     )
+    parser.add_argument(
+        "--no-api",
+        action="store_true",
+        help="Disable STRING API validation of loaded database IDs.",
+    )
     return parser
 
 
@@ -484,6 +565,7 @@ def main() -> None:
             humap_min_probability=args.min_humap_prob,
             biogrid_physical_only=args.biogrid_physical_only,
             verbose=args.verbose,
+            api_validate=not args.no_api,
         )
         if args.output:
             combined = pd.concat(results.values(), ignore_index=True)

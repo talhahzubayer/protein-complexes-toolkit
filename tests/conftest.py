@@ -288,3 +288,22 @@ def id_mapper(test_aliases_path):
     """Session-scoped IDMapper loaded from the test aliases excerpt."""
     from id_mapper import IDMapper
     return IDMapper(str(test_aliases_path))
+
+
+# ── STRING API Test Data Fixtures ────────────────────────────────
+
+@pytest.fixture(scope="session")
+def string_api_responses(test_db_dir):
+    """Load all pre-captured STRING API response files into a dict.
+
+    Returns a dict keyed by endpoint name (filename stem), e.g.
+    {'get_string_ids': [...], 'version': [...], ...}.
+    """
+    import json
+    response_dir = test_db_dir / "string_api_responses"
+    assert response_dir.exists(), f"STRING API response dir not found: {response_dir}"
+    responses = {}
+    for path in sorted(response_dir.glob("*.json")):
+        with open(path, encoding="utf-8") as f:
+            responses[path.stem] = json.load(f)
+    return responses
