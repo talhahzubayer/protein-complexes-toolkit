@@ -321,7 +321,6 @@ def get_string_ids(identifiers: list[str], species: int = STRING_API_SPECIES,
         key = _cache_key("get_string_ids", params)
         cached = _read_cache(resolved_cache, key)
         if cached is not None:
-            print("  STRING API: cache hit for get_string_ids", file=sys.stderr)
             return pd.DataFrame(cached)
 
     result = _make_request("get_string_ids", params)
@@ -370,7 +369,6 @@ def get_interaction_partners(identifiers: list[str],
         key = _cache_key("interaction_partners", params)
         cached = _read_cache(resolved_cache, key)
         if cached is not None:
-            print("  STRING API: cache hit for interaction_partners", file=sys.stderr)
             return pd.DataFrame(cached)
 
     result = _make_request("interaction_partners", params)
@@ -412,7 +410,6 @@ def query_homology(identifiers: list[str],
         key = _cache_key("homology", params)
         cached = _read_cache(resolved_cache, key)
         if cached is not None:
-            print("  STRING API: cache hit for homology", file=sys.stderr)
             return pd.DataFrame(cached)
 
     result = _make_request("homology", params)
@@ -459,7 +456,6 @@ def query_enrichment(identifiers: list[str],
         key = _cache_key("enrichment", params)
         cached = _read_cache(resolved_cache, key)
         if cached is not None:
-            print("  STRING API: cache hit for enrichment", file=sys.stderr)
             return pd.DataFrame(cached)
 
     result = _make_request("enrichment", params)
@@ -505,7 +501,6 @@ def query_ppi_enrichment(identifiers: list[str],
         key = _cache_key("ppi_enrichment", params)
         cached = _read_cache(resolved_cache, key)
         if cached is not None:
-            print("  STRING API: cache hit for ppi_enrichment", file=sys.stderr)
             return cached if isinstance(cached, dict) else cached[0]
 
     result = _make_request("ppi_enrichment", params)
@@ -565,7 +560,6 @@ def query_network(identifiers: list[str],
         key = _cache_key("network", params)
         cached = _read_cache(resolved_cache, key)
         if cached is not None:
-            print("  STRING API: cache hit for network", file=sys.stderr)
             return pd.DataFrame(cached)
 
     result = _make_request("network", params)

@@ -418,7 +418,7 @@ def load_all_databases(data_dir: Optional[str] = None, string_min_score: int = 0
                 rate = report['match_rate']
                 if rate < 0.8:
                     print(f"  WARNING: {name} API validation match rate "
-                          f"{rate:.0%} — check data file version",
+                          f"{rate:.0%} - check data file version",
                           file=sys.stderr)
 
     return results
@@ -469,8 +469,9 @@ def validate_with_api(df: pd.DataFrame, source_name: str,
         rate = matched / n if n > 0 else 1.0
 
         if verbose:
-            print(f"  {source_name}: API validation {matched}/{n} IDs matched "
-                  f"({rate:.0%})", file=sys.stderr)
+            print(f"  {source_name}: spot-checked {n} random protein IDs "
+                  f"against STRING API - {matched}/{n} confirmed ({rate:.0%})",
+                  file=sys.stderr)
 
         return {'total_checked': n, 'matched': matched, 'unmatched': unmatched,
                 'match_rate': rate, 'api_error': False}

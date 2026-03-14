@@ -685,6 +685,7 @@ def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_s
     """
     from overlap_analysis import normalise_pair
 
+    bar = _make_progress_bar(len(results), desc="Enriching")
     for row in results:
         prot_a = row.get('protein_a', '')
         prot_b = row.get('protein_b', '')
@@ -744,6 +745,8 @@ def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_s
         else:
             row['database_source'] = ''
             row['evidence_types'] = ''
+        bar.update(1)
+    bar.__exit__(None, None, None)
 
 def _checkpoint_path(output_path: str) -> Path:
     """Derive a checkpoint filepath from the output CSV path."""
@@ -1308,7 +1311,6 @@ def main() -> None:
             print(f"  Total: {total_pairs:,} pairs across "
                   f"{len(db_pair_sets)} databases", file=sys.stderr)
 
-        print(f"Enriching {len(results):,} complexes...", file=sys.stderr)
         enrich_results(results, lookup, db_pair_sets, db_evidence,
                        mapper=mapper if not args.no_api else None)
         include_enrichment = True
