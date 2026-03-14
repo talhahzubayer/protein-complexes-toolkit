@@ -387,7 +387,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ### Planned
 
-- **Aim 3 - Protein Clustering:** Integrate STRING sequence clusters and Foldseek structural similarity
+- **Aim 3 - Protein Clustering:** Integrate STRING sequence clusters and API homology scores (Foldseek structural similarity deferred)
 - **Aim 4 - Variant Mapping:** Map ClinVar and gnomAD variants onto interface residues with structural context classification
 - **Aim 6 - Stability Scoring:** Integrate ProtVar, EVE scores, and FoldX for predicted structural impact
 - **Disease & Pathway Integration:** Map complexes to KEGG/Reactome pathways, build interaction networks
