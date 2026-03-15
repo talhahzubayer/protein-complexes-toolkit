@@ -12,7 +12,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 60-column CSV output with automated quality flags, paradox detection, and optional enrichment
+- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate 10 figures with adaptive rendering for datasets from hundreds to millions of complexes
@@ -23,7 +23,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - CSV enrichment: gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types
 - Centralised STRING API client with rate limiting, retry/backoff, and response caching
 - Automatic API validation: ID resolution, enrichment, and database loading fall back to the STRING API when local data is incomplete (disable with `--no-api`)
-- 421-test suite (393 real + 28 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- Protein sequence clustering: STRING cluster parsing, UniProt-mapped cluster indexing, homologous pair detection, and optional API-based homology scores
+- 476-test suite (448 real + 28 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -39,10 +40,11 @@ protein-complexes-toolkit/
 ├── id_mapper.py             # Protein ID cross-referencing (ENSP/ENSG/UniProt/gene symbol)
 ├── overlap_analysis.py      # Database overlap computation and UpSet diagrams
 ├── string_api.py            # Centralised STRING API client (rate limiting, caching, retry)
+├── protein_clustering.py    # Protein sequence clustering and homology detection
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (393 tests + 28 future placeholders)
+├── tests/                   # Test suite (448 tests + 28 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -54,7 +56,8 @@ protein-complexes-toolkit/
 │   ├── test_database_loaders.py
 │   ├── test_id_mapper.py
 │   ├── test_multiprocessing.py
-│   ├── test_string_api.py   
+│   ├── test_string_api.py
+│   ├── test_protein_clustering.py
 │   └── offline_test_data/
 │       └── databases/                    # Small database excerpts for offline testing
 │           └── string_api_responses/     # Pre-captured API responses (7 JSON files)
@@ -87,6 +90,12 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                                   (automatic API fallback
                                                    for unresolved IDs;
                                                    disable with --no-api)
+                                                           │
+                                                           ▼ (optional --clustering)
+                                               protein_clustering.py
+                                             (STRING sequence clusters,
+                                              homologous pair detection,
+                                              optional API homology scores)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -114,7 +123,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 columns with `--enrich`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
 **visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
 
@@ -125,6 +134,8 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 **overlap_analysis.py**: Computes pairwise protein interaction overlaps across databases after ID normalisation. `normalise_pair()` and `normalise_pair_base()` create order-independent pair keys at isoform-specific and base-accession levels respectively. `extract_pair_set()` and `extract_pair_set_base()` convert DataFrames to normalised pair sets. `compute_overlaps()` returns per-database counts, pairwise overlaps, triple overlaps, all-database intersections, and unique-to-database sets. Supports UpSet-style intersection visualisation for 4+ databases. CLI supports dual-level analysis (`--base-level`), report generation (`--report`), and STRING threshold comparison.
 
 **string_api.py**: Centralised STRING database API client. All STRING API interactions are routed through this module. Architecture is offline-first: local flat files remain the primary data source; the API is an automatic supplement for unresolved identifiers and validation. Features rate-limited requests (1s between calls), automatic retry with exponential backoff on HTTP 429/5xx, SHA256-keyed response caching (auto-enabled to `data/string_api_cache/`), and caller identity injection per STRING API TOS. Provides 7 public functions: `get_string_ids()`, `get_interaction_partners()`, `query_homology()`, `query_enrichment()`, `query_ppi_enrichment()`, `query_network()`, `get_version()`. Raises `StringAPIError` on failure for clean error propagation.
+
+**protein_clustering.py**: Parses STRING pre-computed protein sequence clusters and maps them to UniProt accessions via `IDMapper`. Defaults to `data/clusters/9606.clusters.proteins.v12.0.txt` when no `--clusters-file` is specified. Builds bidirectional cluster indices (cluster-to-proteins and protein-to-clusters) in both ENSP and UniProt space. `find_shared_clusters()` identifies sequence family relationships between protein pairs. `find_homologous_pairs()` discovers other protein pairs that share the same cluster combinations, with optional filtering against known interaction databases. Clusters exceeding `MAX_CLUSTER_SIZE_FOR_PAIRS` (500) are skipped during pair generation to avoid O(n^2) explosion from STRING's hierarchical mega-clusters (up to 144K UniProt members after isoform expansion). `annotate_results_with_clustering()` adds 7 CSV columns: union and intersection cluster IDs/counts, homologous pairs with counts, and a continuous homology bitscore from the STRING API. `enrich_with_homology_scores()` optionally queries the STRING API for paralogy bitscores using chunked batched deduplication (`HOMOLOGY_API_BATCH_SIZE = 100` proteins per API call; reduced from 500 because the STRING homology endpoint times out at larger batch sizes). `validate_clustering_mode()` accepts `'string'` and raises `NotImplementedError` for deferred `'foldseek'` and `'hybrid'` modes. Standalone CLI supports `--summary`, `--protein`, and `--pair` lookup modes.
 
 
 ## Installation
@@ -286,8 +297,30 @@ python toolkit.py --dir /path/to/models --output results.csv --interface --pae -
 # Full pipeline with enrichment + database source tagging
 python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ -w 4
 
+# With protein clustering (requires --enrich; defaults to data/clusters/9606.clusters.proteins.v12.0.txt)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --clustering
+
+# With clustering + database source tagging (full pipeline)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering
+
+# With clustering + custom clusters file (overrides default path)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --clustering --clusters-file data/clusters/9606.clusters.proteins.v12.0.txt
+
 # Offline-only mode (disable all STRING API calls)
 python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --no-api
+```
+
+### Protein Clustering
+
+```bash
+# Cluster summary statistics
+python protein_clustering.py --clusters-file data/clusters/9606.clusters.proteins.v12.0.txt --aliases data/ppi/9606.protein.aliases.v12.0.txt --summary
+
+# Look up clusters for a single protein
+python protein_clustering.py --clusters-file data/clusters/9606.clusters.proteins.v12.0.txt --aliases data/ppi/9606.protein.aliases.v12.0.txt --protein P04637
+
+# Find shared clusters between two proteins
+python protein_clustering.py --clusters-file data/clusters/9606.clusters.proteins.v12.0.txt --aliases data/ppi/9606.protein.aliases.v12.0.txt --pair P04637 Q00987
 ```
 
 ### Database Ingestion & ID Mapping
@@ -362,6 +395,9 @@ python -m pytest tests/ -m "database" -v
 # STRING API tests (mocked, no network)
 python -m pytest tests/ -m "api" -v
 
+# Clustering tests
+python -m pytest tests/ -m "clustering" -v
+
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
 ```
@@ -389,7 +425,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (48 base columns, 60 with enrichment)
+### CSV (48 base columns, 60 with enrichment, 67 with clustering)
 
 The main output CSV groups columns into:
 
@@ -404,6 +440,7 @@ The main output CSV groups columns into:
 | **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2 |
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
+| **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |
 
 ### JSONL Interface Export
 
@@ -437,10 +474,9 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
 - **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
+- **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
 
 ### Planned
-
-- **Aim 3 - Protein Clustering:** Integrate STRING sequence clusters and API homology scores (Foldseek structural similarity deferred)
 - **Aim 4 - Variant Mapping:** Map ClinVar and gnomAD variants onto interface residues with structural context classification
 - **Aim 6 - Stability Scoring:** Integrate ProtVar, EVE scores, and FoldX for predicted structural impact
 - **Disease & Pathway Integration:** Map complexes to KEGG/Reactome pathways, build interaction networks
@@ -450,7 +486,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **421 tests** across 12 modules (393 real + 28 future placeholders):
+The test suite contains **476 tests** across 13 modules (448 real + 28 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -464,11 +500,12 @@ The test suite contains **421 tests** across 12 modules (393 real + 28 future pl
 | test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
 | test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
 | test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
+| test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
 | test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
 
-**Results:** 392 passing, 1 skipped (Fig 10 - all test complexes are dimers), 28 future placeholders (deselected by default)
+**Results:** 447 passing, 1 skipped (Fig 10 - all test complexes are dimers), 28 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `future` (unimplemented features)
 
 
 ## Acknowledgements

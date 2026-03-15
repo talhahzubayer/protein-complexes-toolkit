@@ -591,7 +591,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -601,9 +601,12 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
         fieldnames.extend(CSV_FIELDNAMES_FLAGS)
     if include_pae:
         fieldnames.extend(CSV_FIELDNAMES_INTERFACE_PAE)
+    if include_clustering:
+        from protein_clustering import CSV_FIELDNAMES_CLUSTERING
+        fieldnames.extend(CSV_FIELDNAMES_CLUSTERING)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -611,8 +614,9 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_interface: Whether to include interface columns.
         include_pae: Whether to include PAE interface columns.
         include_enrichment: Whether to include enrichment columns (gene symbols, names, database sources, sequences).
+        include_clustering: Whether to include clustering columns (cluster IDs, homologous pairs).
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -1132,6 +1136,9 @@ Examples:
     # With enrichment + database source tagging
     python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --databases "D:\\protein-complexes-toolkit\\data\\ppi"
 
+    # With clustering (sequence cluster annotation and homologous pairs)
+    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --clustering
+
     # Resume an interrupted run
     python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --resume
 
@@ -1170,6 +1177,16 @@ Examples:
     parser.add_argument("--no-api", action="store_true",
                         help="Disable STRING API validation fallback. Use only offline "
                              "data files for ID resolution and enrichment.")
+    parser.add_argument("--clustering", choices=['string', 'foldseek', 'hybrid'],
+                        nargs='?', const='string', default=None,
+                        help="Enable sequence clustering analysis. Modes: string (default), "
+                             "foldseek (deferred), hybrid (deferred). Reads STRING clusters "
+                             "file to identify homologous pairs. Requires --enrich for ID "
+                             "resolution.")
+    parser.add_argument("--clusters-file", metavar="PATH",
+                        help="Path to STRING clusters file. Default: "
+                             "data/clusters/9606.clusters.proteins.v12.0.txt. "
+                             "Only used with --clustering.")
     return parser
 
 
@@ -1192,6 +1209,10 @@ def main() -> None:
 
     if args.databases and not args.enrich:
         print("Error: --databases requires --enrich", file=sys.stderr)
+        sys.exit(1)
+
+    if args.clustering and not args.enrich:
+        print("Error: --clustering requires --enrich for ID resolution", file=sys.stderr)
         sys.exit(1)
 
     if args.resume:
@@ -1318,6 +1339,50 @@ def main() -> None:
         print(f"Enrichment complete: {len(results)} complexes annotated "
               f"in {enrich_elapsed:.1f}s", file=sys.stderr)
 
+    # Clustering (sequence cluster annotation and homologous pair detection)
+    include_clustering = False
+    if args.clustering:
+        from protein_clustering import (
+            validate_clustering_mode, load_clusters, build_cluster_index,
+            build_uniprot_cluster_index, build_cluster_to_uniprot,
+            annotate_results_with_clustering, enrich_with_homology_scores,
+        )
+        validate_clustering_mode(args.clustering)
+
+        cluster_start = time.time()
+        clusters_df = load_clusters(filepath=args.clusters_file, verbose=True)
+        cluster_to_proteins, protein_to_clusters = build_cluster_index(clusters_df)
+        print(f"  {len(cluster_to_proteins):,} clusters, "
+              f"{len(protein_to_clusters):,} proteins", file=sys.stderr)
+
+        uniprot_index = build_uniprot_cluster_index(
+            protein_to_clusters, mapper, verbose=True,
+        )
+        cluster_to_uniprot = build_cluster_to_uniprot(uniprot_index)
+
+        # Use known interaction pairs for filtering homologous pairs (if databases loaded)
+        known = None
+        if db_pair_sets:
+            known = set()
+            for ps in db_pair_sets.values():
+                known.update(ps)
+
+        annotate_results_with_clustering(
+            results, uniprot_index, cluster_to_uniprot,
+            known_pairs=known, verbose=True,
+        )
+
+        # Optional: API homology scores
+        if not args.no_api:
+            enrich_with_homology_scores(
+                results, uniprot_index, mapper, verbose=True,
+            )
+
+        include_clustering = True
+        cluster_elapsed = time.time() - cluster_start
+        print(f"Clustering complete: {len(results)} complexes annotated "
+              f"in {cluster_elapsed:.1f}s", file=sys.stderr)
+
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
@@ -1325,6 +1390,7 @@ def main() -> None:
         include_interface=args.interface,
         include_pae=args.pae,
         include_enrichment=include_enrichment,
+        include_clustering=include_clustering,
     )
 
     print(f"\n{'=' * 60}")

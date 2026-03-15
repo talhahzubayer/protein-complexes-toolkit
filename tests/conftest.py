@@ -290,6 +290,16 @@ def id_mapper(test_aliases_path):
     return IDMapper(str(test_aliases_path))
 
 
+# ── Clustering Test Data Fixtures ────────────────────────────────
+
+@pytest.fixture(scope="session")
+def test_clusters_path(test_db_dir):
+    """Return the path to the test STRING clusters excerpt."""
+    path = test_db_dir / "test_string_clusters.txt"
+    assert path.exists(), f"Test clusters file not found: {path}"
+    return path
+
+
 # ── STRING API Test Data Fixtures ────────────────────────────────
 
 @pytest.fixture(scope="session")
