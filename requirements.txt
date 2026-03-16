@@ -6,3 +6,4 @@ tqdm>=4.60
 pytest>=7.0
 matplotlib-venn>=1.1.2
 biopython>=1.86
+biotite>=1.6

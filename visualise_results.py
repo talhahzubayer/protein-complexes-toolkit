@@ -57,6 +57,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
 from scipy.stats import gaussian_kde
 
@@ -1519,23 +1520,35 @@ def plot_fig12_variant_density_heatmap(df: pd.DataFrame) -> None:
 
     figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # ── Panel (a): Heatmap ──
+    # ── Panel (a): Heatmap (log-scale for large dynamic range) ──
     data = ct.values.astype(float)
-    im = ax_a.imshow(data, cmap='YlOrRd', aspect='auto')
+    # Use log scale when dynamic range exceeds 100x to show small cells clearly
+    positive_vals = data[data > 0]
+    if positive_vals.size > 0 and positive_vals.max() / positive_vals.min() > 100:
+        norm = LogNorm(vmin=max(1, positive_vals.min()), vmax=positive_vals.max())
+    else:
+        norm = None
+    # Mask zeros so they render as white (log(0) is undefined)
+    masked_data = np.ma.masked_where(data == 0, data)
+    im = ax_a.imshow(masked_data, cmap='YlOrRd', aspect='auto', norm=norm)
 
     # Annotate cells with counts
     for i in range(data.shape[0]):
         for j in range(data.shape[1]):
             val = int(data[i, j])
-            # White text on dark cells
-            text_color = 'white' if val > data.max() * 0.5 else 'black'
+            # White text on dark cells (use log midpoint for threshold)
+            if norm is not None and val > 0:
+                threshold = np.exp((np.log(norm.vmin) + np.log(norm.vmax)) / 2)
+                text_color = 'white' if val > threshold else 'black'
+            else:
+                text_color = 'black'
             ax_a.text(j, i, str(val), ha='center', va='center',
                       fontsize=10, fontweight='bold', color=text_color)
 
     ax_a.set_xticks(range(len(SIGNIFICANCE_ORDER)))
     ax_a.set_xticklabels(SIGNIFICANCE_ORDER, rotation=35, ha='right', fontsize=FONT_TICK)
     ax_a.set_yticks(range(len(CONTEXT_ORDER)))
-    context_short = ['Interface\nCore', 'Interface\nRim', 'Surface', 'Buried\nCore']
+    context_short = [CONTEXT_LABELS[c].split('\n')[0] for c in CONTEXT_ORDER]
     ax_a.set_yticklabels(context_short, fontsize=FONT_TICK)
     figure.colorbar(im, ax=ax_a, shrink=0.8, label='Variant Count')
     ax_a.set_title("(a) Context \u00d7 Significance", fontsize=FONT_TITLE, fontweight='bold', pad=12)

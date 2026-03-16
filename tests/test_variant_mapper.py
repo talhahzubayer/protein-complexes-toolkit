@@ -41,6 +41,7 @@ from variant_mapper import (
     RELEVANT_CONSEQUENCES,
     SASA_BURIED_THRESHOLD,
     THREE_TO_ONE,
+    _build_interface_cb_coords,
     annotate_results_with_variants,
     build_argument_parser,
     build_variant_index,
@@ -544,8 +545,19 @@ class TestStructuralContextClassification:
 
     @pytest.fixture
     def mock_chain_data(self):
-        """Minimal mock data for structural classification tests."""
-        # 5 residues at known positions
+        """Minimal mock data for structural classification tests.
+
+        Chain layout (1D, all on x-axis):
+            res 10 at [0,0,0]  — not at interface, buried (RSA=0.10)
+            res 20 at [5,0,0]  — interface residue (RSA=0.40)
+            res 30 at [10,0,0] — interface residue (RSA=0.35)
+            res 40 at [20,0,0] — not at interface, surface (RSA=0.60)
+            res 50 at [50,0,0] — not at interface, buried (RSA=0.15)
+
+        Cross-chain interface CBs (partner chain's interface residues):
+            Cross-chain partner at [7,0,0] — 2A from res 20, 3A from res 30
+            → both interface residues are < 4A from cross-chain → interface_core
+        """
         chain_res_numbers = [10, 20, 30, 40, 50]
         cb_coords = np.array([
             [0.0, 0.0, 0.0],    # 10
@@ -554,59 +566,120 @@ class TestStructuralContextClassification:
             [20.0, 0.0, 0.0],   # 40
             [50.0, 0.0, 0.0],   # 50
         ])
-        # Residues 20, 30 are at the interface
         interface_residues = {20, 30}
-        # SASA: 10=buried, 40=surface, 50=buried
         residue_sasa = {10: 0.10, 20: 0.40, 30: 0.35, 40: 0.60, 50: 0.15}
-        # Interface CB coords
+        # Same-chain interface CB coords
         iface_indices = [1, 2]  # indices of residues 20, 30
         interface_cb_coords = cb_coords[iface_indices]
-        return chain_res_numbers, cb_coords, interface_residues, residue_sasa, interface_cb_coords
+        # Cross-chain interface CB coords (partner chain)
+        cross_chain_cb_coords = np.array([[7.0, 0.0, 0.0]])
+        return (chain_res_numbers, cb_coords, interface_residues, residue_sasa,
+                interface_cb_coords, cross_chain_cb_coords)
 
     def test_interface_core(self, mock_chain_data):
-        """Residue 20 at interface, close to other interface residue → interface_core."""
-        chain_res, cb, iface, sasa, iface_cb = mock_chain_data
-        result = classify_structural_context(20, iface, chain_res, cb, sasa, iface_cb)
-        # Distance from res 20 (at [5,0,0]) to nearest interface CB: either itself or res 30 (at [10,0,0])
-        # Distance to itself = 0.0 → interface_core
+        """Interface residue < 4A from cross-chain partner → interface_core."""
+        chain_res, cb, iface, sasa, iface_cb, cross_cb = mock_chain_data
+        # Res 20 at [5,0,0], cross-chain at [7,0,0] → distance = 2A → core
+        result = classify_structural_context(
+            20, iface, chain_res, cb, sasa, iface_cb,
+            cross_chain_cb_coords=cross_cb,
+        )
         assert result['context'] == CONTEXT_INTERFACE_CORE
 
     def test_interface_rim(self, mock_chain_data):
-        """Interface residue further than 4A but within 8A → interface_rim."""
-        chain_res, cb, iface, sasa, iface_cb = mock_chain_data
-        # Manually create data where interface residue is 6A from nearest
-        chain_res2 = [10, 20]
-        cb2 = np.array([[0.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
-        iface2 = {10, 20}
-        # Interface CB coords: just residue 10 at origin
-        iface_cb2 = np.array([[0.0, 0.0, 0.0]])
-        result = classify_structural_context(20, iface2, chain_res2, cb2, sasa, iface_cb2)
+        """Interface residue 4-8A from cross-chain partner → interface_rim."""
+        chain_res, cb, iface, sasa, iface_cb, _ = mock_chain_data
+        # Cross-chain partner at [11,0,0] → 6A from res 20 at [5,0,0]
+        cross_cb_far = np.array([[11.0, 0.0, 0.0]])
+        result = classify_structural_context(
+            20, iface, chain_res, cb, sasa, iface_cb,
+            cross_chain_cb_coords=cross_cb_far,
+        )
+        assert result['context'] == CONTEXT_INTERFACE_RIM
+
+    def test_interface_core_not_self_distance(self, mock_chain_data):
+        """Regression: interface classification uses cross-chain distance, not self-distance.
+
+        Before the fix, an interface residue would compute distance to its own CB
+        (0A) and always get interface_core. Now it must use cross-chain distance.
+        """
+        chain_res, cb, iface, sasa, iface_cb, _ = mock_chain_data
+        # Cross-chain partner at [11,0,0] → 6A from res 20
+        # Without fix: same-chain distance to self = 0A → core (WRONG)
+        # With fix: cross-chain distance = 6A → rim (CORRECT)
+        cross_cb_far = np.array([[11.0, 0.0, 0.0]])
+        result = classify_structural_context(
+            20, iface, chain_res, cb, sasa, iface_cb,
+            cross_chain_cb_coords=cross_cb_far,
+        )
+        assert result['context'] == CONTEXT_INTERFACE_RIM
+
+    def test_no_cross_chain_cb_fallback(self, mock_chain_data):
+        """When cross_chain_cb_coords is None, interface residues default to rim."""
+        chain_res, cb, iface, sasa, iface_cb, _ = mock_chain_data
+        result = classify_structural_context(
+            20, iface, chain_res, cb, sasa, iface_cb,
+            cross_chain_cb_coords=None,
+        )
+        assert result['context'] == CONTEXT_INTERFACE_RIM
+
+    def test_empty_cross_chain_cb_fallback(self, mock_chain_data):
+        """When cross_chain_cb_coords is empty, interface residues default to rim."""
+        chain_res, cb, iface, sasa, iface_cb, _ = mock_chain_data
+        result = classify_structural_context(
+            20, iface, chain_res, cb, sasa, iface_cb,
+            cross_chain_cb_coords=np.empty((0, 3)),
+        )
         assert result['context'] == CONTEXT_INTERFACE_RIM
 
     def test_buried_core(self, mock_chain_data):
         """Non-interface residue with RSA < 25% → buried_core."""
-        chain_res, cb, iface, sasa, iface_cb = mock_chain_data
+        chain_res, cb, iface, sasa, iface_cb, cross_cb = mock_chain_data
         result = classify_structural_context(50, iface, chain_res, cb, sasa, iface_cb)
         assert result['context'] == CONTEXT_BURIED
 
     def test_surface_non_interface(self, mock_chain_data):
         """Non-interface residue with RSA >= 25% → surface_non_interface."""
-        chain_res, cb, iface, sasa, iface_cb = mock_chain_data
+        chain_res, cb, iface, sasa, iface_cb, cross_cb = mock_chain_data
         result = classify_structural_context(40, iface, chain_res, cb, sasa, iface_cb)
         assert result['context'] == CONTEXT_SURFACE
 
     def test_unmapped_position(self, mock_chain_data):
         """Position not in chain → unmapped."""
-        chain_res, cb, iface, sasa, iface_cb = mock_chain_data
+        chain_res, cb, iface, sasa, iface_cb, cross_cb = mock_chain_data
         result = classify_structural_context(999, iface, chain_res, cb, sasa, iface_cb)
         assert result['context'] == CONTEXT_UNMAPPED
 
     def test_distance_returned(self, mock_chain_data):
         """Distance to interface is computed and returned."""
-        chain_res, cb, iface, sasa, iface_cb = mock_chain_data
+        chain_res, cb, iface, sasa, iface_cb, cross_cb = mock_chain_data
         result = classify_structural_context(40, iface, chain_res, cb, sasa, iface_cb)
         assert isinstance(result['distance_to_interface'], float)
         assert result['distance_to_interface'] > 0
+
+    def test_interface_residue_list_alignment(self):
+        """Verify nearest_interface_residue uses resolved list, not sorted set.
+
+        When an interface residue is missing from chain_res_numbers, the
+        interface_cb_coords array is shorter than sorted(interface_residues).
+        The interface_residue_list parameter ensures correct alignment.
+        """
+        chain_res = [10, 30]  # Note: residue 20 NOT in chain
+        cb = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        iface = {10, 20, 30}  # 20 not in chain_res → skipped in CB array
+        sasa = {10: 0.10, 30: 0.35}
+        # Only residues 10 and 30 have CBs (20 is missing from chain)
+        iface_cb = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        iface_resolved = [10, 30]  # actual residues matching iface_cb rows
+        cross_cb = np.array([[2.0, 0.0, 0.0]])
+
+        result = classify_structural_context(
+            30, iface, chain_res, cb, sasa, iface_cb,
+            cross_chain_cb_coords=cross_cb,
+            interface_residue_list=iface_resolved,
+        )
+        # Nearest same-chain interface residue to res 30 is itself (index 1 → res 30)
+        assert result['nearest_interface_residue'] == 30
 
     def test_context_labels_are_constants(self):
         """Verify context labels match module constants."""
@@ -1110,17 +1183,24 @@ class TestRegressionComplex1:
         interface_a = {81, 82, 83, 84, 86, 87, 90, 92, 93, 96, 97, 100, 115, 118, 119}
         interface_b = {103, 104, 105, 111, 112, 114, 115, 118, 119, 122, 123, 125, 126, 129}
 
+        res_a = chain_info.chain_res_numbers.get('A', [])
+        res_b = chain_info.chain_res_numbers.get('B', [])
+        cb_a = chain_info.cb_coords.get('A', np.empty((0, 3)))
+        cb_b = chain_info.cb_coords.get('B', np.empty((0, 3)))
+
+        # Build cross-chain CB coords for core/rim classification
+        cross_cb_for_a, _ = _build_interface_cb_coords(interface_b, res_b, cb_b)
+        cross_cb_for_b, _ = _build_interface_cb_coords(interface_a, res_a, cb_a)
+
         mapped_a = map_variants_to_complex(
             'A0A0B4J2C3', 'A', idx, interface_a,
-            chain_info.chain_res_numbers.get('A', []),
-            chain_info.cb_coords.get('A', np.empty((0, 3))),
-            sasa_a,
+            res_a, cb_a, sasa_a,
+            cross_chain_cb_coords=cross_cb_for_a,
         )
         mapped_b = map_variants_to_complex(
             'P24534', 'B', idx, interface_b,
-            chain_info.chain_res_numbers.get('B', []),
-            chain_info.cb_coords.get('B', np.empty((0, 3))),
-            sasa_b,
+            res_b, cb_b, sasa_b,
+            cross_chain_cb_coords=cross_cb_for_b,
         )
 
         return mapped_a, mapped_b, interface_a, interface_b, chain_info
@@ -1140,13 +1220,22 @@ class TestRegressionComplex1:
         # Positions 81, 82, 83, 90 are in both test data and interface set
         assert len(interface_variants) >= 3
 
-    def test_interface_core_positions(self, complex1_mapped):
-        """Interface core variants exist at known contact positions."""
+    def test_interface_variant_classification(self, complex1_mapped):
+        """Interface variants are classified as core or rim using cross-chain distance.
+
+        With cross-chain distance semantics, position 81 on chain A is 6.64A
+        from the nearest cross-chain partner → interface_rim (not core).
+        Only position 87 (3.95A) would be core, but it has no variant in test data.
+        """
         mapped_a, _, _, _, _ = complex1_mapped
-        core_positions = {v['position'] for v in mapped_a
-                          if v['context'] == CONTEXT_INTERFACE_CORE}
-        # At least position 81 should be interface_core
-        assert 81 in core_positions or len(core_positions) > 0
+        iface_variants = [v for v in mapped_a
+                          if v['context'] in (CONTEXT_INTERFACE_CORE, CONTEXT_INTERFACE_RIM)]
+        # Interface variants at positions 81, 82, 83, 90 should exist
+        iface_positions = {v['position'] for v in iface_variants}
+        assert 81 in iface_positions
+        # With cross-chain distances, pos 81 (6.64A) is rim, not core
+        pos81 = [v for v in iface_variants if v['position'] == 81]
+        assert pos81[0]['context'] == CONTEXT_INTERFACE_RIM
 
     def test_pathogenic_at_interface(self, complex1_mapped):
         """Pathogenic variant at position 81 is at interface."""

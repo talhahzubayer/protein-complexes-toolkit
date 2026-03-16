@@ -24,8 +24,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Centralised STRING API client with rate limiting, retry/backoff, and response caching
 - Automatic API validation: ID resolution, enrichment, and database loading fall back to the STRING API when local data is incomplete (disable with `--no-api`)
 - Protein sequence clustering: STRING cluster parsing, UniProt-mapped cluster indexing, homologous pair detection, and optional API-based homology scores
-- Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, BioPython SASA-based 4-class structural context classification (interface core/rim, surface, buried core), per-complex variant burden and enrichment analysis
-- 585-test suite (563 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis
+- 592-test suite (570 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -46,7 +46,7 @@ protein-complexes-toolkit/
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (563 tests + 22 future placeholders)
+├── tests/                   # Test suite (570 tests + 22 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -114,8 +114,9 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                                            ▼ (optional --variants)
                                                  variant_mapper.py
                                              (UniProt/ClinVar/ExAC variants,
-                                              SASA structural context,
-                                              interface variant enrichment)
+                                              biotite SASA structural context,
+                                              cross-chain interface classification,
+                                              variant enrichment analysis)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -157,7 +158,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **protein_clustering.py**: Parses STRING pre-computed protein sequence clusters and maps them to UniProt accessions via `IDMapper`. Defaults to `data/clusters/9606.clusters.proteins.v12.0.txt` when no `--clusters-file` is specified. Builds bidirectional cluster indices (cluster-to-proteins and protein-to-clusters) in both ENSP and UniProt space. `find_shared_clusters()` identifies sequence family relationships between protein pairs. `find_homologous_pairs()` discovers other protein pairs that share the same cluster combinations, with optional filtering against known interaction databases. Clusters exceeding `MAX_CLUSTER_SIZE_FOR_PAIRS` (500) are skipped during pair generation to avoid O(n^2) explosion from STRING's hierarchical mega-clusters (up to 144K UniProt members after isoform expansion). `annotate_results_with_clustering()` adds 7 CSV columns: union and intersection cluster IDs/counts, homologous pairs with counts, and a continuous homology bitscore from the STRING API. `enrich_with_homology_scores()` optionally queries the STRING API for paralogy bitscores using chunked batched deduplication (`HOMOLOGY_API_BATCH_SIZE = 100` proteins per API call; reduced from 500 because the STRING homology endpoint times out at larger batch sizes). `validate_clustering_mode()` accepts `'string'` and raises `NotImplementedError` for deferred `'foldseek'` and `'hybrid'` modes. Standalone CLI supports `--summary`, `--protein`, and `--pair` lookup modes.
 
-**variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using BioPython's Shrake-Rupley algorithm and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å from partner), `interface_rim` (4-8 Å), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires BioPython.
+**variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
 
 ## Installation
@@ -503,7 +504,7 @@ The main output CSV groups columns into:
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |
-| **Variants** (with `--variants`) | n_variants_a/b, n_interface_variants_a/b, n_pathogenic_interface_a/b, interface_variant_enrichment_a/b, variant_details_a/b, pLI_a/b, mis_z_a/b |
+| **Variants** (with `--variants`) | n_variants_a/b, n_interface_variants_a/b, n_pathogenic_interface_variants, interface_variant_enrichment, variant_details_a/b, gene_constraint_pli_a/b, gene_constraint_mis_z_a/b |
 
 ### JSONL Interface Export
 
@@ -541,7 +542,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
 - **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
 - **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
-- **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, BioPython SASA-based 4-class structural context classification (interface core/rim, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
+- **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
 
 ### Planned
 - **Aim 6 - Stability Scoring:** Integrate ProtVar, EVE scores, and FoldX for predicted structural impact
@@ -552,7 +553,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **588 tests** across 15 modules (566 real + 22 future placeholders):
+The test suite contains **592 tests** across 15 modules (570 real + 22 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -567,10 +568,10 @@ The test suite contains **588 tests** across 15 modules (566 real + 22 future pl
 | test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
 | test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
 | test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
-| test_variant_mapper.py | 99 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context, enrichment, CLI, toolkit integration |
+| test_variant_mapper.py | 103 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context (cross-chain distance), enrichment, CLI, toolkit integration |
 | test_future_aims.py | 7 + 22 | 7 real database tests + 22 future placeholders |
 
-**Results:** 565 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
+**Results:** 569 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
 
 **Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `future` (unimplemented features)
 
