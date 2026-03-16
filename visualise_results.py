@@ -24,9 +24,9 @@ Figures (require n_chains column from multi-chain pipeline):
  10. Chain-Count Quality Profile  (violin + scatter by chain count)
 
 Figures (require variant data from --variants):
- 11. Variant Consequence Flow  (grouped stacked bar)
- 12. Variant Density Heatmap  (heatmap + density bar)
- 13. Per-Complex Variant Burden  (scatter + ranked bar)
+ 11. Classified Variant Sankey  (significance -> structural context, Unknown excluded)
+ 12. Enrichment Distribution by Quality Tier  (histogram + KDE + Wilcoxon)
+ 13. Interface Variant Density vs Quality  (density scatter + Spearman)
 
 Per-complex PAE heatmaps are available on demand via --pae-heatmaps.
 When a matching PDB file is found, chain boundaries are drawn and the best interacting chain pair is highlighted.
@@ -59,7 +59,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, spearmanr, wilcoxon
+from matplotlib.path import Path as MplPath
 
 # JAX mocking is handled at import time by the reader module
 from read_af2_nojax import load_pkl_without_jax
@@ -461,6 +462,39 @@ def _aggregate_all_variants(df: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=['complex_name', 'chain', 'mutation', 'context', 'significance'])
     return pd.DataFrame(rows)
+
+
+def _draw_sankey_band(ax, left_y0, left_y1, right_y0, right_y1,
+                      x_left=0.15, x_right=0.85, color='grey', alpha=0.4):
+    """Draw a curved flow band between left and right vertical positions.
+
+    Uses cubic Bezier curves to create smooth S-shaped bands connecting
+    stacked bar segments on the left to those on the right.
+    """
+    xm = (x_left + x_right) / 2  # midpoint for control points
+    # Top edge: left_y1 -> right_y1 (cubic Bezier)
+    # Bottom edge: right_y0 -> left_y0 (cubic Bezier, reversed)
+    verts = [
+        (x_left, left_y1),   # start top-left
+        (xm, left_y1),       # control 1
+        (xm, right_y1),      # control 2
+        (x_right, right_y1), # end top-right
+        (x_right, right_y0), # start bottom-right
+        (xm, right_y0),      # control 1
+        (xm, left_y0),       # control 2
+        (x_left, left_y0),   # end bottom-left
+        (x_left, left_y1),   # close path
+    ]
+    codes = [
+        MplPath.MOVETO,
+        MplPath.CURVE4, MplPath.CURVE4, MplPath.CURVE4,  # top edge
+        MplPath.LINETO,
+        MplPath.CURVE4, MplPath.CURVE4, MplPath.CURVE4,  # bottom edge
+        MplPath.CLOSEPOLY,
+    ]
+    patch = mpatches.PathPatch(MplPath(verts, codes),
+                               facecolor=color, edgecolor='none', alpha=alpha)
+    ax.add_patch(patch)
 
 
 #--------------------------------------------------------------PAE Heatmaps-----------------------------------------------------------
@@ -1443,163 +1477,268 @@ def plot_fig10_chain_count_profile(df: pd.DataFrame, density_mode: bool = False)
 #-----------------------------------------------Variant Figures (11-13)------------------------------------------------------------
 
 def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
-    """Fig 11: How are variant consequences distributed across structural regions?
+    """Fig 11: Where do clinically classified variants land structurally?
 
-    Grouped stacked bar chart. X-axis: 4 structural contexts (interface_core,
-    interface_rim, surface_non_interface, buried_core). Stacked bars: clinical
-    significance categories. Percentage annotations on segments > 5%.
+    Sankey (alluvial) diagram. Left nodes: clinical significance categories
+    (Unknown excluded). Right nodes: 4 structural contexts. Flow bands show
+    how many variants of each significance land in each context.
     """
     var_df = _aggregate_all_variants(df)
-    if len(var_df) < 10:
+    total_parsed = len(var_df)
+    if total_parsed < 10:
         print("  Skipping Fig 11: fewer than 10 parsed variants.")
         return
 
-    # Cross-tabulate: context (rows) x significance (cols)
-    # Ensure all categories are present even if counts are zero
-    var_df['context'] = pd.Categorical(var_df['context'], categories=CONTEXT_ORDER, ordered=True)
-    var_df['significance'] = pd.Categorical(var_df['significance'], categories=SIGNIFICANCE_ORDER, ordered=True)
-    ct = pd.crosstab(var_df['context'], var_df['significance'], dropna=False)
-    # Reindex to guarantee order
-    ct = ct.reindex(index=CONTEXT_ORDER, columns=SIGNIFICANCE_ORDER, fill_value=0)
+    # Filter to classified variants only (exclude Unknown)
+    classified_sigs = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Benign']
+    classified = var_df[var_df['significance'].isin(classified_sigs)].copy()
+    n_classified = len(classified)
+    n_unknown = total_parsed - n_classified
+    pct_unknown = 100.0 * n_unknown / total_parsed if total_parsed > 0 else 0.0
 
-    figure, ax = plt.subplots(figsize=(10, 6))
+    if n_classified < 10:
+        print("  Skipping Fig 11: fewer than 10 classified variants after removing Unknown.")
+        return
 
-    x_positions = np.arange(len(CONTEXT_ORDER))
-    bar_width = 0.6
+    # Cross-tabulate: significance (left) x context (right)
+    classified['significance'] = pd.Categorical(classified['significance'],
+                                                categories=classified_sigs, ordered=True)
+    classified['context'] = pd.Categorical(classified['context'],
+                                           categories=CONTEXT_ORDER, ordered=True)
+    ct = pd.crosstab(classified['significance'], classified['context'], dropna=False)
+    ct = ct.reindex(index=classified_sigs, columns=CONTEXT_ORDER, fill_value=0)
 
-    bottoms = np.zeros(len(CONTEXT_ORDER))
-    for sig in SIGNIFICANCE_ORDER:
-        counts = ct[sig].values.astype(float)
-        totals = ct.sum(axis=1).values.astype(float)
-        pcts = np.divide(counts, totals, out=np.zeros_like(counts), where=totals > 0) * 100
-        ax.bar(x_positions, pcts, bar_width, bottom=bottoms,
-               color=SIGNIFICANCE_COLORS[sig], edgecolor='white', linewidth=0.5,
-               label=sig)
-        # Annotate segments > 5%
-        for i, pct in enumerate(pcts):
-            if pct > 5:
-                text_y = bottoms[i] + pct / 2
-                text_color = 'white' if pct > 10 else 'black'
-                ax.text(x_positions[i], text_y, f'{pct:.1f}%',
-                        ha='center', va='center', fontsize=9,
-                        fontweight='bold', color=text_color)
-        bottoms += pcts
+    figure, ax = plt.subplots(figsize=(12, 7.5))
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.02, 1.02)
+    ax.axis('off')
+    figure.subplots_adjust(top=0.88, bottom=0.12)
 
-    # X-axis labels with counts
-    context_totals = ct.sum(axis=1).values
-    x_labels = [f'{CONTEXT_LABELS[c]}\n(n={int(context_totals[i])})'
-                for i, c in enumerate(CONTEXT_ORDER)]
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(x_labels, fontsize=FONT_TICK)
-    ax.set_ylim(0, 105)
+    bar_w = 0.12  # width of stacked bars
+    x_left = 0.15
+    x_right = 0.85
+    gap = 0.015  # vertical gap between segments
 
-    ax.legend(fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
-    _apply_common_style(ax, "Variant Consequence Distribution Across Structural Regions",
-                        '', 'Percentage (%)', grid=False)
+    # ── Left bars (significance) ──
+    left_totals = ct.sum(axis=1).values.astype(float)
+    left_total = left_totals.sum()
+    usable_height = 1.0 - gap * (len(classified_sigs) - 1)
+    left_heights = (left_totals / left_total) * usable_height
+    left_positions = []  # (y0, y1) for each significance
+    y_cursor = 0.0
+    for i, sig in enumerate(classified_sigs):
+        h = left_heights[i]
+        y0, y1 = y_cursor, y_cursor + h
+        left_positions.append((y0, y1))
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x_left - bar_w, y0), bar_w, h,
+            boxstyle="round,pad=0.005",
+            facecolor=SIGNIFICANCE_COLORS[sig], edgecolor='white', linewidth=1))
+        # Label
+        mid_y = (y0 + y1) / 2
+        count = int(left_totals[i])
+        ax.text(x_left - bar_w - 0.02, mid_y, f'{sig}\n(n={count:,})',
+                ha='right', va='center', fontsize=9, fontweight='bold')
+        y_cursor = y1 + gap
 
-    figure.suptitle("", fontsize=1)  # Prevent tight_layout warning
+    # ── Right bars (context) ──
+    right_totals = ct.sum(axis=0).values.astype(float)
+    right_total = right_totals.sum()
+    right_heights = (right_totals / right_total) * usable_height
+    right_positions = []  # (y0, y1) for each context
+    right_label_ys = []   # raw mid_y for each label
+    y_cursor = 0.0
+    for i, ctx in enumerate(CONTEXT_ORDER):
+        h = right_heights[i]
+        y0, y1 = y_cursor, y_cursor + h
+        right_positions.append((y0, y1))
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x_right, y0), bar_w, h,
+            boxstyle="round,pad=0.005",
+            facecolor=CONTEXT_COLORS[ctx], edgecolor='white', linewidth=1))
+        right_label_ys.append((y0 + y1) / 2)
+        y_cursor = y1 + gap
+
+    # Enforce minimum vertical spacing between right-side labels to prevent overlap
+    min_label_gap = 0.05
+    adjusted_ys = list(right_label_ys)
+    for i in range(len(adjusted_ys) - 1, 0, -1):
+        if adjusted_ys[i] - adjusted_ys[i - 1] < min_label_gap:
+            adjusted_ys[i - 1] = adjusted_ys[i] - min_label_gap
+
+    for i, ctx in enumerate(CONTEXT_ORDER):
+        count = int(right_totals[i])
+        label = CONTEXT_LABELS[ctx].replace('\n', ' ')
+        fsize = 8 if right_heights[i] < 0.03 else 9
+        ax.text(x_right + bar_w + 0.02, adjusted_ys[i], f'{label}\n(n={count:,})',
+                ha='left', va='center', fontsize=fsize, fontweight='bold')
+
+    # ── Flow bands ──
+    # Track cumulative position within each bar for sub-band placement
+    left_cursors = [pos[0] for pos in left_positions]
+    right_cursors = [pos[0] for pos in right_positions]
+
+    for i, sig in enumerate(classified_sigs):
+        for j, ctx in enumerate(CONTEXT_ORDER):
+            count = ct.iloc[i, j]
+            if count == 0:
+                continue
+            # Band height proportional to count within each bar
+            left_h = (count / left_total) * usable_height
+            right_h = (count / right_total) * usable_height
+            _draw_sankey_band(ax,
+                              left_y0=left_cursors[i],
+                              left_y1=left_cursors[i] + left_h,
+                              right_y0=right_cursors[j],
+                              right_y1=right_cursors[j] + right_h,
+                              x_left=x_left, x_right=x_right,
+                              color=SIGNIFICANCE_COLORS[sig], alpha=0.35)
+            left_cursors[i] += left_h
+            right_cursors[j] += right_h
+
+    # ── Annotations ──
+    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance \u2192 Structural Context",
+            ha='center', va='bottom', fontsize=14, fontweight='bold',
+            transform=ax.transAxes)
+    # Footer annotation (merged to avoid overlap)
+    footer_parts = [f'n = {n_classified:,} classified variants ({pct_unknown:.1f}% Unknown excluded, {n_unknown:,} variants)']
+    true_total_a = pd.to_numeric(df.get('n_variants_a', pd.Series(dtype=float)), errors='coerce').sum()
+    true_total_b = pd.to_numeric(df.get('n_variants_b', pd.Series(dtype=float)), errors='coerce').sum()
+    true_total = true_total_a + true_total_b
+    if not np.isnan(true_total) and true_total > total_parsed * 1.05:
+        footer_parts.append(f'Variant details limited to 20 per chain ({total_parsed:,} shown of ~{int(true_total):,} total)')
+    ax.text(0.50, -0.06, '\n'.join(footer_parts), ha='center', va='top',
+            fontsize=8, style='italic', color='#666666', transform=ax.transAxes)
+
     _save_figure(figure, '11_Variant_Consequence_Flow.png')
 
 
 def plot_fig12_variant_density_heatmap(df: pd.DataFrame) -> None:
-    """Fig 12: Are pathogenic variants enriched at protein-protein interfaces?
+    """Fig 12: Are predicted interfaces under evolutionary constraint?
 
-    Panel (a): Heatmap of variant counts — rows: structural context (4),
-               columns: clinical significance (5 buckets). Annotated with counts.
-    Panel (b): Grouped bar chart — variants per structural context, total vs pathogenic.
+    Histogram of interface_variant_enrichment across all complexes, with
+    overlaid KDE curves per quality tier. Vertical reference at 1.0 (neutral).
+    Tier medians and Wilcoxon signed-rank p-values annotated.
     """
-    var_df = _aggregate_all_variants(df)
-    if len(var_df) < 5:
-        print("  Skipping Fig 12: fewer than 5 parsed variants.")
+    enrichment = pd.to_numeric(df.get('interface_variant_enrichment',
+                                      pd.Series(dtype=float)), errors='coerce')
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    # Filter: enrichment must be defined and positive (0 = no variants, undefined)
+    valid_mask = enrichment.notna() & (enrichment > 0)
+    n_excluded = (~valid_mask).sum()
+    enrich_vals = enrichment[valid_mask].values
+    tiers = df.loc[valid_mask, tier_col].values if tier_col in df.columns else None
+
+    if len(enrich_vals) < 5:
+        print("  Skipping Fig 12: fewer than 5 complexes with valid enrichment.")
         return
 
-    var_df['context'] = pd.Categorical(var_df['context'], categories=CONTEXT_ORDER, ordered=True)
-    var_df['significance'] = pd.Categorical(var_df['significance'], categories=SIGNIFICANCE_ORDER, ordered=True)
-    ct = pd.crosstab(var_df['context'], var_df['significance'], dropna=False)
-    ct = ct.reindex(index=CONTEXT_ORDER, columns=SIGNIFICANCE_ORDER, fill_value=0)
+    figure, ax = plt.subplots(figsize=(10, 6))
 
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+    # ── Histogram (all tiers combined) ──
+    ax.hist(enrich_vals, bins=min(40, max(10, len(enrich_vals) // 10)),
+            color='#cccccc', edgecolor='white', alpha=0.4, label='All complexes', zorder=1)
 
-    # ── Panel (a): Heatmap (log-scale for large dynamic range) ──
-    data = ct.values.astype(float)
-    # Use log scale when dynamic range exceeds 100x to show small cells clearly
-    positive_vals = data[data > 0]
-    if positive_vals.size > 0 and positive_vals.max() / positive_vals.min() > 100:
-        norm = LogNorm(vmin=max(1, positive_vals.min()), vmax=positive_vals.max())
-    else:
-        norm = None
-    # Mask zeros so they render as white (log(0) is undefined)
-    masked_data = np.ma.masked_where(data == 0, data)
-    im = ax_a.imshow(masked_data, cmap='YlOrRd', aspect='auto', norm=norm)
+    # ── KDE per tier + medians + Wilcoxon ──
+    stat_lines = []
+    x_smooth = np.linspace(max(0, enrich_vals.min() - 0.2),
+                           enrich_vals.max() + 0.2, 300)
 
-    # Annotate cells with counts
-    for i in range(data.shape[0]):
-        for j in range(data.shape[1]):
-            val = int(data[i, j])
-            # White text on dark cells (use log midpoint for threshold)
-            if norm is not None and val > 0:
-                threshold = np.exp((np.log(norm.vmin) + np.log(norm.vmax)) / 2)
-                text_color = 'white' if val > threshold else 'black'
-            else:
-                text_color = 'black'
-            ax_a.text(j, i, str(val), ha='center', va='center',
-                      fontsize=10, fontweight='bold', color=text_color)
+    if tiers is not None:
+        for tier in TIER_ORDER:
+            tier_mask = tiers == tier
+            tier_vals = enrich_vals[tier_mask]
+            if len(tier_vals) < 3:
+                continue
+            color = TIER_COLORS[tier]
+            median_val = np.median(tier_vals)
 
-    ax_a.set_xticks(range(len(SIGNIFICANCE_ORDER)))
-    ax_a.set_xticklabels(SIGNIFICANCE_ORDER, rotation=35, ha='right', fontsize=FONT_TICK)
-    ax_a.set_yticks(range(len(CONTEXT_ORDER)))
-    context_short = [CONTEXT_LABELS[c].split('\n')[0] for c in CONTEXT_ORDER]
-    ax_a.set_yticklabels(context_short, fontsize=FONT_TICK)
-    figure.colorbar(im, ax=ax_a, shrink=0.8, label='Variant Count')
-    ax_a.set_title("(a) Context \u00d7 Significance", fontsize=FONT_TITLE, fontweight='bold', pad=12)
+            # KDE overlay (skip if too few or constant values)
+            if len(tier_vals) >= 5 and np.std(tier_vals) > 1e-6:
+                try:
+                    kde = gaussian_kde(tier_vals)
+                    # Scale KDE to match histogram visual height
+                    kde_y = kde(x_smooth) * len(tier_vals) * (enrich_vals.max() - enrich_vals.min()) / min(40, max(10, len(enrich_vals) // 10))
+                    ax.plot(x_smooth, kde_y, color=color, linewidth=2.5,
+                            label=f'{tier} (n={len(tier_vals)}, med={median_val:.3f})', zorder=3)
+                except Exception:
+                    ax.axvline(x=median_val, color=color, linestyle='-', linewidth=1.5,
+                               alpha=0.7, label=f'{tier} (n={len(tier_vals)}, med={median_val:.3f})')
 
-    # ── Panel (b): Grouped bar — total vs pathogenic per context ──
-    x_pos = np.arange(len(CONTEXT_ORDER))
-    bar_w = 0.35
+            # Median marker on x-axis
+            ax.plot(median_val, 0, marker='v', color=color, markersize=10,
+                    zorder=5, clip_on=False)
 
-    total_per_context = ct.sum(axis=1).values.astype(float)
-    pathogenic_per_context = (ct['Pathogenic'].values + ct['Likely pathogenic'].values).astype(float)
+            # Wilcoxon signed-rank test (H0: median = 1.0)
+            if len(tier_vals) >= 10:
+                try:
+                    diffs = tier_vals - 1.0
+                    diffs = diffs[diffs != 0]  # remove exact zeros for Wilcoxon
+                    if len(diffs) >= 10:
+                        stat, pval = wilcoxon(diffs)
+                        if pval < 0.001:
+                            stat_lines.append(f'{tier}: p < 0.001')
+                        else:
+                            stat_lines.append(f'{tier}: p = {pval:.3f}')
+                    else:
+                        stat_lines.append(f'{tier}: n too small after ties')
+                except Exception:
+                    stat_lines.append(f'{tier}: test failed')
 
-    bars_total = ax_b.bar(x_pos - bar_w / 2, total_per_context, bar_w,
-                          color=[CONTEXT_COLORS[c] for c in CONTEXT_ORDER],
-                          edgecolor='white', linewidth=0.5, label='All Variants')
-    bars_path = ax_b.bar(x_pos + bar_w / 2, pathogenic_per_context, bar_w,
-                         color='#c0392b', edgecolor='white', linewidth=0.5,
-                         alpha=0.85, label='Pathogenic + Likely Path.')
+    # ── Neutral expectation line ──
+    ax.axvline(x=1.0, color='#333333', linestyle='--', linewidth=1.5,
+               alpha=0.7, zorder=2, label='Neutral (1.0)')
 
-    # Annotate bar values
-    for bar_set in (bars_total, bars_path):
-        for bar in bar_set:
-            h = bar.get_height()
-            if h > 0:
-                ax_b.text(bar.get_x() + bar.get_width() / 2, h + 0.3,
-                          str(int(h)), ha='center', va='bottom', fontsize=9)
+    # ── Annotations ──
+    if stat_lines:
+        stat_text = 'Wilcoxon vs 1.0:\n' + '\n'.join(stat_lines)
+        ax.text(0.97, 0.95, stat_text, transform=ax.transAxes,
+                fontsize=8, va='top', ha='right',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor='#cccccc', alpha=0.9))
 
-    ax_b.set_xticks(x_pos)
-    ax_b.set_xticklabels(context_short, fontsize=FONT_TICK)
-    ax_b.legend(fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
-    _apply_common_style(ax_b, "(b) Variant Density by Context", '', 'Number of Variants')
+    ax.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9,
+              bbox_to_anchor=(0.0, 0.88))
 
-    figure.suptitle("Variant Density: Interface vs Non-Interface", fontsize=14, fontweight='bold', y=1.02)
+    if n_excluded > 0:
+        ax.text(0.03, 0.62, f'{n_excluded} complexes excluded\n(no interface variants)',
+                transform=ax.transAxes, fontsize=8, va='top', ha='left',
+                color='#888888', style='italic')
+    # Clip x-axis to focus on the main distribution (hide extreme right tail)
+    x_upper = max(3.0, np.percentile(enrich_vals, 99.5))
+    ax.set_xlim(0, x_upper)
+
+    _apply_common_style(ax, '', 'Interface Variant Enrichment (fold-change)',
+                        'Number of Complexes')
+
+    figure.suptitle("Interface Variant Enrichment Distribution by Quality Tier",
+                    fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, '12_Variant_Density_Heatmap.png')
 
 
 def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 13: Does variant burden correlate with predicted complex quality?
+    """Fig 13: Does the toolkit's confidence metric predict variant biology?
 
-    Panel (a): Scatter — x: composite score (or ipTM fallback), y: total interface
-               variants. Point colour: quality tier, size: pathogenic count.
-    Panel (b): Horizontal bar — top 20 complexes by interface_variant_enrichment,
-               coloured by quality tier. Baseline at enrichment = 1.0.
+    Scatter plot of interface variant density (variants per interface residue)
+    against composite score, coloured by quality tier. Spearman and partial
+    correlations annotated. Tier-stratified median densities in text box.
     """
-    # Compute total interface variants per complex
-    n_if_a = pd.to_numeric(df.get('n_interface_variants_a', pd.Series(dtype=float)), errors='coerce').fillna(0)
-    n_if_b = pd.to_numeric(df.get('n_interface_variants_b', pd.Series(dtype=float)), errors='coerce').fillna(0)
-    total_if_variants = n_if_a + n_if_b
+    # Compute interface variant density per complex
+    n_if_var_a = pd.to_numeric(df.get('n_interface_variants_a', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+    n_if_var_b = pd.to_numeric(df.get('n_interface_variants_b', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+    n_if_res_a = pd.to_numeric(df.get('n_interface_residues_a', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+    n_if_res_b = pd.to_numeric(df.get('n_interface_residues_b', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
 
-    if total_if_variants.sum() == 0:
-        print("  Skipping Fig 13: no interface variants in dataset.")
-        return
+    n_if_var = n_if_var_a + n_if_var_b
+    n_if_res = n_if_res_a + n_if_res_b
+    # Density: variants per interface residue (NaN where no interface residues)
+    density = np.where(n_if_res > 0, n_if_var / n_if_res, np.nan)
+    density = pd.Series(density, index=df.index)
 
     # Choose x-axis metric
     if 'interface_confidence_score' in df.columns:
@@ -1609,35 +1748,91 @@ def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> N
         x_col = 'iptm'
         x_label = 'ipTM'
 
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+    # Filter to valid rows
+    x_series = pd.to_numeric(df.get(x_col, pd.Series(dtype=float)), errors='coerce')
+    valid_mask = density.notna() & x_series.notna() & (n_if_res > 0)
 
-    # ── Panel (a): Scatter ──
-    plot_mask = df[x_col].notna()
-    x_vals = df.loc[plot_mask, x_col].values
-    y_vals = total_if_variants[plot_mask].values
+    if valid_mask.sum() < 5:
+        print("  Skipping Fig 13: fewer than 5 complexes with valid density.")
+        return
 
-    n_pathogenic = pd.to_numeric(df.get('n_pathogenic_interface_variants', pd.Series(dtype=float)),
-                                 errors='coerce').fillna(0)
-    base_size, base_alpha = _adaptive_scatter_params(len(x_vals))
+    x_vals = x_series[valid_mask].values.astype(float)
+    y_vals = density[valid_mask].values.astype(float)
+    size_vals = n_if_res[valid_mask].values.astype(float)  # for partial correlation
 
-    # Size: scale by pathogenic count (min 1 so all points are visible)
-    sizes = (n_pathogenic[plot_mask].values.clip(min=0) + 1) * base_size
-
-    # Colour by quality tier
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-    colors = df.loc[plot_mask, tier_col].map(TIER_COLORS).fillna('#bdc3c7').values
 
-    _timed_scatter(ax_a, x_vals, y_vals, len(x_vals), fig_label='Fig 13a',
-                   c=colors, s=sizes, alpha=base_alpha, edgecolors='white', linewidths=0.3)
+    figure, ax = plt.subplots(figsize=(10, 7))
+
+    # ── Scatter coloured by quality tier ──
+    base_size, base_alpha = _adaptive_scatter_params(len(x_vals))
+    colors = df.loc[valid_mask, tier_col].map(TIER_COLORS).fillna('#bdc3c7').values if tier_col in df.columns else '#3498db'
+
+    _timed_scatter(ax, x_vals, y_vals, len(x_vals), fig_label='Fig 13',
+                   c=colors, s=base_size, alpha=base_alpha,
+                   edgecolors='white', linewidths=0.3)
 
     if density_mode:
-        _overlay_kde_contours(ax_a, x_vals.astype(float), y_vals.astype(float))
+        _overlay_kde_contours(ax, x_vals, y_vals)
 
-    # Legend
+    # ── Spearman correlation ──
+    stat_lines = []
+    if len(x_vals) >= 5 and np.std(x_vals) > 1e-9 and np.std(y_vals) > 1e-9:
+        rho, pval = spearmanr(x_vals, y_vals)
+        p_str = 'p < 0.001' if pval < 0.001 else f'p = {pval:.3f}'
+        stat_lines.append(f'Spearman \u03c1 = {rho:.4f}, {p_str}')
+
+        # Partial correlation controlling for interface size (rank-residual method)
+        if len(x_vals) >= 10 and np.std(size_vals) > 1e-9:
+            from scipy.stats import rankdata
+            rx = rankdata(x_vals)
+            ry = rankdata(y_vals)
+            rz = rankdata(size_vals)
+            # Regress ranks on size ranks via OLS, take residuals
+            rz_mean = rz.mean()
+            rz_centered = rz - rz_mean
+            rz_ss = np.dot(rz_centered, rz_centered)
+            if rz_ss > 1e-9:
+                beta_x = np.dot(rz_centered, rx - rx.mean()) / rz_ss
+                beta_y = np.dot(rz_centered, ry - ry.mean()) / rz_ss
+                resid_x = rx - beta_x * rz_centered
+                resid_y = ry - beta_y * rz_centered
+                if np.std(resid_x) > 1e-9 and np.std(resid_y) > 1e-9:
+                    rho_partial, pval_partial = spearmanr(resid_x, resid_y)
+                    p_str2 = 'p < 0.001' if pval_partial < 0.001 else f'p = {pval_partial:.3f}'
+                    stat_lines.append(f'Partial \u03c1 = {rho_partial:.4f}, {p_str2}  (size-controlled)')
+
+    # ── Tier-stratified medians ──
+    median_lines = []
+    if tier_col in df.columns:
+        tiers_valid = df.loc[valid_mask, tier_col].values
+        for tier in TIER_ORDER:
+            tier_vals = y_vals[tiers_valid == tier]
+            if len(tier_vals) > 0:
+                median_lines.append(f'{tier}: {np.median(tier_vals):.3f} (n={len(tier_vals)})')
+
+    # ── Annotation box ──
+    annotation_parts = []
+    if stat_lines:
+        annotation_parts.extend(stat_lines)
+    if median_lines:
+        annotation_parts.append('')
+        annotation_parts.append('Median density by tier:')
+        annotation_parts.extend(f'  {line}' for line in median_lines)
+
+    if annotation_parts:
+        ax.text(0.03, 0.72, '\n'.join(annotation_parts),
+                transform=ax.transAxes, fontsize=8, va='top', ha='left',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                          edgecolor='#cccccc', alpha=0.95),
+                family='monospace')
+
+    # ── Legend ──
     if tier_col in df.columns:
         legend_handles = []
+        tiers_valid = df.loc[valid_mask, tier_col].values
         for tier in TIER_ORDER:
-            count = (df.loc[plot_mask, tier_col] == tier).sum()
+            count = (tiers_valid == tier).sum()
             if count > 0:
                 legend_handles.append(
                     Line2D([0], [0], marker='o', color='w',
@@ -1645,39 +1840,13 @@ def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> N
                            markeredgecolor='white', markersize=9,
                            label=f'{tier} (n={count})'))
         if legend_handles:
-            ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
+            ax.legend(handles=legend_handles, fontsize=FONT_TICK,
+                      loc='upper left', framealpha=0.9)
 
-    _apply_common_style(ax_a, "(a) Interface Variant Burden vs Quality", x_label, 'Total Interface Variants')
+    _apply_common_style(ax, '', x_label,
+                        'Variant Density (per interface residue)')
 
-    # ── Panel (b): Top-20 enrichment bar chart ──
-    enrichment = pd.to_numeric(df.get('interface_variant_enrichment', pd.Series(dtype=float)),
-                               errors='coerce')
-    enrich_mask = enrichment.notna() & (enrichment > 0)
-    if enrich_mask.sum() == 0:
-        ax_b.text(0.5, 0.5, 'No enrichment data available',
-                  ha='center', va='center', transform=ax_b.transAxes, fontsize=12)
-        _apply_common_style(ax_b, "(b) Top Enriched Complexes", 'Enrichment Fold-Change', '')
-    else:
-        enrich_df = df.loc[enrich_mask, ['complex_name', tier_col]].copy()
-        enrich_df['enrichment'] = enrichment[enrich_mask].values
-        enrich_df = enrich_df.sort_values('enrichment', ascending=False).head(20)
-
-        y_pos = np.arange(len(enrich_df))
-        bar_colors = enrich_df[tier_col].map(TIER_COLORS).fillna('#bdc3c7').values
-
-        # Truncate long complex names
-        labels = [n[:25] + '...' if len(str(n)) > 25 else str(n)
-                  for n in enrich_df['complex_name'].values]
-
-        ax_b.barh(y_pos, enrich_df['enrichment'].values, color=bar_colors,
-                  edgecolor='white', linewidth=0.5)
-        ax_b.set_yticks(y_pos)
-        ax_b.set_yticklabels(labels, fontsize=8)
-        ax_b.invert_yaxis()
-        ax_b.axvline(x=1.0, color='grey', linestyle='--', linewidth=1, alpha=0.7, label='No enrichment')
-        _apply_common_style(ax_b, "(b) Top Enriched Complexes", 'Enrichment Fold-Change', '', grid=True)
-
-    figure.suptitle("Per-Complex Variant Burden and Interface Enrichment",
+    figure.suptitle("Interface Variant Density vs Composite Score",
                     fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, '13_Variant_Burden.png')
 
@@ -1859,15 +2028,15 @@ def main() -> None:
 
     # Variant figures (require variant data from --variants)
     if col_flags['has_variant_data']:
-        print("Fig 11 - Variant Consequence Flow")
+        print("Fig 11 - Classified Variant Sankey")
         plot_fig11_variant_consequence_flow(df)
         figures_generated += 1
 
-        print("Fig 12 - Variant Density Heatmap")
+        print("Fig 12 - Enrichment Distribution by Quality Tier")
         plot_fig12_variant_density_heatmap(df)
         figures_generated += 1
 
-        print("Fig 13 - Variant Burden")
+        print("Fig 13 - Interface Variant Density vs Quality")
         plot_fig13_variant_burden(df, density_mode=args.density)
         figures_generated += 1
 

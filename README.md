@@ -146,7 +146,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
-**visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 (variant consequence flow, variant density heatmap, per-complex variant burden) are generated automatically when variant columns are present in the input CSV.
+**visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present in the input CSV.
 
 **database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`. `validate_with_api()` spot-checks loaded IDs against the STRING API (disable with `--no-api`).
 
@@ -526,9 +526,9 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 8 | Metric Disagreement | Scatter highlighting complexes with conflicting quality signals |
 | 9 | Correlation & Flags | Metric correlation heatmap with flag landscape |
 | 10 | Chain-Count Profile | Violin + scatter of quality by chain count |
-| 11 | Variant Consequence Flow | Grouped stacked bar: structural context × clinical significance |
-| 12 | Variant Density Heatmap | Heatmap + grouped bar of variant density across structural contexts |
-| 13 | Per-Complex Variant Burden | Scatter + horizontal bar of variant burden vs quality and top-20 enrichment |
+| 11 | Classified Variant Sankey | Alluvial flow: clinical significance -> structural context (Unknown excluded). Where do clinically significant variants land structurally? |
+| 12 | Enrichment Distribution | Histogram + KDE of interface variant enrichment by quality tier with Wilcoxon signed-rank test vs 1.0 (neutral). Are predicted interfaces under evolutionary constraint? |
+| 13 | Variant Density vs Quality | Interface variant density (per residue) vs composite score scatter with Spearman + partial correlation (size-controlled). Does the confidence metric predict variant biology? |
 
 Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`.
 

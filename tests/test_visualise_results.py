@@ -379,6 +379,8 @@ class TestVariantFigureGeneration:
                 'quality_tier_v2': ['High', 'Medium', 'Low'][i % 3],
                 'interface_confidence_score': 0.3 + 0.5 * (i / 30),
                 'n_interface_contacts': 20 + i * 3,
+                'n_interface_residues_a': 10 + i,
+                'n_interface_residues_b': 12 + i,
                 'n_variants_a': n_a,
                 'n_variants_b': n_b,
                 'n_interface_variants_a': i % 3,
