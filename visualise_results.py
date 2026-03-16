@@ -1597,7 +1597,7 @@ def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
             right_cursors[j] += right_h
 
     # ── Annotations ──
-    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance \u2192 Structural Context",
+    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance -> Structural Context",
             ha='center', va='bottom', fontsize=14, fontweight='bold',
             transform=ax.transAxes)
     # Footer annotation (merged to avoid overlap)
