@@ -421,6 +421,32 @@ class TestParallelSASA:
         assert sasa_a == {}
         assert sasa_b == {}
 
+    def test_both_chains_returns_two_dicts(self, ref_pdb_1):
+        """compute_residue_sasa_both_chains returns two non-empty SASA dicts."""
+        from variant_mapper import compute_residue_sasa_both_chains
+        sasa_a, sasa_b = compute_residue_sasa_both_chains(str(ref_pdb_1), 'A', 'B')
+        assert isinstance(sasa_a, dict)
+        assert isinstance(sasa_b, dict)
+        assert len(sasa_a) > 0
+        assert len(sasa_b) > 0
+
+    def test_both_chains_matches_individual(self, ref_pdb_1):
+        """Combined function produces identical results to two individual calls."""
+        from variant_mapper import compute_residue_sasa, compute_residue_sasa_both_chains
+        # Individual calls
+        single_a = compute_residue_sasa(str(ref_pdb_1), 'A')
+        single_b = compute_residue_sasa(str(ref_pdb_1), 'B')
+        # Combined call
+        both_a, both_b = compute_residue_sasa_both_chains(str(ref_pdb_1), 'A', 'B')
+        assert single_a == both_a
+        assert single_b == both_b
+
+    def test_both_chains_bad_path_raises(self):
+        """compute_residue_sasa_both_chains raises on nonexistent PDB."""
+        from variant_mapper import compute_residue_sasa_both_chains
+        with pytest.raises(Exception):
+            compute_residue_sasa_both_chains('/nonexistent/path.pdb', 'A', 'B')
+
     def test_precompute_sasa_parallel_serial(self, ref_pdb_1, chain_info_1):
         """precompute_sasa_parallel works in serial mode (workers=1)."""
         from variant_mapper import precompute_sasa_parallel
@@ -880,6 +906,12 @@ class TestAnnotateResultsWithVariants:
         assert '_pdb_path' not in row
         assert '_confident_residue_numbers_a' not in row
         assert '_confident_residue_numbers_b' not in row
+        assert '_sasa_a' not in row
+        assert '_sasa_b' not in row
+        assert '_chain_res_numbers_a' not in row
+        assert '_chain_res_numbers_b' not in row
+        assert '_cb_coords_a' not in row
+        assert '_cb_coords_b' not in row
 
     def test_no_chain_info_graceful(self, test_exac_path):
         """Rows without _chain_info get default values."""
@@ -985,8 +1017,9 @@ class TestToolkitIntegration:
     def test_variants_requires_interface_pae_enrich(self):
         """--variants without --interface --pae --enrich should error."""
         import subprocess
+        out_path = str(PROJECT_ROOT / 'tests' / 'test_output' / 'test_variants_fail.csv')
         result = subprocess.run(
-            ['python', 'toolkit.py', '--dir', 'Test_Data', '--output', 'test.csv',
+            ['python', 'toolkit.py', '--dir', 'Test_Data', '--output', out_path,
              '--variants'],
             capture_output=True, text=True,
             cwd=str(PROJECT_ROOT),
@@ -1015,7 +1048,7 @@ class TestToolkitIntegration:
             assert col not in fields
 
     def test_process_single_complex_stash(self):
-        """process_single_complex with stash_variant_data preserves _chain_info."""
+        """process_single_complex with stash_variant_data computes SASA in-worker."""
         from toolkit import find_paired_data_files, process_single_complex
 
         pairs = find_paired_data_files(str(PROJECT_ROOT / "Test_Data"))
@@ -1029,9 +1062,22 @@ class TestToolkitIntegration:
                 run_interface_pae=True,
                 stash_variant_data=True,
             )
-            assert '_chain_info' in row
-            assert '_pdb_path' in row
-            assert row['_chain_info'] is not None
+            # Lightweight SASA dicts computed in-worker (no heavy ChainInfo)
+            assert '_sasa_a' in row
+            assert '_sasa_b' in row
+            assert isinstance(row['_sasa_a'], dict)
+            assert isinstance(row['_sasa_b'], dict)
+            assert len(row['_sasa_a']) > 0
+            assert len(row['_sasa_b']) > 0
+            # Chain residue numbers and CB coords as plain lists
+            assert '_chain_res_numbers_a' in row
+            assert '_chain_res_numbers_b' in row
+            assert '_cb_coords_a' in row
+            assert '_cb_coords_b' in row
+            assert isinstance(row['_cb_coords_a'], list)
+            # No heavy ChainInfo object
+            assert '_chain_info' not in row
+            assert '_pdb_path' not in row
         else:
             pytest.skip("Reference complex 1 not in test data")
 

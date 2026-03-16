@@ -552,7 +552,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **585 tests** across 15 modules (563 real + 22 future placeholders):
+The test suite contains **588 tests** across 15 modules (566 real + 22 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -567,10 +567,10 @@ The test suite contains **585 tests** across 15 modules (563 real + 22 future pl
 | test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
 | test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
 | test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
-| test_variant_mapper.py | 90 | HGVS parsing, variant loading, SASA, structural context, enrichment, CLI, toolkit integration |
+| test_variant_mapper.py | 99 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context, enrichment, CLI, toolkit integration |
 | test_future_aims.py | 7 + 22 | 7 real database tests + 22 future placeholders |
 
-**Results:** 562 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
+**Results:** 565 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
 
 **Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `future` (unimplemented features)
 

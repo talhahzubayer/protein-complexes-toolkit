@@ -16,6 +16,7 @@ Output/
 results.csv
 interfaces.jsonl
 *.checkpoint.jsonl
+test.csv
 
 # Internal documentation
 Documentation/

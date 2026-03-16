@@ -39,6 +39,12 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
+try:
+    from Bio.PDB import PDBParser, ShrakeRupley
+    _HAS_BIOPYTHON = True
+except ImportError:
+    _HAS_BIOPYTHON = False
+
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -567,7 +573,8 @@ def compute_residue_sasa(
     Returns:
         Dict mapping PDB residue number to RSA (0.0 = fully buried, 1.0+ = fully exposed).
     """
-    from Bio.PDB import PDBParser, ShrakeRupley
+    if not _HAS_BIOPYTHON:
+        raise ImportError("BioPython is required for SASA computation: pip install biopython")
 
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure('complex', str(pdb_path))
@@ -587,6 +594,51 @@ def compute_residue_sasa(
         sasa_map[res_num] = abs_sasa / max_sasa if max_sasa > 0 else 0.0
 
     return sasa_map
+
+
+def compute_residue_sasa_both_chains(
+    pdb_path: Union[str, Path],
+    chain_a: str,
+    chain_b: str,
+) -> tuple[dict[int, float], dict[int, float]]:
+    """Compute per-residue RSA for both chains in a single parse + compute.
+
+    Parses the PDB once and runs ShrakeRupley once, then extracts RSA
+    for both chains.  This is ~2x faster than calling compute_residue_sasa()
+    twice because ShrakeRupley (the expensive step) operates on the entire
+    model regardless of which chain is requested.
+
+    Args:
+        pdb_path: Path to PDB file.
+        chain_a: Chain identifier for protein A (e.g. 'A').
+        chain_b: Chain identifier for protein B (e.g. 'B').
+
+    Returns:
+        Tuple of (sasa_map_a, sasa_map_b), each mapping residue number to RSA.
+    """
+    if not _HAS_BIOPYTHON:
+        raise ImportError("BioPython is required for SASA computation: pip install biopython")
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure('complex', str(pdb_path))
+
+    sr = ShrakeRupley()
+    sr.compute(structure[0], level='R')
+
+    sasa_maps: list[dict[int, float]] = []
+    for chain_id in (chain_a, chain_b):
+        sasa_map: dict[int, float] = {}
+        for residue in structure[0][chain_id]:
+            if residue.id[0] != ' ':
+                continue
+            res_num = residue.id[1]
+            res_name = residue.resname.strip()
+            abs_sasa = residue.sasa
+            max_sasa = MAX_ASA.get(res_name, MAX_ASA_DEFAULT)
+            sasa_map[res_num] = abs_sasa / max_sasa if max_sasa > 0 else 0.0
+        sasa_maps.append(sasa_map)
+
+    return sasa_maps[0], sasa_maps[1]
 
 
 def is_buried(rsa: float) -> bool:
@@ -620,9 +672,7 @@ def _compute_sasa_pair(
         Tuple of (sasa_map_a, sasa_map_b).  On failure returns ({}, {}).
     """
     try:
-        sasa_a = compute_residue_sasa(pdb_path, chain_a)
-        sasa_b = compute_residue_sasa(pdb_path, chain_b)
-        return sasa_a, sasa_b
+        return compute_residue_sasa_both_chains(pdb_path, chain_a, chain_b)
     except Exception:
         return {}, {}
 
@@ -981,15 +1031,18 @@ def annotate_results_with_variants(
 
     Main entry point from toolkit.py. For each complex:
     1. Looks up variants for protein_a and protein_b
-    2. Computes SASA for structural context classification
+    2. Uses pre-stashed SASA maps (toolkit path) or computes them (standalone CLI)
     3. Maps variants to interface/non-interface positions
     4. Counts interface variants and pathogenic interface variants
     5. Computes fold-enrichment
     6. Attaches ExAC gene constraint scores
 
-    When *workers* > 1, SASA computation is parallelised across processes
-    using :func:`precompute_sasa_parallel`, reducing wall-clock time from
-    ~15-80 min to ~4-20 min for 10K complexes (on a 4-core machine).
+    Two execution paths:
+    - **Toolkit path**: Results contain ``_sasa_a``/``_sasa_b`` (pre-computed
+      in worker processes by ``process_single_complex()``). No additional SASA
+      computation needed — eliminates the pickling bottleneck.
+    - **Standalone CLI path**: Results contain ``_chain_info``/``_pdb_path``.
+      SASA is computed via :func:`precompute_sasa_parallel`.
 
     Args:
         results: List of per-complex result dicts. Modified in-place.
@@ -997,22 +1050,26 @@ def annotate_results_with_variants(
         exac_df: DataFrame from load_exac_constraint().
         gene_symbol_lookup: Dict mapping UniProt accession to gene symbol.
         verbose: Print progress to stderr.
-        workers: Number of parallel processes for SASA computation.
-            Defaults to 1 (serial).  Values > 1 enable parallel
-            pre-computation via ProcessPoolExecutor.
+        workers: Number of parallel processes for SASA computation
+            (standalone CLI path only). Defaults to 1 (serial).
     """
     # Build ExAC lookup by gene symbol
     exac_lookup: dict[str, dict] = {}
-    for _, row in exac_df.iterrows():
-        gene = str(row.get('gene', ''))
+    for _, erow in exac_df.iterrows():
+        gene = str(erow.get('gene', ''))
         if gene:
             exac_lookup[gene] = {
-                'pLI': float(row['pLI']) if pd.notna(row.get('pLI')) else None,
-                'mis_z': float(row['mis_z']) if pd.notna(row.get('mis_z')) else None,
+                'pLI': float(erow['pLI']) if pd.notna(erow.get('pLI')) else None,
+                'mis_z': float(erow['mis_z']) if pd.notna(erow.get('mis_z')) else None,
             }
 
-    # Pre-compute SASA maps (parallel when workers > 1)
-    sasa_cache = precompute_sasa_parallel(results, workers=workers, verbose=verbose)
+    # Detect execution path: toolkit (pre-stashed SASA) vs standalone (needs computation)
+    has_prestashed = any('_sasa_a' in r for r in results[:10])
+    sasa_cache: dict[int, tuple[dict, dict]] = {}
+
+    if not has_prestashed:
+        # Standalone CLI path: compute SASA from _chain_info/_pdb_path
+        sasa_cache = precompute_sasa_parallel(results, workers=workers, verbose=verbose)
 
     annotated_count = 0
     sasa_computed_count = 0
@@ -1020,8 +1077,6 @@ def annotate_results_with_variants(
     for i, row in enumerate(results):
         protein_a = row.get('protein_a', '')
         protein_b = row.get('protein_b', '')
-        pdb_path = row.get('_pdb_path')
-        chain_info = row.get('_chain_info')
         conf_res_a = row.get('_confident_residue_numbers_a', [])
         conf_res_b = row.get('_confident_residue_numbers_b', [])
         best_pair = row.get('best_chain_pair', '')
@@ -1064,35 +1119,50 @@ def annotate_results_with_variants(
             if ec['mis_z'] is not None:
                 row['gene_constraint_mis_z_b'] = f"{ec['mis_z']:.2f}"
 
-        # Skip structural mapping if no chain_info available
-        if chain_info is None or pdb_path is None:
+        # Resolve SASA and structural data depending on execution path
+        if has_prestashed:
+            # Toolkit path: SASA and structural data pre-stashed by worker
+            sasa_a = row.get('_sasa_a', {})
+            sasa_b = row.get('_sasa_b', {})
+            res_numbers_a = row.get('_chain_res_numbers_a', [])
+            res_numbers_b = row.get('_chain_res_numbers_b', [])
+            cb_coords_a = np.array(row.get('_cb_coords_a', []))
+            cb_coords_b = np.array(row.get('_cb_coords_b', []))
+            has_structural = bool(sasa_a or sasa_b or res_numbers_a or res_numbers_b)
+        else:
+            # Standalone CLI path: use _chain_info + sasa_cache
+            chain_info = row.get('_chain_info')
+            pdb_path = row.get('_pdb_path')
+            if chain_info is None or pdb_path is None:
+                continue
+            if i in sasa_cache:
+                sasa_a, sasa_b = sasa_cache[i]
+            else:
+                sasa_a, sasa_b = {}, {}
+            res_numbers_a = chain_info.chain_res_numbers.get(chain_a, [])
+            res_numbers_b = chain_info.chain_res_numbers.get(chain_b, [])
+            cb_coords_a = chain_info.cb_coords.get(chain_a, np.empty((0, 3)))
+            cb_coords_b = chain_info.cb_coords.get(chain_b, np.empty((0, 3)))
+            has_structural = True
+
+        if not has_structural:
             continue
 
-        # Retrieve pre-computed SASA maps from cache
-        if i in sasa_cache:
-            sasa_a, sasa_b = sasa_cache[i]
-            if sasa_a or sasa_b:
-                sasa_computed_count += 1
-        else:
-            sasa_a = {}
-            sasa_b = {}
+        if sasa_a or sasa_b:
+            sasa_computed_count += 1
 
         # Map variants for protein A
         interface_a = set(conf_res_a) if conf_res_a else set()
         mapped_a = map_variants_to_complex(
             protein_a, chain_a, variant_index, interface_a,
-            chain_info.chain_res_numbers.get(chain_a, []),
-            chain_info.cb_coords.get(chain_a, np.empty((0, 3))),
-            sasa_a,
+            res_numbers_a, cb_coords_a, sasa_a,
         )
 
         # Map variants for protein B
         interface_b = set(conf_res_b) if conf_res_b else set()
         mapped_b = map_variants_to_complex(
             protein_b, chain_b, variant_index, interface_b,
-            chain_info.chain_res_numbers.get(chain_b, []),
-            chain_info.cb_coords.get(chain_b, np.empty((0, 3))),
-            sasa_b,
+            res_numbers_b, cb_coords_b, sasa_b,
         )
 
         # Count variants
@@ -1114,8 +1184,8 @@ def annotate_results_with_variants(
 
         # Compute enrichment
         n_if_residues = len(interface_a) + len(interface_b)
-        n_total_residues_a = len(chain_info.chain_res_numbers.get(chain_a, []))
-        n_total_residues_b = len(chain_info.chain_res_numbers.get(chain_b, []))
+        n_total_residues_a = len(res_numbers_a)
+        n_total_residues_b = len(res_numbers_b)
         n_total_residues = n_total_residues_a + n_total_residues_b
         n_total_variants = n_variants_a + n_variants_b
         n_if_variants = n_if_vars_a + n_if_vars_b
@@ -1138,7 +1208,9 @@ def annotate_results_with_variants(
 
         # Strip private keys (not for CSV output)
         for key in ('_chain_info', '_pdb_path', '_confident_residue_numbers_a',
-                     '_confident_residue_numbers_b'):
+                     '_confident_residue_numbers_b', '_sasa_a', '_sasa_b',
+                     '_chain_res_numbers_a', '_chain_res_numbers_b',
+                     '_cb_coords_a', '_cb_coords_b'):
             row.pop(key, None)
 
     if verbose:

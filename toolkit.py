@@ -588,11 +588,27 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
         )
 
         # Stash structural data for variant mapping (private keys, stripped before CSV write)
+        # SASA is computed here inside the worker to avoid pickling heavy ChainInfo_New
+        # objects (numpy arrays) across the process boundary — only lightweight dicts are returned.
         if stash_variant_data and chain_info is not None:
-            row['_chain_info'] = chain_info
-            row['_pdb_path'] = file_paths.get('pdb')
-            # Confident residue numbers are already in the row from _compute_interface_features
-            # Copy them to private keys so they survive the JSONL export stripping
+            from variant_mapper import compute_residue_sasa_both_chains
+            best_pair = row.get('best_chain_pair', '')
+            if best_pair and '_' in best_pair:
+                _va, _vb = best_pair.split('_', 1)
+            else:
+                _va, _vb = 'A', 'B'
+            try:
+                sasa_a, sasa_b = compute_residue_sasa_both_chains(
+                    file_paths['pdb'], _va, _vb)
+            except Exception:
+                sasa_a, sasa_b = {}, {}
+
+            row['_sasa_a'] = sasa_a                    # dict[int, float] — lightweight
+            row['_sasa_b'] = sasa_b
+            row['_chain_res_numbers_a'] = chain_info.chain_res_numbers.get(_va, [])
+            row['_chain_res_numbers_b'] = chain_info.chain_res_numbers.get(_vb, [])
+            row['_cb_coords_a'] = chain_info.cb_coords.get(_va, np.empty((0, 3))).tolist()
+            row['_cb_coords_b'] = chain_info.cb_coords.get(_vb, np.empty((0, 3))).tolist()
             row['_confident_residue_numbers_a'] = row.get('confident_residue_numbers_a', [])
             row['_confident_residue_numbers_b'] = row.get('confident_residue_numbers_b', [])
 
@@ -818,6 +834,28 @@ def save_checkpoint(results: list[dict], output_path: str) -> None:
     tmp.replace(ckpt)
     logger.info("Checkpoint saved: %d complexes -> %s", len(results), ckpt)
 
+def append_checkpoint(results: list[dict], output_path: str, since_index: int) -> int:
+    """Append only new results to the checkpoint file (avoids rewriting all).
+
+    For large runs this is much faster than save_checkpoint() which rewrites
+    the entire results list on every call.
+
+    Args:
+        results: Full results list accumulated so far.
+        output_path: The main output CSV path (checkpoint path derived from it).
+        since_index: Index of the first new result to append.
+
+    Returns:
+        Updated since_index (len(results)) for the next call.
+    """
+    ckpt = _checkpoint_path(output_path)
+    with open(ckpt, 'a', encoding='utf-8') as fh:
+        for row in results[since_index:]:
+            fh.write(json.dumps(row, default=str) + '\n')
+    n_appended = len(results) - since_index
+    logger.info("Checkpoint appended: %d new rows -> %s", n_appended, ckpt)
+    return len(results)
+
 def remove_checkpoint(output_path: str) -> None:
     """Remove the checkpoint file after successful completion."""
     ckpt = _checkpoint_path(output_path)
@@ -924,6 +962,7 @@ def run_batch_parallel(
 
     results = list(resumed_results)  # Accumulate into a mutable list
     newly_processed = 0
+    last_checkpoint_count = len(results)  # Track for append-only checkpoints
     start_time = time.monotonic()
 
     with _make_progress_bar(total, desc="Analysing complexes") as pbar:
@@ -942,7 +981,8 @@ def run_batch_parallel(
                 pbar.update(1)
 
                 if enable_checkpoint and newly_processed % CHECKPOINT_INTERVAL == 0:
-                    save_checkpoint(results, output_path)
+                    last_checkpoint_count = append_checkpoint(
+                        results, output_path, last_checkpoint_count)
 
         else:
             #----------------------Parallel mode------------------------------------------------
@@ -970,7 +1010,8 @@ def run_batch_parallel(
                         })
                     pbar.update(1)
                     if enable_checkpoint and newly_processed % CHECKPOINT_INTERVAL == 0:
-                        save_checkpoint(results, output_path)
+                        last_checkpoint_count = append_checkpoint(
+                            results, output_path, last_checkpoint_count)
 
     elapsed = time.monotonic() - start_time
     rate = to_process / elapsed if elapsed > 0 else 0
@@ -1208,7 +1249,7 @@ Examples:
                              "data/clusters/9606.clusters.proteins.v12.0.txt. "
                              "Only used with --clustering.")
     parser.add_argument("--variants", metavar="VARIANTS_DIR",
-                        nargs='?', const=None,
+                        nargs='?', const='__default__', default=None,
                         help="Map genetic variants to interface residues using "
                              "UniProt/ClinVar/ExAC databases. Requires --interface "
                              "--pae --enrich. Default directory: data/variants/. "
@@ -1249,8 +1290,8 @@ def main() -> None:
         if not (args.interface and args.pae and args.enrich):
             print("Error: --variants requires --interface --pae --enrich", file=sys.stderr)
             sys.exit(1)
-        # Resolve variants directory path
-        if args.variants is None or args.variants == '':
+        # Resolve variants directory path (sentinel '__default__' means --variants without path)
+        if args.variants == '__default__':
             from variant_mapper import DEFAULT_VARIANTS_DIR
             args.variants = str(DEFAULT_VARIANTS_DIR)
     # Distinguish "not used" from "used without path" for later checks
@@ -1508,10 +1549,10 @@ def main() -> None:
             if pb and gb:
                 gene_lookup[pb] = gb
 
-        # Annotate results with variant data (SASA parallelised when workers > 1)
+        # Annotate results with variant data (SASA already computed in workers)
         annotate_results_with_variants(
             results, variant_idx, exac_df, gene_lookup,
-            verbose=True, workers=args.workers,
+            verbose=True,
         )
 
         include_variants = True
