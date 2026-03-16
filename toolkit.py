@@ -548,7 +548,7 @@ def _compute_interface_features(
         print(f"  Warning: Interface analysis failed for {complex_name}: {error}", file=sys.stderr)
 
 
-def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, run_interface: bool = False, run_interface_pae: bool = False, export_interfaces: bool = False, verbose: bool = False) -> dict:
+def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, run_interface: bool = False, run_interface_pae: bool = False, export_interfaces: bool = False, stash_variant_data: bool = False, verbose: bool = False) -> dict:
     """Run all analysis steps on a single protein complex.
     Args:
         complex_name: Parsed complex identifier.
@@ -556,6 +556,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
         run_interface: Whether to compute interface geometry + pLDDT features.
         run_interface_pae: Whether to also compute PAE-based interface features (requires both PDB and PKL - implies run_interface=True).
         export_interfaces: Whether to capture confident interface residue data for JSONL export (requires --interface --pae).
+        stash_variant_data: Whether to stash _chain_info, _pdb_path, and confident residue numbers for variant mapping (requires --interface --pae).
         verbose: Whether to print per-step progress.
     Returns:
         Dictionary of results for this complex (one CSV row).
@@ -577,11 +578,23 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
     contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
 
     if run_interface and 'pdb' in file_paths:
+        # Keep confident residue numbers if exporting interfaces OR stashing for variant mapping
         _compute_interface_features(
             complex_name, row, contact_result, chain_info,
             pae_matrix, pae_chain_offsets, cb_to_ca_maps,
-            run_interface_pae=run_interface_pae, export_interfaces=export_interfaces, verbose=verbose,
+            run_interface_pae=run_interface_pae,
+            export_interfaces=export_interfaces or stash_variant_data,
+            verbose=verbose,
         )
+
+        # Stash structural data for variant mapping (private keys, stripped before CSV write)
+        if stash_variant_data and chain_info is not None:
+            row['_chain_info'] = chain_info
+            row['_pdb_path'] = file_paths.get('pdb')
+            # Confident residue numbers are already in the row from _compute_interface_features
+            # Copy them to private keys so they survive the JSONL export stripping
+            row['_confident_residue_numbers_a'] = row.get('confident_residue_numbers_a', [])
+            row['_confident_residue_numbers_b'] = row.get('confident_residue_numbers_b', [])
 
     # Quality tier classification
     row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
@@ -591,7 +604,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -604,9 +617,12 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
     if include_clustering:
         from protein_clustering import CSV_FIELDNAMES_CLUSTERING
         fieldnames.extend(CSV_FIELDNAMES_CLUSTERING)
+    if include_variants:
+        from variant_mapper import CSV_FIELDNAMES_VARIANTS
+        fieldnames.extend(CSV_FIELDNAMES_VARIANTS)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -615,8 +631,9 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_pae: Whether to include PAE interface columns.
         include_enrichment: Whether to include enrichment columns (gene symbols, names, database sources, sequences).
         include_clustering: Whether to include clustering columns (cluster IDs, homologous pairs).
+        include_variants: Whether to include variant mapping columns.
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -861,6 +878,7 @@ def run_batch_parallel(
     run_interface: bool,
     run_interface_pae: bool,
     export_interfaces: bool,
+    stash_variant_data: bool = False,
     verbose: bool,
     workers: int,
     output_path: str,
@@ -873,6 +891,7 @@ def run_batch_parallel(
         run_interface: Whether to compute interface features.
         run_interface_pae: Whether to compute PAE features.
         export_interfaces: Whether to capture residue data for JSONL export.
+        stash_variant_data: Whether to preserve chain_info/pdb_path for variant mapping.
         verbose: Whether to print verbose per-complex output.
         workers: Number of parallel workers (1 = sequential).
         output_path: Output CSV path (used to derive checkpoint path).
@@ -893,6 +912,7 @@ def run_batch_parallel(
         run_interface=run_interface,
         run_interface_pae=run_interface_pae,
         export_interfaces=export_interfaces,
+        stash_variant_data=stash_variant_data,
         verbose=verbose and workers == 1,  # Verbose only meaningful in sequential mode
     )
 
@@ -1187,6 +1207,15 @@ Examples:
                         help="Path to STRING clusters file. Default: "
                              "data/clusters/9606.clusters.proteins.v12.0.txt. "
                              "Only used with --clustering.")
+    parser.add_argument("--variants", metavar="VARIANTS_DIR",
+                        nargs='?', const=None,
+                        help="Map genetic variants to interface residues using "
+                             "UniProt/ClinVar/ExAC databases. Requires --interface "
+                             "--pae --enrich. Default directory: data/variants/. "
+                             "Optionally specify a custom variants directory path.")
+    parser.add_argument("--no-clinvar", action="store_true",
+                        help="Skip ClinVar enrichment when using --variants (faster). "
+                             "Only UniProt variants and ExAC constraint scores are used.")
     return parser
 
 
@@ -1214,6 +1243,18 @@ def main() -> None:
     if args.clustering and not args.enrich:
         print("Error: --clustering requires --enrich for ID resolution", file=sys.stderr)
         sys.exit(1)
+
+    if args.variants is not None:
+        # --variants was used (either with or without explicit path)
+        if not (args.interface and args.pae and args.enrich):
+            print("Error: --variants requires --interface --pae --enrich", file=sys.stderr)
+            sys.exit(1)
+        # Resolve variants directory path
+        if args.variants is None or args.variants == '':
+            from variant_mapper import DEFAULT_VARIANTS_DIR
+            args.variants = str(DEFAULT_VARIANTS_DIR)
+    # Distinguish "not used" from "used without path" for later checks
+    args._variants_enabled = args.variants is not None
 
     if args.resume:
         args.checkpoint = True
@@ -1266,6 +1307,7 @@ def main() -> None:
             run_interface=args.interface,
             run_interface_pae=args.pae,
             export_interfaces=bool(args.export_interfaces),
+            stash_variant_data=getattr(args, '_variants_enabled', False),
             verbose=args.verbose,
             workers=args.workers,
             output_path=args.output,
@@ -1383,6 +1425,100 @@ def main() -> None:
         print(f"Clustering complete: {len(results)} complexes annotated "
               f"in {cluster_elapsed:.1f}s", file=sys.stderr)
 
+    # Variant mapping (structural context, enrichment, gene constraint)
+    include_variants = False
+    if getattr(args, '_variants_enabled', False):
+        from variant_mapper import (
+            load_uniprot_variants, load_clinvar_variants,
+            load_exac_constraint, build_variant_index,
+            enrich_with_clinvar, annotate_results_with_variants,
+            UNIPROT_VARIANTS_FILENAME, CLINVAR_VARIANTS_FILENAME,
+            EXAC_CONSTRAINT_FILENAME,
+        )
+        variant_start = time.time()
+        variants_dir = Path(args.variants)
+
+        # Collect unique accessions and gene symbols from results
+        accessions = set()
+        gene_symbols_set = set()
+        for row in results:
+            accessions.add(row.get('protein_a', ''))
+            accessions.add(row.get('protein_b', ''))
+            for gs_key in ('gene_symbol_a', 'gene_symbol_b'):
+                gs = row.get(gs_key, '')
+                if gs:
+                    gene_symbols_set.add(gs)
+        accessions.discard('')
+
+        # Also try base accessions (strip isoform suffixes)
+        from id_mapper import split_isoform
+        base_accessions = set()
+        for acc in accessions:
+            base, _ = split_isoform(acc)
+            base_accessions.add(base)
+        all_accessions = frozenset(accessions | base_accessions)
+
+        print(f"Loading variant databases from: {variants_dir}", file=sys.stderr)
+        print(f"  Searching for variants in {len(all_accessions)} accessions, "
+              f"{len(gene_symbols_set)} gene symbols", file=sys.stderr)
+
+        # Load UniProt variants (chunked streaming)
+        uniprot_path = variants_dir / UNIPROT_VARIANTS_FILENAME
+        variants_df = load_uniprot_variants(
+            uniprot_path, all_accessions, verbose=True,
+        )
+        variant_idx = build_variant_index(variants_df)
+        print(f"  Variant index: {sum(len(v) for v in variant_idx.values()):,} variants "
+              f"across {len(variant_idx)} proteins", file=sys.stderr)
+
+        # ClinVar enrichment (optional)
+        if not args.no_clinvar:
+            clinvar_path = variants_dir / CLINVAR_VARIANTS_FILENAME
+            if clinvar_path.exists():
+                # Collect rsIDs from variant index
+                rsids = frozenset(
+                    str(v['rsid']) for variants in variant_idx.values()
+                    for v in variants if v.get('rsid') and str(v['rsid']) != 'nan'
+                )
+                clinvar_df = load_clinvar_variants(
+                    clinvar_path, rsids=rsids, verbose=True,
+                )
+                enrich_with_clinvar(variant_idx, clinvar_df, verbose=True)
+            else:
+                print(f"  ClinVar file not found: {clinvar_path}", file=sys.stderr)
+
+        # ExAC gene constraint
+        exac_path = variants_dir / EXAC_CONSTRAINT_FILENAME
+        if exac_path.exists():
+            exac_df = load_exac_constraint(exac_path, gene_symbols=frozenset(gene_symbols_set))
+            print(f"  ExAC constraint: {len(exac_df)} genes loaded", file=sys.stderr)
+        else:
+            exac_df = pd.DataFrame()
+            print(f"  ExAC file not found: {exac_path}", file=sys.stderr)
+
+        # Build gene symbol lookup from results
+        gene_lookup: dict[str, str] = {}
+        for row in results:
+            pa = row.get('protein_a', '')
+            pb = row.get('protein_b', '')
+            ga = row.get('gene_symbol_a', '')
+            gb = row.get('gene_symbol_b', '')
+            if pa and ga:
+                gene_lookup[pa] = ga
+            if pb and gb:
+                gene_lookup[pb] = gb
+
+        # Annotate results with variant data (SASA parallelised when workers > 1)
+        annotate_results_with_variants(
+            results, variant_idx, exac_df, gene_lookup,
+            verbose=True, workers=args.workers,
+        )
+
+        include_variants = True
+        variant_elapsed = time.time() - variant_start
+        print(f"Variant mapping complete: {len(results)} complexes annotated "
+              f"in {variant_elapsed:.1f}s", file=sys.stderr)
+
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
@@ -1391,6 +1527,7 @@ def main() -> None:
         include_pae=args.pae,
         include_enrichment=include_enrichment,
         include_clustering=include_clustering,
+        include_variants=include_variants,
     )
 
     print(f"\n{'=' * 60}")

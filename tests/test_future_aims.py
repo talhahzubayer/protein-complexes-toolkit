@@ -128,33 +128,76 @@ class TestDatabaseIngestion:
 
 # ── Aim 4: Genetic Variant Mapping ───────────────────────────────
 
-@pytest.mark.future
+@pytest.mark.variants
 class TestVariantMapping:
-    """Tests for variant mapping to interface residues."""
+    """Cross-references to variant mapping tests in test_variant_mapper.py.
 
-    def test_variant_parser_returns_dataframe(self):
+    These placeholders originally lived here as @pytest.mark.future stubs.
+    Now that variant_mapper.py is implemented, the comprehensive tests are in
+    tests/test_variant_mapper.py (~70 tests across 6 groups). These methods
+    serve as smoke-test cross-references.
+    """
+
+    def test_variant_parser_returns_dataframe(self, test_db_dir):
         """UniProt variant parser returns standardised DataFrame."""
-        pytest.skip("Not yet implemented - variant_parser.py not built")
+        from variant_mapper import load_uniprot_variants
+        path = test_db_dir / "test_uniprot_variants.txt"
+        df = load_uniprot_variants(path, frozenset({'A0A0B4J2C3'}))
+        assert len(df) > 0
+        assert 'accession' in df.columns
+        assert 'position' in df.columns
 
-    def test_variant_at_interface_detected(self):
-        """Known disease variant at interface position is detected."""
-        pytest.skip("Not yet implemented")
+    def test_variant_at_interface_detected(self, test_db_dir):
+        """Known disease variant at interface position is detected.
+        See: TestRegressionComplex1.test_pathogenic_at_interface for full test.
+        """
+        from variant_mapper import load_uniprot_variants, build_variant_index
+        path = test_db_dir / "test_uniprot_variants.txt"
+        df = load_uniprot_variants(path, frozenset({'A0A0B4J2C3'}))
+        idx = build_variant_index(df)
+        # Position 81 is a known interface + pathogenic variant in test data
+        pos81 = [v for v in idx.get('A0A0B4J2C3', []) if v['position'] == 81]
+        assert len(pos81) >= 1
+        assert 'pathogenic' in pos81[0]['clinical_significance'].lower()
 
     def test_variant_distance_to_interface(self):
-        """Distance to nearest interface residue is computed correctly."""
-        pytest.skip("Not yet implemented")
+        """Distance to nearest interface residue is computed correctly.
+        See: TestDistanceToInterface for full tests.
+        """
+        import numpy as np
+        from variant_mapper import compute_distance_to_interface
+        coord = np.array([0.0, 0.0, 0.0])
+        iface = np.array([[3.0, 4.0, 0.0]])
+        assert abs(compute_distance_to_interface(coord, iface) - 5.0) < 1e-6
 
     def test_variant_structural_context_classification(self):
-        """Variant classified as interface_core/rim/surface/buried."""
-        pytest.skip("Not yet implemented")
+        """Variant classified as interface_core/rim/surface/buried.
+        See: TestStructuralContextClassification for full tests.
+        """
+        from variant_mapper import CONTEXT_INTERFACE_CORE, CONTEXT_BURIED, CONTEXT_SURFACE
+        assert CONTEXT_INTERFACE_CORE == 'interface_core'
+        assert CONTEXT_BURIED == 'buried_core'
+        assert CONTEXT_SURFACE == 'surface_non_interface'
 
-    def test_clinvar_annotation_integration(self):
-        """ClinVar clinical significance correctly associated."""
-        pytest.skip("Not yet implemented")
+    def test_clinvar_annotation_integration(self, test_db_dir):
+        """ClinVar clinical significance correctly associated.
+        See: TestVariantIndex.test_clinvar_enrichment for full test.
+        """
+        from variant_mapper import load_clinvar_variants
+        path = test_db_dir / "test_clinvar_variants.txt"
+        df = load_clinvar_variants(path)
+        assert len(df) > 0
+        assert 'clinvar_significance' in df.columns
 
-    def test_gnomad_allele_frequency_integration(self):
-        """gnomAD allele frequencies correctly attached."""
-        pytest.skip("Not yet implemented")
+    def test_exac_constraint_integration(self, test_db_dir):
+        """ExAC gene constraint scores correctly loaded (replaces gnomAD AF placeholder).
+        See: TestExACLoading for full tests.
+        """
+        from variant_mapper import load_exac_constraint
+        path = test_db_dir / "test_exac_constraint.txt"
+        df = load_exac_constraint(path, gene_symbols=frozenset({'GENE_A'}))
+        assert len(df) == 1
+        assert abs(df.iloc[0]['pLI'] - 0.95) < 0.01
 
 
 # ── Aim 6: Stability Scoring ─────────────────────────────────────

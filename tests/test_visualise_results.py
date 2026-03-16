@@ -30,7 +30,13 @@ from visualise_results import (
     plot_fig8_metric_disagreement,
     plot_fig9_correlation_flags,
     plot_fig10_chain_count_profile,
+    plot_fig11_variant_consequence_flow,
+    plot_fig12_variant_density_heatmap,
+    plot_fig13_variant_burden,
     _get_paradox_mask,
+    _parse_variant_details,
+    _aggregate_all_variants,
+    _normalise_significance,
     TIER_COLORS,
     TIER_ORDER,
 )
@@ -254,3 +260,151 @@ class TestCLI:
         assert cli_fig_dir.exists(), "Output directory not created"
         png_files = list(cli_fig_dir.glob("*.png"))
         assert len(png_files) >= 2, f"Expected at least 2 figures, got {len(png_files)}"
+
+
+# ── Variant Detail Parsing Tests ─────────────────────────────────
+
+class TestVariantDetailParsing:
+    """Tests for _parse_variant_details, _aggregate_all_variants, _normalise_significance."""
+
+    def test_parse_basic(self):
+        result = _parse_variant_details('K81P:interface_core:Pathogenic|E82K:interface_rim:VUS')
+        assert len(result) == 2
+        assert result[0] == {'mutation': 'K81P', 'context': 'interface_core', 'significance': 'Pathogenic'}
+        assert result[1] == {'mutation': 'E82K', 'context': 'interface_rim', 'significance': 'VUS'}
+
+    def test_parse_empty(self):
+        assert _parse_variant_details('') == []
+        assert _parse_variant_details(None) == []
+        assert _parse_variant_details(float('nan')) == []
+
+    def test_parse_overflow_skipped(self):
+        s = 'K81P:interface_core:Pathogenic|...(+5 more)'
+        result = _parse_variant_details(s)
+        assert len(result) == 1
+        assert result[0]['mutation'] == 'K81P'
+
+    def test_normalise_significance_pathogenic(self):
+        assert _normalise_significance('Pathogenic') == 'Pathogenic'
+        assert _normalise_significance('Pathogenic/Likely pathogenic') == 'Likely pathogenic'
+
+    def test_normalise_significance_benign(self):
+        assert _normalise_significance('Benign') == 'Benign'
+        assert _normalise_significance('Benign/Likely benign') == 'Benign'
+        assert _normalise_significance('Likely benign') == 'Benign'
+
+    def test_normalise_significance_vus(self):
+        assert _normalise_significance('Uncertain significance') == 'VUS'
+
+    def test_normalise_significance_unknown(self):
+        assert _normalise_significance('-') == 'Unknown'
+        assert _normalise_significance('') == 'Unknown'
+
+    def test_aggregate_all_variants(self):
+        df = pd.DataFrame({
+            'complex_name': ['X_Y'],
+            'variant_details_a': ['K81P:interface_core:Pathogenic|E82K:interface_rim:VUS'],
+            'variant_details_b': ['R45W:buried_core:-'],
+        })
+        result = _aggregate_all_variants(df)
+        assert len(result) == 3
+        assert set(result.columns) == {'complex_name', 'chain', 'mutation', 'context', 'significance'}
+        assert (result[result['chain'] == 'a'].shape[0]) == 2
+        assert (result[result['chain'] == 'b'].shape[0]) == 1
+
+
+# ── Column Detection: Variant Flag Test ──────────────────────────
+
+class TestDetectColumnsVariant:
+    """Tests for the has_variant_data flag in detect_columns."""
+
+    def test_variant_columns_detected(self):
+        df = pd.DataFrame({
+            'complex_name': ['X_Y'],
+            'n_variants_a': [3],
+            'variant_details_a': ['K81P:interface_core:Pathogenic'],
+        })
+        flags = detect_columns(df)
+        assert flags['has_variant_data'] is True
+
+    def test_no_variant_columns(self):
+        df = pd.DataFrame({'complex_name': ['X_Y'], 'iptm': [0.5]})
+        flags = detect_columns(df)
+        assert flags['has_variant_data'] is False
+
+
+# ── Variant Figure Generation Tests (Figs 11-13) ────────────────
+
+@pytest.mark.variants
+class TestVariantFigureGeneration:
+    """Tests for Figs 11-13 using a synthetic variant DataFrame."""
+
+    @pytest.fixture(scope="class")
+    def variant_figures_dir(self, test_output_dir):
+        fig_dir = test_output_dir / "variant_figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        visualise_results.OUTPUT_DIR = str(fig_dir)
+        return fig_dir
+
+    @pytest.fixture(scope="class")
+    def variant_df(self):
+        """30-row synthetic DataFrame with realistic variant columns."""
+        import numpy as np
+        rng = np.random.RandomState(42)
+        contexts = ['interface_core', 'interface_rim', 'surface_non_interface', 'buried_core']
+        significances = ['Pathogenic', 'Likely pathogenic', 'Uncertain significance', 'Benign', '-']
+        rows = []
+        for i in range(30):
+            # Build variant_details strings
+            n_a = (i % 5) + 1
+            n_b = (i % 4)
+            details_a_parts = []
+            for _ in range(n_a):
+                mut = f'{chr(65 + rng.randint(0, 26))}{rng.randint(1, 300)}{chr(65 + rng.randint(0, 26))}'
+                ctx = contexts[rng.randint(0, 4)]
+                sig = significances[rng.randint(0, 5)]
+                details_a_parts.append(f'{mut}:{ctx}:{sig}')
+            details_b_parts = []
+            for _ in range(n_b):
+                mut = f'{chr(65 + rng.randint(0, 26))}{rng.randint(1, 300)}{chr(65 + rng.randint(0, 26))}'
+                ctx = contexts[rng.randint(0, 4)]
+                sig = significances[rng.randint(0, 5)]
+                details_b_parts.append(f'{mut}:{ctx}:{sig}')
+
+            rows.append({
+                'complex_name': f'PROT{i:02d}_PROT{i + 30:02d}',
+                'iptm': 0.3 + 0.5 * (i / 30),
+                'pdockq': 0.2 + 0.4 * (i / 30),
+                'quality_tier': ['High', 'Medium', 'Low'][i % 3],
+                'quality_tier_v2': ['High', 'Medium', 'Low'][i % 3],
+                'interface_confidence_score': 0.3 + 0.5 * (i / 30),
+                'n_interface_contacts': 20 + i * 3,
+                'n_variants_a': n_a,
+                'n_variants_b': n_b,
+                'n_interface_variants_a': i % 3,
+                'n_interface_variants_b': i % 2,
+                'n_pathogenic_interface_variants': 1 if i % 7 == 0 else 0,
+                'interface_variant_enrichment': 2.5 if i % 5 == 0 else (0.8 if i % 3 != 0 else 0),
+                'variant_details_a': '|'.join(details_a_parts),
+                'variant_details_b': '|'.join(details_b_parts) if details_b_parts else '',
+                'gene_constraint_pli_a': 0.95,
+                'gene_constraint_pli_b': 0.1,
+                'gene_constraint_mis_z_a': 3.2,
+                'gene_constraint_mis_z_b': -0.5,
+            })
+        return pd.DataFrame(rows)
+
+    def test_fig11_variant_consequence_flow(self, variant_df, variant_figures_dir):
+        plot_fig11_variant_consequence_flow(variant_df)
+        assert any(f.startswith("11_") for f in os.listdir(variant_figures_dir)), \
+            "Fig 11 output file not found"
+
+    def test_fig12_variant_density_heatmap(self, variant_df, variant_figures_dir):
+        plot_fig12_variant_density_heatmap(variant_df)
+        assert any(f.startswith("12_") for f in os.listdir(variant_figures_dir)), \
+            "Fig 12 output file not found"
+
+    def test_fig13_variant_burden(self, variant_df, variant_figures_dir):
+        plot_fig13_variant_burden(variant_df, density_mode=False)
+        assert any(f.startswith("13_") for f in os.listdir(variant_figures_dir)), \
+            "Fig 13 output file not found"

@@ -12,10 +12,10 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`) with automated quality flags, paradox detection, and optional enrichment
+- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
-- Generate 10 figures with adaptive rendering for datasets from hundreds to millions of complexes
+- Generate up to 13 figures with adaptive rendering for datasets from hundreds to millions of complexes
 - Optional KDE density contour overlays and per-complex PAE heatmaps
 - PPI database ingestion: parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
@@ -24,7 +24,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Centralised STRING API client with rate limiting, retry/backoff, and response caching
 - Automatic API validation: ID resolution, enrichment, and database loading fall back to the STRING API when local data is incomplete (disable with `--no-api`)
 - Protein sequence clustering: STRING cluster parsing, UniProt-mapped cluster indexing, homologous pair detection, and optional API-based homology scores
-- 476-test suite (448 real + 28 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, BioPython SASA-based 4-class structural context classification (interface core/rim, surface, buried core), per-complex variant burden and enrichment analysis
+- 585-test suite (563 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -41,10 +42,11 @@ protein-complexes-toolkit/
 ├── overlap_analysis.py      # Database overlap computation and UpSet diagrams
 ├── string_api.py            # Centralised STRING API client (rate limiting, caching, retry)
 ├── protein_clustering.py    # Protein sequence clustering and homology detection
+├── variant_mapper.py        # Genetic variant mapping and structural context classification
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (448 tests + 28 future placeholders)
+├── tests/                   # Test suite (563 tests + 22 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -58,12 +60,24 @@ protein-complexes-toolkit/
 │   ├── test_multiprocessing.py
 │   ├── test_string_api.py
 │   ├── test_protein_clustering.py
+│   ├── test_variant_mapper.py
 │   └── offline_test_data/
-│       └── databases/                    # Small database excerpts for offline testing
-│           └── string_api_responses/     # Pre-captured API responses (7 JSON files)
+│       └── databases/                           # Small database excerpts for offline testing
+│           ├── string_api_responses/            # Pre-captured API responses (7 JSON files)
+│           ├── test_aliases.txt                 # STRING aliases excerpt
+│           ├── test_biogrid.tab3.txt            # BioGRID excerpt
+│           ├── test_humap.pairsWprob            # HuMAP excerpt
+│           ├── test_humap_malformed.pairsWprob  # Malformed HuMAP for edge-case tests
+│           ├── test_huri.tsv                    # HuRI excerpt
+│           ├── test_string_clusters.txt         # STRING clusters excerpt
+│           ├── test_string_links.txt            # STRING links excerpt
+│           ├── test_uniprot_variants.txt        # UniProt variants excerpt (20 rows)
+│           ├── test_clinvar_variants.txt        # ClinVar excerpt (6 rows)
+│           └── test_exac_constraint.txt         # ExAC constraint excerpt (5 rows)
 ├── data/                                 # External databases (not included in repo)
 │    ├── ppi/                             # PPI databases (see "Setting Up Data")
-│    └── clusters/                        # STRING sequence clusters (see "Setting Up Data")
+│    ├── clusters/                        # STRING sequence clusters (see "Setting Up Data")
+│    └── variants/                        # Variant databases (see "Setting Up Data")
 └── Test_Data/							  # Not included in repo (see "Setting Up Test Data")
 ```
 
@@ -96,6 +110,12 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                              (STRING sequence clusters,
                                               homologous pair detection,
                                               optional API homology scores)
+                                                           │
+                                                           ▼ (optional --variants)
+                                                 variant_mapper.py
+                                             (UniProt/ClinVar/ExAC variants,
+                                              SASA structural context,
+                                              interface variant enrichment)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -123,9 +143,9 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
-**visualise_results.py**: Generates up to 10 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays.
+**visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 (variant consequence flow, variant density heatmap, per-complex variant burden) are generated automatically when variant columns are present in the input CSV.
 
 **database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`. `validate_with_api()` spot-checks loaded IDs against the STRING API (disable with `--no-api`).
 
@@ -136,6 +156,8 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 **string_api.py**: Centralised STRING database API client. All STRING API interactions are routed through this module. Architecture is offline-first: local flat files remain the primary data source; the API is an automatic supplement for unresolved identifiers and validation. Features rate-limited requests (1s between calls), automatic retry with exponential backoff on HTTP 429/5xx, SHA256-keyed response caching (auto-enabled to `data/string_api_cache/`), and caller identity injection per STRING API TOS. Provides 7 public functions: `get_string_ids()`, `get_interaction_partners()`, `query_homology()`, `query_enrichment()`, `query_ppi_enrichment()`, `query_network()`, `get_version()`. Raises `StringAPIError` on failure for clean error propagation.
 
 **protein_clustering.py**: Parses STRING pre-computed protein sequence clusters and maps them to UniProt accessions via `IDMapper`. Defaults to `data/clusters/9606.clusters.proteins.v12.0.txt` when no `--clusters-file` is specified. Builds bidirectional cluster indices (cluster-to-proteins and protein-to-clusters) in both ENSP and UniProt space. `find_shared_clusters()` identifies sequence family relationships between protein pairs. `find_homologous_pairs()` discovers other protein pairs that share the same cluster combinations, with optional filtering against known interaction databases. Clusters exceeding `MAX_CLUSTER_SIZE_FOR_PAIRS` (500) are skipped during pair generation to avoid O(n^2) explosion from STRING's hierarchical mega-clusters (up to 144K UniProt members after isoform expansion). `annotate_results_with_clustering()` adds 7 CSV columns: union and intersection cluster IDs/counts, homologous pairs with counts, and a continuous homology bitscore from the STRING API. `enrich_with_homology_scores()` optionally queries the STRING API for paralogy bitscores using chunked batched deduplication (`HOMOLOGY_API_BATCH_SIZE = 100` proteins per API call; reduced from 500 because the STRING homology endpoint times out at larger batch sizes). `validate_clustering_mode()` accepts `'string'` and raises `NotImplementedError` for deferred `'foldseek'` and `'hybrid'` modes. Standalone CLI supports `--summary`, `--protein`, and `--pair` lookup modes.
+
+**variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using BioPython's Shrake-Rupley algorithm and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å from partner), `interface_rim` (4-8 Å), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires BioPython.
 
 
 ## Installation
@@ -160,7 +182,7 @@ The `data/` directory is **not included** in this repository due to the large si
 
 1. Create the directory structure:
 ```bash
-mkdir -p data/ppi data/clusters
+mkdir -p data/ppi data/clusters data/variants
 ```
 
 2. Download the following files into `data/ppi/`:
@@ -179,7 +201,15 @@ mkdir -p data/ppi data/clusters
 |------|--------|----------|
 | `9606.clusters.proteins.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.clusters.proteins.v12.0.txt.gz`, decompress |
 
-4. Verify the directory contents:
+4. Download variant database files into `data/variants/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `homo_sapiens_variation.txt` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/variants/](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/variants/) - download `homo_sapiens_variation.txt.gz`, decompress |
+| `variant_summary.txt` | ClinVar | [ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) - download `variant_summary.txt.gz`, decompress |
+| `forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt` | ExAC/gnomAD | [gnomad.broadinstitute.org/downloads](https://gnomad.broadinstitute.org/downloads) - under "Gene constraint scores TSV", download and decompress |
+
+5. Verify the directory contents:
 ```
 data/
 ├── ppi/
@@ -188,8 +218,12 @@ data/
 │   ├── BIOGRID-ALL-5.0.253.tab3.txt          (~1.48 GB)
 │   ├── HuRI.tsv                              (~1.6 MB)
 │   └── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
-└── clusters/
-    └── 9606.clusters.proteins.v12.0.txt      (~40 MB)
+├── clusters/
+│   └── 9606.clusters.proteins.v12.0.txt      (~40 MB)
+└── variants/
+    ├── homo_sapiens_variation.txt             (~2.2 GB)
+    ├── variant_summary.txt                    (~1.1 GB)
+    └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
 ```
 
 
@@ -323,6 +357,31 @@ python protein_clustering.py --clusters-file data/clusters/9606.clusters.protein
 python protein_clustering.py --clusters-file data/clusters/9606.clusters.proteins.v12.0.txt --aliases data/ppi/9606.protein.aliases.v12.0.txt --pair P04637 Q00987
 ```
 
+### Variant Mapping
+
+```bash
+# With variant mapping (requires --interface --pae --enrich)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants
+
+# With custom variant database directory
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants data/variants/
+
+# Without ClinVar enrichment (faster, UniProt + ExAC only)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --no-clinvar
+
+# Full pipeline: enrichment + databases + clustering + variants
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants
+
+# Standalone: variant database summary
+python variant_mapper.py summary --variants-dir data/variants/
+
+# Standalone: look up variants for a protein
+python variant_mapper.py lookup --variants-dir data/variants/ --protein P04637
+
+# Standalone: map variants to interfaces from JSONL export
+python variant_mapper.py map --interfaces interfaces.jsonl --pdb-dir /path/to/models --variants-dir data/variants/ --output variant_analysis.csv
+```
+
 ### Database Ingestion & ID Mapping
 
 ```bash
@@ -398,6 +457,9 @@ python -m pytest tests/ -m "api" -v
 # Clustering tests
 python -m pytest tests/ -m "clustering" -v
 
+# Variant mapping tests
+python -m pytest tests/ -m "variants" -v
+
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
 ```
@@ -425,7 +487,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (48 base columns, 60 with enrichment, 67 with clustering)
+### CSV (48 base columns, 60 with enrichment, 67 with clustering, 79 with variants)
 
 The main output CSV groups columns into:
 
@@ -441,6 +503,7 @@ The main output CSV groups columns into:
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |
+| **Variants** (with `--variants`) | n_variants_a/b, n_interface_variants_a/b, n_pathogenic_interface_a/b, interface_variant_enrichment_a/b, variant_details_a/b, pLI_a/b, mis_z_a/b |
 
 ### JSONL Interface Export
 
@@ -462,8 +525,11 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 8 | Metric Disagreement | Scatter highlighting complexes with conflicting quality signals |
 | 9 | Correlation & Flags | Metric correlation heatmap with flag landscape |
 | 10 | Chain-Count Profile | Violin + scatter of quality by chain count |
+| 11 | Variant Consequence Flow | Grouped stacked bar: structural context × clinical significance |
+| 12 | Variant Density Heatmap | Heatmap + grouped bar of variant density across structural contexts |
+| 13 | Per-Complex Variant Burden | Scatter + horizontal bar of variant burden vs quality and top-20 enrichment |
 
-Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column.
+Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`.
 
 
 ## Roadmap
@@ -475,9 +541,9 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
 - **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
 - **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
+- **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, BioPython SASA-based 4-class structural context classification (interface core/rim, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
 
 ### Planned
-- **Aim 4 - Variant Mapping:** Map ClinVar and gnomAD variants onto interface residues with structural context classification
 - **Aim 6 - Stability Scoring:** Integrate ProtVar, EVE scores, and FoldX for predicted structural impact
 - **Disease & Pathway Integration:** Map complexes to KEGG/Reactome pathways, build interaction networks
 - **PyMOL Visualisation:** Generate `.pml` scripts for batch structure rendering with interface highlighting
@@ -486,7 +552,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **476 tests** across 13 modules (448 real + 28 future placeholders):
+The test suite contains **585 tests** across 15 modules (563 real + 22 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -494,18 +560,19 @@ The test suite contains **476 tests** across 13 modules (448 real + 28 future pl
 | test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
 | test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
 | test_toolkit.py | 54 | File discovery, quality classification, CSV, enrichment, sequences |
-| test_visualise_results.py | 23 | Figure generation, data loading, CLI |
+| test_visualise_results.py | 36 | Figure generation, variant detail parsing, Figs 11-13, data loading, CLI |
 | test_integration.py | 8 | Cross-module pipeline, data flow |
 | test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
 | test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
 | test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
 | test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
 | test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
-| test_future_aims.py | 7 + 28 | 7 real database tests + 28 future placeholders |
+| test_variant_mapper.py | 90 | HGVS parsing, variant loading, SASA, structural context, enrichment, CLI, toolkit integration |
+| test_future_aims.py | 7 + 22 | 7 real database tests + 22 future placeholders |
 
-**Results:** 447 passing, 1 skipped (Fig 10 - all test complexes are dimers), 28 future placeholders (deselected by default)
+**Results:** 562 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `future` (unimplemented features)
 
 
 ## Acknowledgements

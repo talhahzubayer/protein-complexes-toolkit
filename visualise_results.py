@@ -23,6 +23,11 @@ Figures (require full 44-column interface CSV):
 Figures (require n_chains column from multi-chain pipeline):
  10. Chain-Count Quality Profile  (violin + scatter by chain count)
 
+Figures (require variant data from --variants):
+ 11. Variant Consequence Flow  (grouped stacked bar)
+ 12. Variant Density Heatmap  (heatmap + density bar)
+ 13. Per-Complex Variant Burden  (scatter + ranked bar)
+
 Per-complex PAE heatmaps are available on demand via --pae-heatmaps.
 When a matching PDB file is found, chain boundaries are drawn and the best interacting chain pair is highlighted.
 
@@ -97,6 +102,29 @@ PAE_FIGURE_SIZE = (8, 7)
 PAE_VMIN = 0
 PAE_VMAX = 30  # Angstroms
 
+# Variant visualisation constants (Figs 11-13, require --variants CSV columns)
+CONTEXT_ORDER = ['interface_core', 'interface_rim', 'surface_non_interface', 'buried_core']
+CONTEXT_LABELS = {
+    'interface_core': 'Interface Core\n(<4\u00c5)',
+    'interface_rim': 'Interface Rim\n(4\u20138\u00c5)',
+    'surface_non_interface': 'Surface\n(Non-Interface)',
+    'buried_core': 'Buried Core',
+}
+CONTEXT_COLORS = {
+    'interface_core': '#e74c3c',
+    'interface_rim': '#f39c12',
+    'surface_non_interface': '#3498db',
+    'buried_core': '#95a5a6',
+}
+SIGNIFICANCE_ORDER = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Benign', 'Unknown']
+SIGNIFICANCE_COLORS = {
+    'Pathogenic': '#c0392b',
+    'Likely pathogenic': '#e67e22',
+    'VUS': '#7f8c8d',
+    'Benign': '#27ae60',
+    'Unknown': '#bdc3c7',
+}
+
 
 #---------------------Adaptive Scatter Sizing----------------------------------------------
 
@@ -155,6 +183,7 @@ def detect_columns(df: pd.DataFrame) -> dict:
         'has_pae_interface': 'interface_pae_mean' in columns,
         'has_composite': 'interface_confidence_score' in columns,
         'has_chain_info': 'n_chains' in columns,
+        'has_variant_data': 'n_variants_a' in columns and 'variant_details_a' in columns,
     }
 
 #------------------------Data Loading-----------------------------------
@@ -365,6 +394,73 @@ def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
         return mask
     mask = ((df['iptm'] >= IPTM_HIGH) & (df['pdockq'] >= PDOCKQ_HIGH) & (df['plddt_below50_fraction'] >= DISORDER_SUBSTANTIAL))
     return mask.fillna(False)
+
+#--------------------------------------------------------------Variant Detail Parsing-----------------------------------------------------------
+
+def _normalise_significance(raw: str) -> str:
+    """Map a raw ClinVar significance string to one of 5 display buckets."""
+    low = raw.lower().strip()
+    if 'pathogenic' in low and 'likely' not in low and 'benign' not in low:
+        return 'Pathogenic'
+    if 'likely pathogenic' in low:
+        return 'Likely pathogenic'
+    if 'benign' in low:
+        return 'Benign'
+    if 'uncertain' in low or low == 'vus':
+        return 'VUS'
+    return 'Unknown'
+
+
+def _parse_variant_details(details_str) -> list:
+    """Parse a pipe-separated variant_details string into structured records.
+
+    Input format: 'K81P:interface_core:Pathogenic|R123W:surface_non_interface:Benign|...(+5 more)'
+    Skips overflow tokens like '...(+N more)'. Returns [] for empty/NaN input.
+
+    Returns:
+        List of dicts with keys: mutation, context, significance.
+    """
+    if not isinstance(details_str, str) or not details_str.strip():
+        return []
+    records = []
+    for token in details_str.split('|'):
+        token = token.strip()
+        if not token or token.startswith('...'):
+            continue
+        parts = token.split(':', 2)
+        if len(parts) == 3:
+            records.append({
+                'mutation': parts[0],
+                'context': parts[1],
+                'significance': _normalise_significance(parts[2]),
+            })
+    return records
+
+
+def _aggregate_all_variants(df: pd.DataFrame) -> pd.DataFrame:
+    """Parse variant_details_a/b across all rows into a single flat DataFrame.
+
+    Returns:
+        DataFrame with columns: complex_name, chain, mutation, context, significance.
+        Empty DataFrame (with correct columns) if no variants are found.
+    """
+    rows = []
+    for _, row in df.iterrows():
+        cname = row.get('complex_name', '')
+        for chain_suffix in ('a', 'b'):
+            col = f'variant_details_{chain_suffix}'
+            if col not in df.columns:
+                continue
+            for rec in _parse_variant_details(row.get(col, '')):
+                rows.append({
+                    'complex_name': cname,
+                    'chain': chain_suffix,
+                    **rec,
+                })
+    if not rows:
+        return pd.DataFrame(columns=['complex_name', 'chain', 'mutation', 'context', 'significance'])
+    return pd.DataFrame(rows)
+
 
 #--------------------------------------------------------------PAE Heatmaps-----------------------------------------------------------
 
@@ -1343,6 +1439,236 @@ def plot_fig10_chain_count_profile(df: pd.DataFrame, density_mode: bool = False)
     figure.suptitle("Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?", fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, '10_Chain_Count_Profile.png')
 
+#-----------------------------------------------Variant Figures (11-13)------------------------------------------------------------
+
+def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
+    """Fig 11: How are variant consequences distributed across structural regions?
+
+    Grouped stacked bar chart. X-axis: 4 structural contexts (interface_core,
+    interface_rim, surface_non_interface, buried_core). Stacked bars: clinical
+    significance categories. Percentage annotations on segments > 5%.
+    """
+    var_df = _aggregate_all_variants(df)
+    if len(var_df) < 10:
+        print("  Skipping Fig 11: fewer than 10 parsed variants.")
+        return
+
+    # Cross-tabulate: context (rows) x significance (cols)
+    # Ensure all categories are present even if counts are zero
+    var_df['context'] = pd.Categorical(var_df['context'], categories=CONTEXT_ORDER, ordered=True)
+    var_df['significance'] = pd.Categorical(var_df['significance'], categories=SIGNIFICANCE_ORDER, ordered=True)
+    ct = pd.crosstab(var_df['context'], var_df['significance'], dropna=False)
+    # Reindex to guarantee order
+    ct = ct.reindex(index=CONTEXT_ORDER, columns=SIGNIFICANCE_ORDER, fill_value=0)
+
+    figure, ax = plt.subplots(figsize=(10, 6))
+
+    x_positions = np.arange(len(CONTEXT_ORDER))
+    bar_width = 0.6
+
+    bottoms = np.zeros(len(CONTEXT_ORDER))
+    for sig in SIGNIFICANCE_ORDER:
+        counts = ct[sig].values.astype(float)
+        totals = ct.sum(axis=1).values.astype(float)
+        pcts = np.divide(counts, totals, out=np.zeros_like(counts), where=totals > 0) * 100
+        ax.bar(x_positions, pcts, bar_width, bottom=bottoms,
+               color=SIGNIFICANCE_COLORS[sig], edgecolor='white', linewidth=0.5,
+               label=sig)
+        # Annotate segments > 5%
+        for i, pct in enumerate(pcts):
+            if pct > 5:
+                text_y = bottoms[i] + pct / 2
+                text_color = 'white' if pct > 10 else 'black'
+                ax.text(x_positions[i], text_y, f'{pct:.1f}%',
+                        ha='center', va='center', fontsize=9,
+                        fontweight='bold', color=text_color)
+        bottoms += pcts
+
+    # X-axis labels with counts
+    context_totals = ct.sum(axis=1).values
+    x_labels = [f'{CONTEXT_LABELS[c]}\n(n={int(context_totals[i])})'
+                for i, c in enumerate(CONTEXT_ORDER)]
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(x_labels, fontsize=FONT_TICK)
+    ax.set_ylim(0, 105)
+
+    ax.legend(fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
+    _apply_common_style(ax, "Variant Consequence Distribution Across Structural Regions",
+                        '', 'Percentage (%)', grid=False)
+
+    figure.suptitle("", fontsize=1)  # Prevent tight_layout warning
+    _save_figure(figure, '11_Variant_Consequence_Flow.png')
+
+
+def plot_fig12_variant_density_heatmap(df: pd.DataFrame) -> None:
+    """Fig 12: Are pathogenic variants enriched at protein-protein interfaces?
+
+    Panel (a): Heatmap of variant counts — rows: structural context (4),
+               columns: clinical significance (5 buckets). Annotated with counts.
+    Panel (b): Grouped bar chart — variants per structural context, total vs pathogenic.
+    """
+    var_df = _aggregate_all_variants(df)
+    if len(var_df) < 5:
+        print("  Skipping Fig 12: fewer than 5 parsed variants.")
+        return
+
+    var_df['context'] = pd.Categorical(var_df['context'], categories=CONTEXT_ORDER, ordered=True)
+    var_df['significance'] = pd.Categorical(var_df['significance'], categories=SIGNIFICANCE_ORDER, ordered=True)
+    ct = pd.crosstab(var_df['context'], var_df['significance'], dropna=False)
+    ct = ct.reindex(index=CONTEXT_ORDER, columns=SIGNIFICANCE_ORDER, fill_value=0)
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # ── Panel (a): Heatmap ──
+    data = ct.values.astype(float)
+    im = ax_a.imshow(data, cmap='YlOrRd', aspect='auto')
+
+    # Annotate cells with counts
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            val = int(data[i, j])
+            # White text on dark cells
+            text_color = 'white' if val > data.max() * 0.5 else 'black'
+            ax_a.text(j, i, str(val), ha='center', va='center',
+                      fontsize=10, fontweight='bold', color=text_color)
+
+    ax_a.set_xticks(range(len(SIGNIFICANCE_ORDER)))
+    ax_a.set_xticklabels(SIGNIFICANCE_ORDER, rotation=35, ha='right', fontsize=FONT_TICK)
+    ax_a.set_yticks(range(len(CONTEXT_ORDER)))
+    context_short = ['Interface\nCore', 'Interface\nRim', 'Surface', 'Buried\nCore']
+    ax_a.set_yticklabels(context_short, fontsize=FONT_TICK)
+    figure.colorbar(im, ax=ax_a, shrink=0.8, label='Variant Count')
+    ax_a.set_title("(a) Context \u00d7 Significance", fontsize=FONT_TITLE, fontweight='bold', pad=12)
+
+    # ── Panel (b): Grouped bar — total vs pathogenic per context ──
+    x_pos = np.arange(len(CONTEXT_ORDER))
+    bar_w = 0.35
+
+    total_per_context = ct.sum(axis=1).values.astype(float)
+    pathogenic_per_context = (ct['Pathogenic'].values + ct['Likely pathogenic'].values).astype(float)
+
+    bars_total = ax_b.bar(x_pos - bar_w / 2, total_per_context, bar_w,
+                          color=[CONTEXT_COLORS[c] for c in CONTEXT_ORDER],
+                          edgecolor='white', linewidth=0.5, label='All Variants')
+    bars_path = ax_b.bar(x_pos + bar_w / 2, pathogenic_per_context, bar_w,
+                         color='#c0392b', edgecolor='white', linewidth=0.5,
+                         alpha=0.85, label='Pathogenic + Likely Path.')
+
+    # Annotate bar values
+    for bar_set in (bars_total, bars_path):
+        for bar in bar_set:
+            h = bar.get_height()
+            if h > 0:
+                ax_b.text(bar.get_x() + bar.get_width() / 2, h + 0.3,
+                          str(int(h)), ha='center', va='bottom', fontsize=9)
+
+    ax_b.set_xticks(x_pos)
+    ax_b.set_xticklabels(context_short, fontsize=FONT_TICK)
+    ax_b.legend(fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
+    _apply_common_style(ax_b, "(b) Variant Density by Context", '', 'Number of Variants')
+
+    figure.suptitle("Variant Density: Interface vs Non-Interface", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '12_Variant_Density_Heatmap.png')
+
+
+def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 13: Does variant burden correlate with predicted complex quality?
+
+    Panel (a): Scatter — x: composite score (or ipTM fallback), y: total interface
+               variants. Point colour: quality tier, size: pathogenic count.
+    Panel (b): Horizontal bar — top 20 complexes by interface_variant_enrichment,
+               coloured by quality tier. Baseline at enrichment = 1.0.
+    """
+    # Compute total interface variants per complex
+    n_if_a = pd.to_numeric(df.get('n_interface_variants_a', pd.Series(dtype=float)), errors='coerce').fillna(0)
+    n_if_b = pd.to_numeric(df.get('n_interface_variants_b', pd.Series(dtype=float)), errors='coerce').fillna(0)
+    total_if_variants = n_if_a + n_if_b
+
+    if total_if_variants.sum() == 0:
+        print("  Skipping Fig 13: no interface variants in dataset.")
+        return
+
+    # Choose x-axis metric
+    if 'interface_confidence_score' in df.columns:
+        x_col = 'interface_confidence_score'
+        x_label = 'Composite Score'
+    else:
+        x_col = 'iptm'
+        x_label = 'ipTM'
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # ── Panel (a): Scatter ──
+    plot_mask = df[x_col].notna()
+    x_vals = df.loc[plot_mask, x_col].values
+    y_vals = total_if_variants[plot_mask].values
+
+    n_pathogenic = pd.to_numeric(df.get('n_pathogenic_interface_variants', pd.Series(dtype=float)),
+                                 errors='coerce').fillna(0)
+    base_size, base_alpha = _adaptive_scatter_params(len(x_vals))
+
+    # Size: scale by pathogenic count (min 1 so all points are visible)
+    sizes = (n_pathogenic[plot_mask].values.clip(min=0) + 1) * base_size
+
+    # Colour by quality tier
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+    colors = df.loc[plot_mask, tier_col].map(TIER_COLORS).fillna('#bdc3c7').values
+
+    _timed_scatter(ax_a, x_vals, y_vals, len(x_vals), fig_label='Fig 13a',
+                   c=colors, s=sizes, alpha=base_alpha, edgecolors='white', linewidths=0.3)
+
+    if density_mode:
+        _overlay_kde_contours(ax_a, x_vals.astype(float), y_vals.astype(float))
+
+    # Legend
+    if tier_col in df.columns:
+        legend_handles = []
+        for tier in TIER_ORDER:
+            count = (df.loc[plot_mask, tier_col] == tier).sum()
+            if count > 0:
+                legend_handles.append(
+                    Line2D([0], [0], marker='o', color='w',
+                           markerfacecolor=TIER_COLORS[tier],
+                           markeredgecolor='white', markersize=9,
+                           label=f'{tier} (n={count})'))
+        if legend_handles:
+            ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
+
+    _apply_common_style(ax_a, "(a) Interface Variant Burden vs Quality", x_label, 'Total Interface Variants')
+
+    # ── Panel (b): Top-20 enrichment bar chart ──
+    enrichment = pd.to_numeric(df.get('interface_variant_enrichment', pd.Series(dtype=float)),
+                               errors='coerce')
+    enrich_mask = enrichment.notna() & (enrichment > 0)
+    if enrich_mask.sum() == 0:
+        ax_b.text(0.5, 0.5, 'No enrichment data available',
+                  ha='center', va='center', transform=ax_b.transAxes, fontsize=12)
+        _apply_common_style(ax_b, "(b) Top Enriched Complexes", 'Enrichment Fold-Change', '')
+    else:
+        enrich_df = df.loc[enrich_mask, ['complex_name', tier_col]].copy()
+        enrich_df['enrichment'] = enrichment[enrich_mask].values
+        enrich_df = enrich_df.sort_values('enrichment', ascending=False).head(20)
+
+        y_pos = np.arange(len(enrich_df))
+        bar_colors = enrich_df[tier_col].map(TIER_COLORS).fillna('#bdc3c7').values
+
+        # Truncate long complex names
+        labels = [n[:25] + '...' if len(str(n)) > 25 else str(n)
+                  for n in enrich_df['complex_name'].values]
+
+        ax_b.barh(y_pos, enrich_df['enrichment'].values, color=bar_colors,
+                  edgecolor='white', linewidth=0.5)
+        ax_b.set_yticks(y_pos)
+        ax_b.set_yticklabels(labels, fontsize=8)
+        ax_b.invert_yaxis()
+        ax_b.axvline(x=1.0, color='grey', linestyle='--', linewidth=1, alpha=0.7, label='No enrichment')
+        _apply_common_style(ax_b, "(b) Top Enriched Complexes", 'Enrichment Fold-Change', '', grid=True)
+
+    figure.suptitle("Per-Complex Variant Burden and Interface Enrichment",
+                    fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '13_Variant_Burden.png')
+
+
 #-----------------------------------------------Main Execution--------------------------------------------------------------------
 
 def parse_arguments() -> argparse.Namespace:
@@ -1446,6 +1772,7 @@ def main() -> None:
     print(f"  Interface PAE:     {'Yes' if col_flags['has_pae_interface'] else 'No'}")
     print(f"  Composite score:   {'Yes' if col_flags['has_composite'] else 'No'}")
     print(f"  Chain info:        {'Yes' if col_flags['has_chain_info'] else 'No'}")
+    print(f"  Variant data:      {'Yes' if col_flags['has_variant_data'] else 'No'}")
 
     # Chain count summary
     if col_flags['has_chain_info']:
@@ -1515,6 +1842,20 @@ def main() -> None:
     if col_flags['has_chain_info']:
         print("Fig 10 - Chain-Count Quality Profile")
         plot_fig10_chain_count_profile(df, density_mode=args.density)
+        figures_generated += 1
+
+    # Variant figures (require variant data from --variants)
+    if col_flags['has_variant_data']:
+        print("Fig 11 - Variant Consequence Flow")
+        plot_fig11_variant_consequence_flow(df)
+        figures_generated += 1
+
+        print("Fig 12 - Variant Density Heatmap")
+        plot_fig12_variant_density_heatmap(df)
+        figures_generated += 1
+
+        print("Fig 13 - Variant Burden")
+        plot_fig13_variant_burden(df, density_mode=args.density)
         figures_generated += 1
 
     # On-demand: Per-complex PAE heatmaps

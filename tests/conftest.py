@@ -290,6 +290,32 @@ def id_mapper(test_aliases_path):
     return IDMapper(str(test_aliases_path))
 
 
+# ── Variant Test Data Fixtures ───────────────────────────────────
+
+@pytest.fixture(scope="session")
+def test_uniprot_variants_path(test_db_dir):
+    """Return the path to the test UniProt variants excerpt."""
+    path = test_db_dir / "test_uniprot_variants.txt"
+    assert path.exists(), f"Test UniProt variants file not found: {path}"
+    return path
+
+
+@pytest.fixture(scope="session")
+def test_clinvar_path(test_db_dir):
+    """Return the path to the test ClinVar variants excerpt."""
+    path = test_db_dir / "test_clinvar_variants.txt"
+    assert path.exists(), f"Test ClinVar variants file not found: {path}"
+    return path
+
+
+@pytest.fixture(scope="session")
+def test_exac_path(test_db_dir):
+    """Return the path to the test ExAC constraint excerpt."""
+    path = test_db_dir / "test_exac_constraint.txt"
+    assert path.exists(), f"Test ExAC constraint file not found: {path}"
+    return path
+
+
 # ── Clustering Test Data Fixtures ────────────────────────────────
 
 @pytest.fixture(scope="session")
