@@ -384,3 +384,15 @@ def test_protvar_responses_dir(test_db_dir):
     path = test_db_dir / "protvar_responses"
     assert path.exists(), f"Missing test data: {path}"
     return path
+
+
+@pytest.fixture(scope="session")
+def test_foldx_outputs_dir(test_db_dir):
+    """Return the directory containing FoldX .fxout test output files.
+
+    Contains sample BuildModel and AnalyseComplex output:
+        Dif_test_Repair.fxout, Interaction_test_Repair_AC.fxout
+    """
+    path = test_db_dir / "foldx_outputs"
+    assert path.exists(), f"Missing test data: {path}"
+    return path

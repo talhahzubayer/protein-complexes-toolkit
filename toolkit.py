@@ -620,7 +620,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False, include_foldx: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -642,9 +642,12 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
     if include_protvar:
         from protvar_client import CSV_FIELDNAMES_PROTVAR
         fieldnames.extend(CSV_FIELDNAMES_PROTVAR)
+    if include_foldx:
+        from foldx_scorer import CSV_FIELDNAMES_FOLDX
+        fieldnames.extend(CSV_FIELDNAMES_FOLDX)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False, include_foldx: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -656,8 +659,9 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_variants: Whether to include variant mapping columns.
         include_stability: Whether to include stability scoring columns (EVE scores).
         include_protvar: Whether to include ProtVar API cross-validation columns.
+        include_foldx: Whether to include FoldX local stability prediction columns.
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar, include_foldx)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -1274,6 +1278,15 @@ Examples:
                         help="Cross-validate variants with ProtVar API (AlphaMissense scores, "
                              "interaction predictions, FoldX ddG). Requires --variants. "
                              "Incompatible with --no-api. Default cache: data/protvar_cache/")
+    parser.add_argument("--foldx", metavar="CACHE_DIR",
+                        nargs='?', const='__default__', default=None,
+                        help="Run local FoldX stability predictions on interface variants. "
+                             "Requires --variants and the FoldX binary. "
+                             "Default cache: data/foldx_cache/")
+    parser.add_argument("--foldx-binary", metavar="PATH",
+                        default=None,
+                        help="Path to FoldX executable. "
+                             "Default: foldx5_Windows/foldx_1_20270131.exe")
     return parser
 
 
@@ -1335,6 +1348,24 @@ def main() -> None:
             from protvar_client import PROTVAR_API_DEFAULT_CACHE_DIR
             args.protvar = str(PROTVAR_API_DEFAULT_CACHE_DIR)
     args._protvar_enabled = args.protvar is not None
+
+    if args.foldx is not None:
+        if not getattr(args, '_variants_enabled', False):
+            print("Error: --foldx requires --variants", file=sys.stderr)
+            sys.exit(1)
+        if args.foldx == '__default__':
+            from foldx_scorer import DEFAULT_FOLDX_CACHE_DIR
+            args.foldx = str(DEFAULT_FOLDX_CACHE_DIR)
+        # Validate FoldX binary exists
+        from foldx_scorer import validate_foldx_binary, DEFAULT_FOLDX_BINARY, DEFAULT_ROTABASE, FoldXError
+        foldx_bin = Path(args.foldx_binary) if args.foldx_binary else DEFAULT_FOLDX_BINARY
+        foldx_rotabase = foldx_bin.parent / "rotabase.txt"
+        try:
+            validate_foldx_binary(foldx_bin, foldx_rotabase)
+        except FoldXError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    args._foldx_enabled = args.foldx is not None
 
     if args.resume:
         args.checkpoint = True
@@ -1669,6 +1700,34 @@ def main() -> None:
         print(f"ProtVar cross-validation complete: {len(results)} complexes "
               f"annotated in {protvar_elapsed:.1f}s", file=sys.stderr)
 
+    # FoldX local stability predictions
+    include_foldx = False
+    if getattr(args, '_foldx_enabled', False):
+        from foldx_scorer import (
+            annotate_results_with_foldx, DEFAULT_FOLDX_BINARY, DEFAULT_ROTABASE,
+        )
+        foldx_start = time.time()
+        foldx_bin = Path(args.foldx_binary) if args.foldx_binary else DEFAULT_FOLDX_BINARY
+        foldx_rotabase = foldx_bin.parent / "rotabase.txt"
+        pdb_dir = Path(args.dir)
+
+        print(f"Running FoldX local stability predictions...", file=sys.stderr)
+        print(f"  Binary: {foldx_bin}", file=sys.stderr)
+        print(f"  Cache: {args.foldx}", file=sys.stderr)
+
+        annotate_results_with_foldx(
+            results, pdb_dir,
+            binary_path=foldx_bin,
+            rotabase_path=foldx_rotabase,
+            cache_dir=Path(args.foldx),
+            verbose=True,
+        )
+
+        include_foldx = True
+        foldx_elapsed = time.time() - foldx_start
+        print(f"FoldX predictions complete: {len(results)} complexes annotated "
+              f"in {foldx_elapsed:.1f}s", file=sys.stderr)
+
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
@@ -1680,6 +1739,7 @@ def main() -> None:
         include_variants=include_variants,
         include_stability=include_stability,
         include_protvar=include_protvar,
+        include_foldx=include_foldx,
     )
 
     print(f"\n{'=' * 60}")
