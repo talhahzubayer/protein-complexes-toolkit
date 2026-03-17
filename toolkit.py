@@ -620,7 +620,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -639,9 +639,12 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
     if include_stability:
         from stability_scorer import CSV_FIELDNAMES_STABILITY
         fieldnames.extend(CSV_FIELDNAMES_STABILITY)
+    if include_protvar:
+        from protvar_client import CSV_FIELDNAMES_PROTVAR
+        fieldnames.extend(CSV_FIELDNAMES_PROTVAR)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -652,8 +655,9 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_clustering: Whether to include clustering columns (cluster IDs, homologous pairs).
         include_variants: Whether to include variant mapping columns.
         include_stability: Whether to include stability scoring columns (EVE scores).
+        include_protvar: Whether to include ProtVar API cross-validation columns.
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -1265,6 +1269,11 @@ Examples:
                         nargs='?', const='__default__', default=None,
                         help="Score variant stability using EVE evolutionary predictions. "
                              "Requires --variants. Default: data/stability/")
+    parser.add_argument("--protvar", metavar="CACHE_DIR",
+                        nargs='?', const='__default__', default=None,
+                        help="Cross-validate variants with ProtVar API (AlphaMissense scores, "
+                             "interaction predictions, FoldX ddG). Requires --variants. "
+                             "Incompatible with --no-api. Default cache: data/protvar_cache/")
     return parser
 
 
@@ -1313,6 +1322,19 @@ def main() -> None:
             from stability_scorer import DEFAULT_STABILITY_DIR
             args.stability = str(DEFAULT_STABILITY_DIR)
     args._stability_enabled = args.stability is not None
+
+    if args.protvar is not None:
+        if not getattr(args, '_variants_enabled', False):
+            print("Error: --protvar requires --variants", file=sys.stderr)
+            sys.exit(1)
+        if args.no_api:
+            print("Error: --protvar requires API access, incompatible with --no-api",
+                  file=sys.stderr)
+            sys.exit(1)
+        if args.protvar == '__default__':
+            from protvar_client import PROTVAR_API_DEFAULT_CACHE_DIR
+            args.protvar = str(PROTVAR_API_DEFAULT_CACHE_DIR)
+    args._protvar_enabled = args.protvar is not None
 
     if args.resume:
         args.checkpoint = True
@@ -1611,6 +1633,42 @@ def main() -> None:
         print(f"Stability scoring complete: {len(results)} complexes annotated "
               f"in {stability_elapsed:.1f}s", file=sys.stderr)
 
+    # ProtVar API cross-validation (scores, interactions, FoldX ΔΔG)
+    include_protvar = False
+    if getattr(args, '_protvar_enabled', False):
+        from protvar_client import (
+            build_protvar_index, annotate_results_with_protvar,
+            _parse_variant_details_for_protvar,
+        )
+        protvar_start = time.time()
+
+        # Collect (accession, position) pairs from variant details
+        acc_positions: dict[str, set[int]] = {}
+        for row in results:
+            for suffix in ('a', 'b'):
+                acc = row.get(f'protein_{suffix}', '')
+                details = row.get(f'variant_details_{suffix}', '')
+                if acc and details:
+                    base = acc.split('-')[0] if '-' in acc else acc
+                    for _ref, pos, _alt in _parse_variant_details_for_protvar(details):
+                        acc_positions.setdefault(base, set()).add(pos)
+
+        n_proteins = len(acc_positions)
+        n_positions = sum(len(ps) for ps in acc_positions.values())
+        print(f"Querying ProtVar API for {n_positions} positions across "
+              f"{n_proteins} proteins...", file=sys.stderr)
+
+        protvar_index = build_protvar_index(
+            acc_positions, cache_dir=args.protvar, verbose=True,
+        )
+
+        annotate_results_with_protvar(results, protvar_index, verbose=True)
+
+        include_protvar = True
+        protvar_elapsed = time.time() - protvar_start
+        print(f"ProtVar cross-validation complete: {len(results)} complexes "
+              f"annotated in {protvar_elapsed:.1f}s", file=sys.stderr)
+
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
@@ -1621,6 +1679,7 @@ def main() -> None:
         include_clustering=include_clustering,
         include_variants=include_variants,
         include_stability=include_stability,
+        include_protvar=include_protvar,
     )
 
     print(f"\n{'=' * 60}")

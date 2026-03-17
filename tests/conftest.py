@@ -371,3 +371,16 @@ def test_eve_dir(test_db_dir):
     if not dst.exists():
         shutil.copy2(src, dst)
     return eve_test_dir
+
+
+@pytest.fixture(scope="session")
+def test_protvar_responses_dir(test_db_dir):
+    """Return the directory containing ProtVar API response test data.
+
+    Contains pre-captured JSON responses for offline testing:
+        score_P61981_4.json, interaction_P61981_4.json, foldx_P61981_4.json
+        score_P24534_81.json, interaction_P24534_81.json, foldx_P24534_81.json
+    """
+    path = test_db_dir / "protvar_responses"
+    assert path.exists(), f"Missing test data: {path}"
+    return path

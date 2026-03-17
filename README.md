@@ -12,7 +12,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`) with automated quality flags, paradox detection, and optional enrichment
+- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate up to 13 figures with adaptive rendering for datasets from hundreds to millions of complexes
@@ -26,7 +26,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Protein sequence clustering: STRING cluster parsing, UniProt-mapped cluster indexing, homologous pair detection, and optional API-based homology scores
 - Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis
 - EVE stability scoring: evolutionary variant effect predictions mapped to pipeline variants via UniProt ID mapping, with per-chain EVE score summaries and pathogenicity classification
-- 653-test suite (631 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- ProtVar API cross-validation: AlphaMissense pathogenicity scores, interaction predictions with pDockQ, and pre-computed FoldX ddG for interface variant positions
+- 721-test suite (699 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -45,10 +46,11 @@ protein-complexes-toolkit/
 ├── protein_clustering.py    # Protein sequence clustering and homology detection
 ├── variant_mapper.py        # Genetic variant mapping and structural context classification
 ├── stability_scorer.py      # EVE stability scoring and variant effect predictions
+├── protvar_client.py        # ProtVar API client (AlphaMissense, FoldX, interaction predictions)
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (631 tests + 22 future placeholders)
+├── tests/                   # Test suite (699 tests + 22 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -64,9 +66,11 @@ protein-complexes-toolkit/
 │   ├── test_protein_clustering.py
 │   ├── test_variant_mapper.py
 │   ├── test_stability_scorer.py
+│   ├── test_protvar_client.py
 │   └── offline_test_data/
 │       └── databases/                           # Small database excerpts for offline testing
 │           ├── string_api_responses/            # Pre-captured API responses (7 JSON files)
+│           ├── protvar_responses/               # Pre-captured ProtVar API responses (6 JSON files)
 │           ├── test_aliases.txt                 # STRING aliases excerpt
 │           ├── test_biogrid.tab3.txt            # BioGRID excerpt
 │           ├── test_humap.pairsWprob            # HuMAP excerpt
@@ -83,9 +87,11 @@ protein-complexes-toolkit/
 │    ├── ppi/                             # PPI databases (see "Setting Up Data")
 │    ├── clusters/                        # STRING sequence clusters (see "Setting Up Data")
 │    ├── variants/                        # Variant databases (see "Setting Up Data")
-│    └── stability/                       # Stability prediction data (see "Setting Up Data")
-│         ├── HUMAN_9606_idmapping.dat    # UniProt ID mapping (accession -> entry name)
-│         └── EVE_all_data/               # EVE variant effect scores (3,211 CSVs)
+│    ├── stability/                       # Stability prediction data (see "Setting Up Data")
+│    │    ├── HUMAN_9606_idmapping.dat    # UniProt ID mapping (accession -> entry name)
+│    │    └── EVE_all_data/               # EVE variant effect scores (3,211 CSVs)
+│    ├── string_api_cache/                # STRING API response cache (auto-generated)
+│    └── protvar_cache/                   # ProtVar API response cache (auto-generated)
 └── Test_Data/							  # Not included in repo (see "Setting Up Test Data")
 ```
 
@@ -131,6 +137,12 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                              (EVE evolutionary variant
                                               effect predictions,
                                               pathogenicity classification)
+                                                           │
+                                                           ▼ (optional --protvar)
+                                               protvar_client.py
+                                             (ProtVar API cross-validation:
+                                              AlphaMissense, FoldX ddG,
+                                              interaction predictions)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -158,7 +170,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional ProtVar cross-validation adds AlphaMissense scores, FoldX ddG, and interface agreement via `--protvar` (requires `--variants`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
 **visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present in the input CSV.
 
@@ -173,6 +185,8 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 **protein_clustering.py**: Parses STRING pre-computed protein sequence clusters and maps them to UniProt accessions via `IDMapper`. Defaults to `data/clusters/9606.clusters.proteins.v12.0.txt` when no `--clusters-file` is specified. Builds bidirectional cluster indices (cluster-to-proteins and protein-to-clusters) in both ENSP and UniProt space. `find_shared_clusters()` identifies sequence family relationships between protein pairs. `find_homologous_pairs()` discovers other protein pairs that share the same cluster combinations, with optional filtering against known interaction databases. Clusters exceeding `MAX_CLUSTER_SIZE_FOR_PAIRS` (500) are skipped during pair generation to avoid O(n^2) explosion from STRING's hierarchical mega-clusters (up to 144K UniProt members after isoform expansion). `annotate_results_with_clustering()` adds 7 CSV columns: union and intersection cluster IDs/counts, homologous pairs with counts, and a continuous homology bitscore from the STRING API. `enrich_with_homology_scores()` optionally queries the STRING API for paralogy bitscores using chunked batched deduplication (`HOMOLOGY_API_BATCH_SIZE = 100` proteins per API call; reduced from 500 because the STRING homology endpoint times out at larger batch sizes). `validate_clustering_mode()` accepts `'string'` and raises `NotImplementedError` for deferred `'foldseek'` and `'hybrid'` modes. Standalone CLI supports `--summary`, `--protein`, and `--pair` lookup modes.
 
 **stability_scorer.py**: Integrates EVE (Evolutionary model of Variant Effect) pathogenicity predictions with the variant mapping pipeline. Loads per-protein EVE score CSVs keyed by UniProt entry name (e.g. `1433G_HUMAN.csv`) using a `HUMAN_9606_idmapping.dat` mapping file to convert from pipeline accessions (e.g. `P61981`). Lazy-loads only EVE CSVs for proteins in the current run. `annotate_results_with_stability()` adds 8 CSV columns: per-chain mean EVE scores, pathogenic counts, coverage fractions, and pipe-separated stability detail strings. Isoform accessions are automatically stripped to canonical before EVE lookup. Standalone CLI supports `summary` (coverage stats) and `lookup` (per-protein/position score query) subcommands.
+
+**protvar_client.py**: Cross-validates pipeline variant predictions against the ProtVar API (EBI). Queries three endpoints per variant position: `/score/{acc}/{pos}` for AlphaMissense pathogenicity scores, `/prediction/interaction/{acc}/{pos}` for interface predictions with pDockQ scores and binding residues, and `/prediction/foldx/{acc}/{pos}` for pre-computed FoldX ddG stability predictions. Architecture mirrors `string_api.py`: rate-limited requests (1s between calls), automatic retry with exponential backoff on HTTP 429/5xx, and SHA256-keyed JSON response caching (auto-enabled to `data/protvar_cache/`). Isoform accessions are stripped to canonical before API lookup (e.g. `P61981-2` to `P61981`). `annotate_results_with_protvar()` adds 8 CSV columns: per-chain AlphaMissense mean scores, FoldX mean ddG, interface agreement fractions, and pipe-separated detail strings. Standalone CLI supports `summary` (cache statistics) and `lookup` (per-protein/position score query) subcommands. Raises `ProtVarAPIError` on failure after retries.
 
 **variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
@@ -414,6 +428,38 @@ python variant_mapper.py lookup --variants-dir data/variants/ --protein P04637
 python variant_mapper.py map --interfaces interfaces.jsonl --pdb-dir /path/to/models --variants-dir data/variants/ --output variant_analysis.csv
 ```
 
+### Stability Scoring
+
+```bash
+# With EVE stability scoring (requires --variants)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --stability
+
+# With custom stability data directory
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --stability data/stability/
+
+# Standalone: EVE coverage summary
+python stability_scorer.py summary --stability-dir data/stability/
+
+# Standalone: look up EVE scores for a protein
+python stability_scorer.py lookup --stability-dir data/stability/ --protein P61981
+```
+
+### ProtVar Cross-Validation
+
+```bash
+# With ProtVar API cross-validation (requires --variants)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --protvar
+
+# Full pipeline with all features
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar
+
+# Standalone: look up ProtVar data for a position
+python protvar_client.py lookup --protein P61981 --position 4
+
+# Standalone: cache summary
+python protvar_client.py summary
+```
+
 ### Database Ingestion & ID Mapping
 
 ```bash
@@ -492,6 +538,12 @@ python -m pytest tests/ -m "clustering" -v
 # Variant mapping tests
 python -m pytest tests/ -m "variants" -v
 
+# Stability scoring tests
+python -m pytest tests/ -m "stability" -v
+
+# ProtVar API tests (mocked, no network)
+python -m pytest tests/ -m "protvar" -v
+
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
 ```
@@ -519,7 +571,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (48 base columns, 60 with enrichment, 67 with clustering, 79 with variants)
+### CSV (48 base columns, 60 with enrichment, 67 with clustering, 79 with variants, 87 with stability, 95 with protvar)
 
 The main output CSV groups columns into:
 
@@ -536,6 +588,8 @@ The main output CSV groups columns into:
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |
 | **Variants** (with `--variants`) | n_variants_a/b, n_interface_variants_a/b, n_pathogenic_interface_variants, interface_variant_enrichment, variant_details_a/b, gene_constraint_pli_a/b, gene_constraint_mis_z_a/b |
+| **Stability** (with `--stability`) | eve_score_mean_a/b, eve_n_pathogenic_a/b, eve_coverage_a/b, stability_details_a/b |
+| **ProtVar** (with `--protvar`) | protvar_am_mean_a/b, protvar_foldx_mean_a/b, protvar_interface_agreement_a/b, protvar_details_a/b |
 
 ### JSONL Interface Export
 
@@ -574,9 +628,11 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
 - **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
 - **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
+- **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, toolkit integration with `--stability` flag
+- **ProtVar API Cross-Validation (D.1):** ProtVar API client for AlphaMissense scores, FoldX ddG, and interaction predictions; rate-limited caching mirroring `string_api.py` pattern; 8 CSV columns; toolkit integration with `--protvar` flag
 
 ### Planned
-- **Aim 6 - Stability Scoring:** Integrate ProtVar, EVE scores, and FoldX for predicted structural impact
+- **FoldX Local Scoring (D.3):** Local FoldX ddG computation for complexes without ProtVar coverage
 - **Disease & Pathway Integration:** Map complexes to KEGG/Reactome pathways, build interaction networks
 - **PyMOL Visualisation:** Generate `.pml` scripts for batch structure rendering with interface highlighting
 - **Million-Complex Production Run:** Full pipeline validation on large-scale AlphaFold-Multimer dataset
@@ -584,7 +640,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **592 tests** across 15 modules (570 real + 22 future placeholders):
+The test suite contains **721 tests** across 17 modules (699 real + 22 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -600,11 +656,13 @@ The test suite contains **592 tests** across 15 modules (570 real + 22 future pl
 | test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
 | test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
 | test_variant_mapper.py | 103 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context (cross-chain distance), enrichment, CLI, toolkit integration |
+| test_stability_scorer.py | 59 | EVE score loading, entry-name mapping, index building, annotation, formatting, parsing, CSV columns, CLI, regression |
+| test_protvar_client.py | 68 | ProtVar API caching, score extraction, interface agreement, annotation, regression, CLI |
 | test_future_aims.py | 7 + 22 | 7 real database tests + 22 future placeholders |
 
-**Results:** 569 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
+**Results:** 697 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (ProtVar API cross-validation), `future` (unimplemented features)
 
 
 ## Acknowledgements

@@ -1,0 +1,18 @@
+[
+  {"name": "AM", "mt": "A", "amPathogenicity": 0.1611, "amClass": "BENIGN"},
+  {"name": "AM", "mt": "G", "amPathogenicity": 0.4329, "amClass": "AMBIGUOUS"},
+  {"name": "AM", "mt": "R", "amPathogenicity": 0.2934, "amClass": "BENIGN"},
+  {"name": "AM", "mt": "M", "amPathogenicity": 0.5119, "amClass": "AMBIGUOUS"},
+  {"name": "AM", "mt": "D", "amPathogenicity": 0.6995, "amClass": "PATHOGENIC"},
+  {"name": "AM", "mt": "W", "amPathogenicity": 0.8238, "amClass": "PATHOGENIC"},
+  {"name": "AM", "mt": "L", "amPathogenicity": 0.2455, "amClass": "BENIGN"},
+  {"name": "AM", "mt": "S", "amPathogenicity": 0.2852, "amClass": "BENIGN"},
+  {"name": "AM", "mt": "T", "amPathogenicity": 0.229, "amClass": "BENIGN"},
+  {"name": "AM", "mt": "F", "amPathogenicity": 0.7129, "amClass": "PATHOGENIC"},
+  {"name": "AM", "mt": "Y", "amPathogenicity": 0.7303, "amClass": "PATHOGENIC"},
+  {"name": "AM", "mt": "C", "amPathogenicity": 0.6328, "amClass": "PATHOGENIC"},
+  {"name": "CONSERV", "score": 0.711},
+  {"name": "ESM", "mt": "A", "score": -5.587},
+  {"name": "ESM", "mt": "G", "score": -7.145},
+  {"name": "ESM", "mt": "D", "score": -6.938}
+]

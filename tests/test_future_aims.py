@@ -208,7 +208,7 @@ class TestStabilityScoring:
 
     def test_protvar_api_query(self):
         """ProtVar API returns valid results for known variant."""
-        pytest.skip("Not yet implemented - requires ProtVar integration")
+        pytest.skip("Converted to real tests — see test_protvar_client.py")
 
     def test_eve_score_lookup(self):
         """EVE scores correctly loaded and mapped."""
