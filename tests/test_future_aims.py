@@ -212,11 +212,33 @@ class TestStabilityScoring:
 
     def test_eve_score_lookup(self):
         """EVE scores correctly loaded and mapped."""
-        pytest.skip("Not yet implemented")
+        pytest.skip("Converted to real test — see TestEVEScoreLookupReal below")
 
     def test_foldx_ddg_computation(self):
         """FoldX ΔΔG computed for interface variant."""
         pytest.skip("Not yet implemented")
+
+
+# ── EVE Score Lookup (converted from placeholder) ────────────────
+
+@pytest.mark.stability
+class TestEVEScoreLookupReal:
+    """Real EVE score lookup test (converted from TestStabilityScoring placeholder)."""
+
+    def test_eve_score_lookup(self, test_eve_dir, test_eve_map_path):
+        """EVE scores correctly loaded and mapped."""
+        from stability_scorer import (
+            load_eve_entry_name_map, build_eve_index, lookup_eve_score,
+        )
+        acc_to_entry = load_eve_entry_name_map(test_eve_map_path)
+        assert acc_to_entry['P61981'] == '1433G_HUMAN'
+        eve_index = build_eve_index(
+            test_eve_dir, frozenset({'P61981'}), acc_to_entry,
+        )
+        result = lookup_eve_score(eve_index, 'P61981', 'R', 4, 'A')
+        assert result is not None
+        assert abs(result['eve_score'] - 0.7727) < 0.01
+        assert result['eve_class'] == 'Pathogenic'
 
 
 # ── Visualisation & Reporting ────────────────────────────────────

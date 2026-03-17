@@ -343,3 +343,31 @@ def string_api_responses(test_db_dir):
         with open(path, encoding="utf-8") as f:
             responses[path.stem] = json.load(f)
     return responses
+
+
+# ── Stability Scoring Test Data Fixtures ─────────────────────────
+
+@pytest.fixture(scope="session")
+def test_eve_map_path(test_db_dir):
+    """Return the path to the test UniProt ID mapping excerpt."""
+    path = test_db_dir / "test_idmapping.dat"
+    assert path.exists(), f"Test ID mapping file not found: {path}"
+    return path
+
+
+@pytest.fixture(scope="session")
+def test_eve_dir(test_db_dir):
+    """Return a directory containing the test EVE CSV.
+
+    The test EVE CSV is named after a known test accession's entry name.
+    Creates a temporary symlink/copy so the EVE loader can find it by entry name.
+    """
+    import shutil
+    eve_test_dir = test_db_dir / "test_eve_data"
+    eve_test_dir.mkdir(exist_ok=True)
+    # Copy test_eve_scores.csv as 1433G_HUMAN.csv (the entry name for P61981)
+    src = test_db_dir / "test_eve_scores.csv"
+    dst = eve_test_dir / "1433G_HUMAN.csv"
+    if not dst.exists():
+        shutil.copy2(src, dst)
+    return eve_test_dir

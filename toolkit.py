@@ -620,7 +620,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -636,9 +636,12 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
     if include_variants:
         from variant_mapper import CSV_FIELDNAMES_VARIANTS
         fieldnames.extend(CSV_FIELDNAMES_VARIANTS)
+    if include_stability:
+        from stability_scorer import CSV_FIELDNAMES_STABILITY
+        fieldnames.extend(CSV_FIELDNAMES_STABILITY)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -648,8 +651,9 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_enrichment: Whether to include enrichment columns (gene symbols, names, database sources, sequences).
         include_clustering: Whether to include clustering columns (cluster IDs, homologous pairs).
         include_variants: Whether to include variant mapping columns.
+        include_stability: Whether to include stability scoring columns (EVE scores).
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -1257,6 +1261,10 @@ Examples:
     parser.add_argument("--no-clinvar", action="store_true",
                         help="Skip ClinVar enrichment when using --variants (faster). "
                              "Only UniProt variants and ExAC constraint scores are used.")
+    parser.add_argument("--stability", metavar="STABILITY_DIR",
+                        nargs='?', const='__default__', default=None,
+                        help="Score variant stability using EVE evolutionary predictions. "
+                             "Requires --variants. Default: data/stability/")
     return parser
 
 
@@ -1296,6 +1304,15 @@ def main() -> None:
             args.variants = str(DEFAULT_VARIANTS_DIR)
     # Distinguish "not used" from "used without path" for later checks
     args._variants_enabled = args.variants is not None
+
+    if args.stability is not None:
+        if not getattr(args, '_variants_enabled', False):
+            print("Error: --stability requires --variants", file=sys.stderr)
+            sys.exit(1)
+        if args.stability == '__default__':
+            from stability_scorer import DEFAULT_STABILITY_DIR
+            args.stability = str(DEFAULT_STABILITY_DIR)
+    args._stability_enabled = args.stability is not None
 
     if args.resume:
         args.checkpoint = True
@@ -1560,6 +1577,40 @@ def main() -> None:
         print(f"Variant mapping complete: {len(results)} complexes annotated "
               f"in {variant_elapsed:.1f}s", file=sys.stderr)
 
+    # Stability scoring (EVE evolutionary predictions)
+    include_stability = False
+    if getattr(args, '_stability_enabled', False):
+        from stability_scorer import (
+            load_eve_entry_name_map, build_eve_index,
+            annotate_results_with_stability, EVE_IDMAPPING_FILENAME,
+        )
+        stability_start = time.time()
+        stability_dir = Path(args.stability)
+
+        # Load accession → entry name mapping
+        map_path = stability_dir / EVE_IDMAPPING_FILENAME
+        print(f"Loading EVE ID mapping from: {map_path}", file=sys.stderr)
+        acc_to_entry = load_eve_entry_name_map(map_path)
+        print(f"  Mapped {len(acc_to_entry):,} accessions to entry names", file=sys.stderr)
+
+        # Build EVE index (lazy — only loads CSVs for pipeline accessions)
+        # all_accessions was built by the --variants block (which --stability requires)
+        eve_dir = stability_dir / "EVE_all_data"
+        eve_index = build_eve_index(
+            eve_dir, all_accessions, acc_to_entry, verbose=True,
+        )
+        print(f"  EVE index: {len(eve_index)} proteins with scores loaded", file=sys.stderr)
+
+        # Annotate results with EVE stability scores
+        annotate_results_with_stability(
+            results, eve_index, acc_to_entry, verbose=True,
+        )
+
+        include_stability = True
+        stability_elapsed = time.time() - stability_start
+        print(f"Stability scoring complete: {len(results)} complexes annotated "
+              f"in {stability_elapsed:.1f}s", file=sys.stderr)
+
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
@@ -1569,6 +1620,7 @@ def main() -> None:
         include_enrichment=include_enrichment,
         include_clustering=include_clustering,
         include_variants=include_variants,
+        include_stability=include_stability,
     )
 
     print(f"\n{'=' * 60}")

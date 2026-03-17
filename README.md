@@ -12,7 +12,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`) with automated quality flags, paradox detection, and optional enrichment
+- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate up to 13 figures with adaptive rendering for datasets from hundreds to millions of complexes
@@ -25,7 +25,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Automatic API validation: ID resolution, enrichment, and database loading fall back to the STRING API when local data is incomplete (disable with `--no-api`)
 - Protein sequence clustering: STRING cluster parsing, UniProt-mapped cluster indexing, homologous pair detection, and optional API-based homology scores
 - Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis
-- 592-test suite (570 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- EVE stability scoring: evolutionary variant effect predictions mapped to pipeline variants via UniProt ID mapping, with per-chain EVE score summaries and pathogenicity classification
+- 653-test suite (631 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -43,10 +44,11 @@ protein-complexes-toolkit/
 ├── string_api.py            # Centralised STRING API client (rate limiting, caching, retry)
 ├── protein_clustering.py    # Protein sequence clustering and homology detection
 ├── variant_mapper.py        # Genetic variant mapping and structural context classification
+├── stability_scorer.py      # EVE stability scoring and variant effect predictions
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (570 tests + 22 future placeholders)
+├── tests/                   # Test suite (631 tests + 22 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -61,6 +63,7 @@ protein-complexes-toolkit/
 │   ├── test_string_api.py
 │   ├── test_protein_clustering.py
 │   ├── test_variant_mapper.py
+│   ├── test_stability_scorer.py
 │   └── offline_test_data/
 │       └── databases/                           # Small database excerpts for offline testing
 │           ├── string_api_responses/            # Pre-captured API responses (7 JSON files)
@@ -73,12 +76,15 @@ protein-complexes-toolkit/
 │           ├── test_string_links.txt            # STRING links excerpt
 │           ├── test_uniprot_variants.txt        # UniProt variants excerpt (20 rows)
 │           ├── test_clinvar_variants.txt        # ClinVar excerpt (6 rows)
-│           └── test_exac_constraint.txt         # ExAC constraint excerpt (5 rows)
+│           ├── test_exac_constraint.txt         # ExAC constraint excerpt (5 rows)
+│           ├── test_eve_scores.csv              # EVE scores excerpt (80 rows from 1433G_HUMAN)
+│           └── test_idmapping.dat               # UniProt ID mapping excerpt (8 rows)
 ├── data/                                 # External databases (not included in repo)
 │    ├── ppi/                             # PPI databases (see "Setting Up Data")
 │    ├── clusters/                        # STRING sequence clusters (see "Setting Up Data")
 │    ├── variants/                        # Variant databases (see "Setting Up Data")
 │    └── stability/                       # Stability prediction data (see "Setting Up Data")
+│         ├── HUMAN_9606_idmapping.dat    # UniProt ID mapping (accession -> entry name)
 │         └── EVE_all_data/               # EVE variant effect scores (3,211 CSVs)
 └── Test_Data/							  # Not included in repo (see "Setting Up Test Data")
 ```
@@ -119,6 +125,12 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                               biotite SASA structural context,
                                               cross-chain interface classification,
                                               variant enrichment analysis)
+                                                           │
+                                                           ▼ (optional --stability)
+                                               stability_scorer.py
+                                             (EVE evolutionary variant
+                                              effect predictions,
+                                              pathogenicity classification)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -146,7 +158,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
 **visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present in the input CSV.
 
@@ -159,6 +171,8 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 **string_api.py**: Centralised STRING database API client. All STRING API interactions are routed through this module. Architecture is offline-first: local flat files remain the primary data source; the API is an automatic supplement for unresolved identifiers and validation. Features rate-limited requests (1s between calls), automatic retry with exponential backoff on HTTP 429/5xx, SHA256-keyed response caching (auto-enabled to `data/string_api_cache/`), and caller identity injection per STRING API TOS. Provides 7 public functions: `get_string_ids()`, `get_interaction_partners()`, `query_homology()`, `query_enrichment()`, `query_ppi_enrichment()`, `query_network()`, `get_version()`. Raises `StringAPIError` on failure for clean error propagation.
 
 **protein_clustering.py**: Parses STRING pre-computed protein sequence clusters and maps them to UniProt accessions via `IDMapper`. Defaults to `data/clusters/9606.clusters.proteins.v12.0.txt` when no `--clusters-file` is specified. Builds bidirectional cluster indices (cluster-to-proteins and protein-to-clusters) in both ENSP and UniProt space. `find_shared_clusters()` identifies sequence family relationships between protein pairs. `find_homologous_pairs()` discovers other protein pairs that share the same cluster combinations, with optional filtering against known interaction databases. Clusters exceeding `MAX_CLUSTER_SIZE_FOR_PAIRS` (500) are skipped during pair generation to avoid O(n^2) explosion from STRING's hierarchical mega-clusters (up to 144K UniProt members after isoform expansion). `annotate_results_with_clustering()` adds 7 CSV columns: union and intersection cluster IDs/counts, homologous pairs with counts, and a continuous homology bitscore from the STRING API. `enrich_with_homology_scores()` optionally queries the STRING API for paralogy bitscores using chunked batched deduplication (`HOMOLOGY_API_BATCH_SIZE = 100` proteins per API call; reduced from 500 because the STRING homology endpoint times out at larger batch sizes). `validate_clustering_mode()` accepts `'string'` and raises `NotImplementedError` for deferred `'foldseek'` and `'hybrid'` modes. Standalone CLI supports `--summary`, `--protein`, and `--pair` lookup modes.
+
+**stability_scorer.py**: Integrates EVE (Evolutionary model of Variant Effect) pathogenicity predictions with the variant mapping pipeline. Loads per-protein EVE score CSVs keyed by UniProt entry name (e.g. `1433G_HUMAN.csv`) using a `HUMAN_9606_idmapping.dat` mapping file to convert from pipeline accessions (e.g. `P61981`). Lazy-loads only EVE CSVs for proteins in the current run. `annotate_results_with_stability()` adds 8 CSV columns: per-chain mean EVE scores, pathogenic counts, coverage fractions, and pipe-separated stability detail strings. Isoform accessions are automatically stripped to canonical before EVE lookup. Standalone CLI supports `summary` (coverage stats) and `lookup` (per-protein/position score query) subcommands.
 
 **variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
@@ -212,13 +226,14 @@ mkdir -p data/ppi data/clusters data/variants data/stability
 | `variant_summary.txt` | ClinVar | [ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) - download `variant_summary.txt.gz`, decompress |
 | `forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt` | ExAC/gnomAD | [gnomad.broadinstitute.org/downloads](https://gnomad.broadinstitute.org/downloads) - under "Gene constraint scores TSV", download and decompress |
 
-5. Download EVE variant effect scores into `data/stability/`:
+5. Download EVE variant effect scores and UniProt ID mapping into `data/stability/`:
 
 | File | Source | Download |
 |------|--------|----------|
 | `EVE_all_data/` (3,211 CSVs) | EVE | [evemodel.org/download/bulk](https://evemodel.org/download/bulk) - download "All variant files" CSV archive, extract into `data/stability/` |
+| `HUMAN_9606_idmapping.dat` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/) - download `HUMAN_9606_idmapping.dat.gz`, decompress into `data/stability/` |
 
-> **Note:** The EVE bulk download page offers several archives (MSAs, VCF files, PRC/ROC curves). Only the **variant files** archive is needed - the others are model training inputs or diagnostic plots not used by the pipeline.
+> **Note:** The EVE bulk download page offers several archives (MSAs, VCF files, PRC/ROC curves). Only the **variant files** archive is needed - the others are model training inputs or diagnostic plots not used by the pipeline. The `HUMAN_9606_idmapping.dat` file maps UniProt accessions to entry names (e.g. `P61981` -> `1433G_HUMAN`) which are used as EVE CSV filenames.
 
 6. Verify the directory contents:
 ```
@@ -236,6 +251,7 @@ data/
 │   ├── variant_summary.txt                    (~1.1 GB)
 │   └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
 └── stability/
+    ├── HUMAN_9606_idmapping.dat               # UniProt ID mapping (~145 MB)
     └── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
         ├── 1433G_HUMAN.csv
         ├── 1433Z_HUMAN.csv
