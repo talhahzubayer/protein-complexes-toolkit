@@ -77,7 +77,9 @@ protein-complexes-toolkit/
 ├── data/                                 # External databases (not included in repo)
 │    ├── ppi/                             # PPI databases (see "Setting Up Data")
 │    ├── clusters/                        # STRING sequence clusters (see "Setting Up Data")
-│    └── variants/                        # Variant databases (see "Setting Up Data")
+│    ├── variants/                        # Variant databases (see "Setting Up Data")
+│    └── stability/                       # Stability prediction data (see "Setting Up Data")
+│         └── EVE_all_data/               # EVE variant effect scores (3,211 CSVs)
 └── Test_Data/							  # Not included in repo (see "Setting Up Test Data")
 ```
 
@@ -183,7 +185,7 @@ The `data/` directory is **not included** in this repository due to the large si
 
 1. Create the directory structure:
 ```bash
-mkdir -p data/ppi data/clusters data/variants
+mkdir -p data/ppi data/clusters data/variants data/stability
 ```
 
 2. Download the following files into `data/ppi/`:
@@ -210,7 +212,15 @@ mkdir -p data/ppi data/clusters data/variants
 | `variant_summary.txt` | ClinVar | [ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) - download `variant_summary.txt.gz`, decompress |
 | `forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt` | ExAC/gnomAD | [gnomad.broadinstitute.org/downloads](https://gnomad.broadinstitute.org/downloads) - under "Gene constraint scores TSV", download and decompress |
 
-5. Verify the directory contents:
+5. Download EVE variant effect scores into `data/stability/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `EVE_all_data/` (3,211 CSVs) | EVE | [evemodel.org/download/bulk](https://evemodel.org/download/bulk) - download "All variant files" CSV archive, extract into `data/stability/` |
+
+> **Note:** The EVE bulk download page offers several archives (MSAs, VCF files, PRC/ROC curves). Only the **variant files** archive is needed - the others are model training inputs or diagnostic plots not used by the pipeline.
+
+6. Verify the directory contents:
 ```
 data/
 ├── ppi/
@@ -221,10 +231,15 @@ data/
 │   └── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
 ├── clusters/
 │   └── 9606.clusters.proteins.v12.0.txt      (~40 MB)
-└── variants/
-    ├── homo_sapiens_variation.txt             (~2.2 GB)
-    ├── variant_summary.txt                    (~1.1 GB)
-    └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
+├── variants/
+│   ├── homo_sapiens_variation.txt             (~2.2 GB)
+│   ├── variant_summary.txt                    (~1.1 GB)
+│   └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
+└── stability/
+    └── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
+        ├── 1433G_HUMAN.csv
+        ├── 1433Z_HUMAN.csv
+        └── ...
 ```
 
 
