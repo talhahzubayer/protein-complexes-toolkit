@@ -1,700 +1,676 @@
-#!/usr/bin/env python3
 """
-Tests for protvar_client.py — ProtVar API cross-validation module.
+Tests for the offline ProtVar scoring module (AlphaMissense + monomeric FoldX).
 
-All tests use offline cached/mocked data. No live API calls are made.
+Tests cover:
+- Constants and CSV column definitions
+- AlphaMissense TSV loading and variant parsing
+- AFDB FoldX export CSV loading
+- Combined index building and merging
+- Score lookup
+- Chain variant scoring
+- Detail string formatting
+- Full annotation pipeline
+- Standalone CLI
+- Regression values for known proteins
 
-Test data in tests/offline_test_data/databases/protvar_responses/:
-    score_P61981_4.json         — AlphaMissense/EVE/ESM/CONSERV scores
-    interaction_P61981_4.json   — 3 interaction partners (position at interface)
-    foldx_P61981_4.json         — FoldX ΔΔG for 9 substitutions
-    score_P24534_81.json        — Scores for second test protein
-    interaction_P24534_81.json  — Empty list (no interactions)
-    foldx_P24534_81.json        — FoldX ΔΔG for 5 substitutions
+Uses small test data files in tests/offline_test_data/databases/:
+- test_afdb_foldx_export.csv (P61981 pos 1-2, P24534 pos 1)
+- test_alphamissense.tsv (P61981 pos 1-2, P24534 pos 1)
 """
 
-import json
-import pytest
+import argparse
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from statistics import mean
+
+import pytest
 
 from protvar_client import (
-    # Constants
-    PROTVAR_API_BASE_URL,
-    PROTVAR_API_RATE_LIMIT_PAUSE,
-    PROTVAR_API_MAX_RETRIES,
-    PROTVAR_API_BACKOFF_FACTOR,
-    PROTVAR_API_TIMEOUT,
-    PROTVAR_API_DEFAULT_CACHE_DIR,
-    PROTVAR_DETAILS_DISPLAY_LIMIT,
+    DEFAULT_FOLDX_EXPORT,
+    DEFAULT_AM_FILE,
     FOLDX_DESTABILISING_THRESHOLD,
+    PROTVAR_DETAILS_DISPLAY_LIMIT,
+    CHUNK_LOG_INTERVAL,
     CSV_FIELDNAMES_PROTVAR,
-    _VARIANT_DETAIL_PATTERN,
-    # Exception
-    ProtVarAPIError,
-    # Internal helpers
-    _resolve_cache_dir,
-    _cache_key,
-    _read_cache,
-    _write_cache,
-    # Public query functions
-    get_scores,
-    get_interactions,
-    get_foldx,
-    # Index building
+    _parse_am_variant,
+    load_alphamissense_scores,
+    load_foldx_export,
     build_protvar_index,
-    # Score extraction
-    extract_am_score,
-    extract_am_class,
-    extract_foldx_ddg,
-    check_protvar_interface,
-    compute_interface_agreement,
-    # Annotation
+    lookup_score,
     _parse_variant_details_for_protvar,
     format_protvar_details,
     _score_chain_variants_protvar,
     annotate_results_with_protvar,
-    # CLI
     build_argument_parser,
 )
 
-# ── Known Test Values ────────────────────────────────────────────────
 
-# P61981 position 4 (R → A)
-TEST_ACC_WITH_INTERACTIONS = 'P61981'
-TEST_POS_WITH_INTERACTIONS = 4
-TEST_AM_SCORE_R4A = 0.9137  # AlphaMissense score for R→A
-TEST_AM_CLASS_R4A = 'PATHOGENIC'
-TEST_FOLDX_DDG_R4A = 3.17722
-TEST_N_INTERACTIONS_P61981_4 = 3  # 3 partners in test data
+# ── Fixtures ─────────────────────────────────────────────────────────
 
-# P24534 position 81 (no interactions)
-TEST_ACC_NO_INTERACTIONS = 'P24534'
-TEST_POS_NO_INTERACTIONS = 81
-TEST_AM_SCORE_P81A = 0.1611  # AlphaMissense score for P→A at pos 81
-TEST_FOLDX_DDG_P81A = 2.39718
+TEST_DATA_DIR = Path(__file__).parent / "offline_test_data" / "databases"
+TEST_FOLDX_CSV = TEST_DATA_DIR / "test_afdb_foldx_export.csv"
+TEST_AM_TSV = TEST_DATA_DIR / "test_alphamissense.tsv"
 
 
-# ── Helper: Load Test Data ───────────────────────────────────────────
-
-def _load_test_json(responses_dir: Path, filename: str) -> list:
-    """Load a test JSON file and return its content."""
-    path = responses_dir / filename
-    with open(path, encoding='utf-8') as f:
-        return json.load(f)
-
-
-def _make_result_row(
-    protein_a: str = 'P61981',
-    protein_b: str = 'P24534',
-    details_a: str = '',
-    details_b: str = '',
-) -> dict:
-    """Create a minimal result row for annotation testing."""
-    return {
-        'protein_a': protein_a,
-        'protein_b': protein_b,
-        'variant_details_a': details_a,
-        'variant_details_b': details_b,
-    }
+@pytest.fixture
+def small_index():
+    """Build a small index from test data for P61981 + P24534."""
+    return build_protvar_index(
+        accessions={'P61981', 'P24534'},
+        foldx_path=TEST_FOLDX_CSV,
+        am_path=TEST_AM_TSV,
+        verbose=False,
+    )
 
 
 # ── Test Class 1: Constants ──────────────────────────────────────────
 
 @pytest.mark.protvar
-class TestProtVarConstants:
-    """Verify module constants are set correctly."""
+class TestConstants:
+    """Verify module constants."""
 
-    def test_api_base_url_format(self):
-        """Base URL starts with https and points to EBI ProtVar."""
-        assert PROTVAR_API_BASE_URL.startswith("https://")
-        assert "ProtVar" in PROTVAR_API_BASE_URL
+    def test_default_foldx_export_path(self):
+        assert 'afdb_foldx_export' in str(DEFAULT_FOLDX_EXPORT)
+        assert str(DEFAULT_FOLDX_EXPORT).endswith('.csv')
 
-    def test_csv_column_count(self):
-        """CSV fieldnames has exactly 8 columns."""
-        assert len(CSV_FIELDNAMES_PROTVAR) == 8
-
-    def test_rate_limit_positive(self):
-        """Rate limit pause is a positive number."""
-        assert PROTVAR_API_RATE_LIMIT_PAUSE > 0
+    def test_default_am_file_path(self):
+        assert 'AlphaMissense' in str(DEFAULT_AM_FILE)
+        assert str(DEFAULT_AM_FILE).endswith('.tsv')
 
     def test_foldx_threshold(self):
-        """FoldX destabilisation threshold is 1.6 kcal/mol."""
         assert FOLDX_DESTABILISING_THRESHOLD == 1.6
 
+    def test_details_display_limit(self):
+        assert PROTVAR_DETAILS_DISPLAY_LIMIT == 20
 
-# ── Test Class 2: Cache Helpers ──────────────────────────────────────
+    def test_chunk_log_interval(self):
+        assert CHUNK_LOG_INTERVAL == 5_000_000
 
-@pytest.mark.protvar
-class TestCacheHelpers:
-    """Test internal caching functions."""
-
-    def test_resolve_cache_dir_none_returns_default(self):
-        """None → default cache directory."""
-        result = _resolve_cache_dir(None)
-        assert result == PROTVAR_API_DEFAULT_CACHE_DIR
-
-    def test_resolve_cache_dir_false_returns_none(self):
-        """False → None (disabled)."""
-        result = _resolve_cache_dir(False)
-        assert result is None
-
-    def test_resolve_cache_dir_string_returns_path(self):
-        """String → Path."""
-        result = _resolve_cache_dir("/tmp/custom_cache")
-        assert result == Path("/tmp/custom_cache")
-
-    def test_cache_key_deterministic(self):
-        """Same inputs produce same key."""
-        key1 = _cache_key("score", "P61981", 4)
-        key2 = _cache_key("score", "P61981", 4)
-        assert key1 == key2
-
-    def test_cache_key_different_for_different_inputs(self):
-        """Different inputs produce different keys."""
-        key1 = _cache_key("score", "P61981", 4)
-        key2 = _cache_key("score", "P61981", 5)
-        key3 = _cache_key("prediction/interaction", "P61981", 4)
-        assert key1 != key2
-        assert key1 != key3
-
-    def test_cache_roundtrip(self, tmp_path):
-        """Write + read returns original data."""
-        test_data = [{"name": "AM", "mt": "A", "amPathogenicity": 0.91}]
-        key = _cache_key("score", "P61981", 4)
-        _write_cache(tmp_path, key, "score", test_data)
-        result = _read_cache(tmp_path, key)
-        assert result == test_data
-
-    def test_cache_miss_returns_none(self, tmp_path):
-        """Reading nonexistent cache returns None."""
-        result = _read_cache(tmp_path, "nonexistent_key_abc123")
-        assert result is None
-
-    def test_write_cache_creates_directory(self, tmp_path):
-        """Cache write creates subdirectory if needed."""
-        nested = tmp_path / "sub" / "dir"
-        _write_cache(nested, "key123", "score", [])
-        assert (nested / "key123.json").exists()
+    def test_csv_fieldnames_count(self):
+        assert len(CSV_FIELDNAMES_PROTVAR) == 8
 
 
-# ── Test Class 3: Get Scores ─────────────────────────────────────────
+# ── Test Class 2: CSV Column Names ───────────────────────────────────
 
 @pytest.mark.protvar
-class TestGetScores:
-    """Test get_scores() with cached data."""
+class TestCSVFieldnames:
+    """Verify CSV column name definitions."""
 
-    def test_cached_scores_returns_data(self, test_protvar_responses_dir, tmp_path):
-        """Returns score list from pre-seeded cache."""
-        # Seed cache
-        data = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        key = _cache_key("score", "P61981", 4)
-        _write_cache(tmp_path, key, "score", data)
+    def test_column_names(self):
+        expected = [
+            'protvar_am_mean_a', 'protvar_am_mean_b',
+            'protvar_foldx_mean_a', 'protvar_foldx_mean_b',
+            'protvar_am_n_pathogenic_a', 'protvar_am_n_pathogenic_b',
+            'protvar_details_a', 'protvar_details_b',
+        ]
+        assert CSV_FIELDNAMES_PROTVAR == expected
 
-        result = get_scores("P61981", 4, cache_dir=str(tmp_path))
-        assert isinstance(result, list)
-        assert len(result) > 0
+    def test_all_columns_have_chain_suffix(self):
+        for col in CSV_FIELDNAMES_PROTVAR:
+            assert col.endswith('_a') or col.endswith('_b'), col
 
-    def test_am_entries_present(self, test_protvar_responses_dir, tmp_path):
-        """Score data contains AlphaMissense entries."""
-        data = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        key = _cache_key("score", "P61981", 4)
-        _write_cache(tmp_path, key, "score", data)
-
-        result = get_scores("P61981", 4, cache_dir=str(tmp_path))
-        am_entries = [s for s in result if s.get('name') == 'AM']
-        assert len(am_entries) > 0
-
-    def test_eve_entries_present(self, test_protvar_responses_dir, tmp_path):
-        """Score data contains EVE entries."""
-        data = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        key = _cache_key("score", "P61981", 4)
-        _write_cache(tmp_path, key, "score", data)
-
-        result = get_scores("P61981", 4, cache_dir=str(tmp_path))
-        eve_entries = [s for s in result if s.get('name') == 'EVE']
-        assert len(eve_entries) > 0
-
-    def test_conserv_entry_present(self, test_protvar_responses_dir, tmp_path):
-        """Score data contains CONSERV entry."""
-        data = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        key = _cache_key("score", "P61981", 4)
-        _write_cache(tmp_path, key, "score", data)
-
-        result = get_scores("P61981", 4, cache_dir=str(tmp_path))
-        conserv = [s for s in result if s.get('name') == 'CONSERV']
-        assert len(conserv) == 1
-        assert conserv[0]['score'] == 0.74
+    def test_paired_columns(self):
+        a_cols = [c for c in CSV_FIELDNAMES_PROTVAR if c.endswith('_a')]
+        b_cols = [c for c in CSV_FIELDNAMES_PROTVAR if c.endswith('_b')]
+        assert len(a_cols) == len(b_cols) == 4
 
 
-# ── Test Class 4: Get Interactions ───────────────────────────────────
+# ── Test Class 3: AM Variant Parsing ─────────────────────────────────
 
 @pytest.mark.protvar
-class TestGetInteractions:
-    """Test get_interactions() with cached data."""
+@pytest.mark.alphamissense
+class TestAMVariantParsing:
+    """Test _parse_am_variant() function."""
 
-    def test_cached_interactions_returns_data(self, test_protvar_responses_dir, tmp_path):
-        """Returns interaction list from pre-seeded cache."""
-        data = _load_test_json(test_protvar_responses_dir, "interaction_P61981_4.json")
-        key = _cache_key("prediction/interaction", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/interaction", data)
+    def test_simple_variant(self):
+        assert _parse_am_variant('M1A') == ('M', 1, 'A')
 
-        result = get_interactions("P61981", 4, cache_dir=str(tmp_path))
-        assert isinstance(result, list)
-        assert len(result) == TEST_N_INTERACTIONS_P61981_4
+    def test_multi_digit_position(self):
+        assert _parse_am_variant('K81P') == ('K', 81, 'P')
 
-    def test_interaction_has_pdockq(self, test_protvar_responses_dir, tmp_path):
-        """Each interaction has a pDockQ score."""
-        data = _load_test_json(test_protvar_responses_dir, "interaction_P61981_4.json")
-        key = _cache_key("prediction/interaction", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/interaction", data)
+    def test_large_position(self):
+        assert _parse_am_variant('S2699R') == ('S', 2699, 'R')
 
-        result = get_interactions("P61981", 4, cache_dir=str(tmp_path))
-        for entry in result:
-            assert 'pdockq' in entry
-            assert isinstance(entry['pdockq'], (int, float))
+    def test_invalid_variant_returns_none(self):
+        assert _parse_am_variant('') is None
+        assert _parse_am_variant('123') is None
+        assert _parse_am_variant('M1') is None
 
-    def test_empty_interactions(self, test_protvar_responses_dir, tmp_path):
-        """Returns empty list when no interactions exist."""
-        data = _load_test_json(test_protvar_responses_dir, "interaction_P24534_81.json")
-        key = _cache_key("prediction/interaction", "P24534", 81)
-        _write_cache(tmp_path, key, "prediction/interaction", data)
-
-        result = get_interactions("P24534", 81, cache_dir=str(tmp_path))
-        assert result == []
-
-    def test_interaction_has_residue_lists(self, test_protvar_responses_dir, tmp_path):
-        """Interactions include aresidues and bresidues lists."""
-        data = _load_test_json(test_protvar_responses_dir, "interaction_P61981_4.json")
-        key = _cache_key("prediction/interaction", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/interaction", data)
-
-        result = get_interactions("P61981", 4, cache_dir=str(tmp_path))
-        for entry in result:
-            assert 'aresidues' in entry
-            assert 'bresidues' in entry
-            assert isinstance(entry['aresidues'], list)
+    def test_lowercase_returns_none(self):
+        assert _parse_am_variant('m1a') is None
 
 
-# ── Test Class 5: Get FoldX ─────────────────────────────────────────
+# ── Test Class 4: AlphaMissense Loading ──────────────────────────────
 
 @pytest.mark.protvar
-class TestGetFoldx:
-    """Test get_foldx() with cached data."""
+@pytest.mark.alphamissense
+class TestAlphaMissenseLoading:
+    """Test load_alphamissense_scores() function."""
 
-    def test_cached_foldx_returns_data(self, test_protvar_responses_dir, tmp_path):
-        """Returns FoldX list from pre-seeded cache."""
-        data = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        key = _cache_key("prediction/foldx", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/foldx", data)
+    def test_load_p61981(self):
+        index = load_alphamissense_scores(TEST_AM_TSV, frozenset({'P61981'}))
+        assert 'P61981' in index
+        assert (1, 'A') in index['P61981']
+        assert abs(index['P61981'][(1, 'A')]['am_score'] - 0.363) < 0.001
 
-        result = get_foldx("P61981", 4, cache_dir=str(tmp_path))
-        assert isinstance(result, list)
-        assert len(result) > 0
+    def test_load_p24534(self):
+        index = load_alphamissense_scores(TEST_AM_TSV, frozenset({'P24534'}))
+        assert 'P24534' in index
+        assert abs(index['P24534'][(1, 'D')]['am_score'] - 0.9669) < 0.001
 
-    def test_foldx_has_ddg(self, test_protvar_responses_dir, tmp_path):
-        """Each FoldX entry has a foldxDdg value."""
-        data = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        key = _cache_key("prediction/foldx", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/foldx", data)
+    def test_am_class_loaded(self):
+        index = load_alphamissense_scores(TEST_AM_TSV, frozenset({'P61981'}))
+        assert index['P61981'][(1, 'A')]['am_class'] == 'ambiguous'
+        assert index['P61981'][(1, 'D')]['am_class'] == 'pathogenic'
+        assert index['P61981'][(1, 'F')]['am_class'] == 'benign'
 
-        result = get_foldx("P61981", 4, cache_dir=str(tmp_path))
-        for entry in result:
-            assert 'foldxDdg' in entry
-            assert isinstance(entry['foldxDdg'], (int, float))
+    def test_filter_by_accession(self):
+        index = load_alphamissense_scores(TEST_AM_TSV, frozenset({'P61981'}))
+        assert 'P61981' in index
+        assert 'P24534' not in index
 
-    def test_foldx_has_wildtype(self, test_protvar_responses_dir, tmp_path):
-        """Each FoldX entry has wildType and mutatedType."""
-        data = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        key = _cache_key("prediction/foldx", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/foldx", data)
+    def test_filter_by_position(self):
+        index = load_alphamissense_scores(
+            TEST_AM_TSV, frozenset({'P61981'}),
+            variant_positions={'P61981': {1}},
+        )
+        assert (1, 'A') in index['P61981']
+        assert (2, 'A') not in index['P61981']
 
-        result = get_foldx("P61981", 4, cache_dir=str(tmp_path))
-        for entry in result:
-            assert 'wildType' in entry
-            assert 'mutatedType' in entry
+    def test_empty_accessions(self):
+        index = load_alphamissense_scores(TEST_AM_TSV, frozenset())
+        assert index == {}
 
-    def test_foldx_regression_r4a(self, test_protvar_responses_dir, tmp_path):
-        """FoldX ΔΔG for R4A matches known value."""
-        data = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        key = _cache_key("prediction/foldx", "P61981", 4)
-        _write_cache(tmp_path, key, "prediction/foldx", data)
+    def test_missing_file(self):
+        index = load_alphamissense_scores(
+            Path('/nonexistent/file.tsv'), frozenset({'P61981'}),
+        )
+        assert index == {}
 
-        result = get_foldx("P61981", 4, cache_dir=str(tmp_path))
-        r4a = [f for f in result if f.get('mutatedType') == 'A']
-        assert len(r4a) == 1
-        assert abs(r4a[0]['foldxDdg'] - TEST_FOLDX_DDG_R4A) < 0.001
+    def test_header_lines_skipped(self):
+        index = load_alphamissense_scores(TEST_AM_TSV, frozenset({'P61981'}))
+        assert 'P61981' in index
+        assert len(index['P61981']) > 0
 
+    def test_multiple_proteins(self):
+        index = load_alphamissense_scores(
+            TEST_AM_TSV, frozenset({'P61981', 'P24534'}),
+        )
+        assert 'P61981' in index
+        assert 'P24534' in index
 
-# ── Test Class 6: Score Extraction Helpers ───────────────────────────
-
-@pytest.mark.protvar
-class TestExtractHelpers:
-    """Test score extraction helper functions."""
-
-    def test_extract_am_score_found(self, test_protvar_responses_dir):
-        """AM score extracted for known substitution."""
-        scores = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        result = extract_am_score(scores, 'A')
-        assert result == TEST_AM_SCORE_R4A
-
-    def test_extract_am_score_not_found(self, test_protvar_responses_dir):
-        """AM score returns None for non-existent substitution."""
-        scores = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        result = extract_am_score(scores, 'R')  # R is the wildtype, not a mutation
-        assert result is None
-
-    def test_extract_am_class_found(self, test_protvar_responses_dir):
-        """AM class extracted for known substitution."""
-        scores = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        result = extract_am_class(scores, 'A')
-        assert result == TEST_AM_CLASS_R4A
-
-    def test_extract_am_score_empty_list(self):
-        """AM score from empty list returns None."""
-        assert extract_am_score([], 'A') is None
-
-    def test_extract_foldx_ddg_found(self, test_protvar_responses_dir):
-        """FoldX ΔΔG extracted for known substitution."""
-        foldx = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        result = extract_foldx_ddg(foldx, 'A')
-        assert abs(result - TEST_FOLDX_DDG_R4A) < 0.001
-
-    def test_extract_foldx_ddg_not_found(self, test_protvar_responses_dir):
-        """FoldX ΔΔG returns None for non-existent substitution."""
-        foldx = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        result = extract_foldx_ddg(foldx, 'Z')
-        assert result is None
-
-    def test_extract_foldx_ddg_empty_list(self):
-        """FoldX ΔΔG from empty list returns None."""
-        assert extract_foldx_ddg([], 'A') is None
+    def test_19_substitutions_per_position(self):
+        index = load_alphamissense_scores(
+            TEST_AM_TSV, frozenset({'P61981'}),
+            variant_positions={'P61981': {1}},
+        )
+        pos1_entries = {k for k in index['P61981'] if k[0] == 1}
+        assert len(pos1_entries) == 19
 
 
-# ── Test Class 7: Interface Check ────────────────────────────────────
+# ── Test Class 5: FoldX Export Loading ───────────────────────────────
 
 @pytest.mark.protvar
-class TestInterfaceCheck:
-    """Test check_protvar_interface() function."""
+class TestFoldXExportLoading:
+    """Test load_foldx_export() function."""
 
-    def test_position_at_interface(self, test_protvar_responses_dir):
-        """Position 4 of P61981 is at interface (in bresidues)."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P61981_4.json")
-        assert check_protvar_interface(interactions, "P61981", 4) is True
+    def test_load_p61981(self):
+        index = load_foldx_export(TEST_FOLDX_CSV, frozenset({'P61981'}))
+        assert 'P61981' in index
+        assert (1, 'A') in index['P61981']
+        assert abs(index['P61981'][(1, 'A')]['foldx_ddg'] - 0.114505) < 0.0001
 
-    def test_position_not_at_interface(self, test_protvar_responses_dir):
-        """Position 999 is not at any interface."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P61981_4.json")
-        assert check_protvar_interface(interactions, "P61981", 999) is False
+    def test_plddt_loaded(self):
+        index = load_foldx_export(TEST_FOLDX_CSV, frozenset({'P61981'}))
+        assert abs(index['P61981'][(1, 'A')]['plddt'] - 54.50) < 0.01
+        assert abs(index['P61981'][(2, 'A')]['plddt'] - 71.09) < 0.01
 
-    def test_no_interactions_returns_false(self):
-        """Empty interaction list → not at interface."""
-        assert check_protvar_interface([], "P61981", 4) is False
+    def test_filter_by_accession(self):
+        index = load_foldx_export(TEST_FOLDX_CSV, frozenset({'P24534'}))
+        assert 'P24534' in index
+        assert 'P61981' not in index
 
-    def test_isoform_accession_matching(self, test_protvar_responses_dir):
-        """Isoform stripping allows matching (P61981-2 matches P61981)."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P61981_4.json")
-        # P61981-2 should still match entries with P61981
-        assert check_protvar_interface(interactions, "P61981-2", 4) is True
+    def test_filter_by_position(self):
+        index = load_foldx_export(
+            TEST_FOLDX_CSV, frozenset({'P61981'}),
+            variant_positions={'P61981': {2}},
+        )
+        assert (2, 'A') in index['P61981']
+        assert (1, 'A') not in index['P61981']
 
+    def test_empty_accessions(self):
+        index = load_foldx_export(TEST_FOLDX_CSV, frozenset())
+        assert index == {}
 
-# ── Test Class 8: Interface Agreement ────────────────────────────────
+    def test_missing_file(self):
+        index = load_foldx_export(
+            Path('/nonexistent/file.csv'), frozenset({'P61981'}),
+        )
+        assert index == {}
 
-@pytest.mark.protvar
-class TestInterfaceAgreement:
-    """Test compute_interface_agreement() function."""
+    def test_negative_ddg_values(self):
+        index = load_foldx_export(TEST_FOLDX_CSV, frozenset({'P61981'}))
+        assert index['P61981'][(1, 'Q')]['foldx_ddg'] < 0
 
-    def test_full_agreement(self, test_protvar_responses_dir):
-        """All toolkit interface positions confirmed by ProtVar → 1.0."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P61981_4.json")
-        protvar_data = {4: {'interactions': interactions}}
-        result = compute_interface_agreement({4}, protvar_data, "P61981")
-        assert result == 1.0
+    def test_p24534_destabilising(self):
+        index = load_foldx_export(TEST_FOLDX_CSV, frozenset({'P24534'}))
+        ddg = index['P24534'][(1, 'F')]['foldx_ddg']
+        assert ddg > FOLDX_DESTABILISING_THRESHOLD
 
-    def test_no_agreement(self, test_protvar_responses_dir):
-        """ProtVar has empty interactions → 0.0."""
-        protvar_data = {4: {'interactions': []}}
-        result = compute_interface_agreement({4}, protvar_data, "P61981")
-        assert result == 0.0
+    def test_multiple_proteins(self):
+        index = load_foldx_export(
+            TEST_FOLDX_CSV, frozenset({'P61981', 'P24534'}),
+        )
+        assert 'P61981' in index
+        assert 'P24534' in index
 
-    def test_empty_toolkit_positions(self):
-        """No toolkit interface positions → empty string."""
-        result = compute_interface_agreement(set(), {}, "P61981")
-        assert result == ''
-
-    def test_no_protvar_data(self):
-        """Positions not in ProtVar index → empty string."""
-        result = compute_interface_agreement({100, 200}, {}, "P61981")
-        assert result == ''
-
-    def test_partial_agreement(self, test_protvar_responses_dir):
-        """Mix of confirmed and non-confirmed positions."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P61981_4.json")
-        # Position 4 is at interface, position 999 is not
-        protvar_data = {
-            4: {'interactions': interactions},
-            999: {'interactions': interactions},  # reuse but 999 not in residue lists
-        }
-        result = compute_interface_agreement({4, 999}, protvar_data, "P61981")
-        assert result == 0.5
+    def test_19_substitutions_per_position(self):
+        index = load_foldx_export(
+            TEST_FOLDX_CSV, frozenset({'P61981'}),
+            variant_positions={'P61981': {1}},
+        )
+        pos1_entries = {k for k in index['P61981'] if k[0] == 1}
+        assert len(pos1_entries) == 19
 
 
-# ── Test Class 9: Parse Variant Details ──────────────────────────────
+# ── Test Class 6: Index Building ─────────────────────────────────────
 
 @pytest.mark.protvar
-class TestParseVariantDetails:
+class TestIndexBuilding:
+    """Test build_protvar_index() function."""
+
+    def test_merges_am_and_foldx(self, small_index):
+        entry = small_index['P61981'][(1, 'A')]
+        assert 'am_score' in entry
+        assert 'am_class' in entry
+        assert 'foldx_ddg' in entry
+        assert 'plddt' in entry
+
+    def test_isoform_stripping(self):
+        index = build_protvar_index(
+            accessions={'P61981-2'},
+            foldx_path=TEST_FOLDX_CSV, am_path=TEST_AM_TSV,
+        )
+        assert 'P61981' in index
+
+    def test_missing_am_file(self):
+        index = build_protvar_index(
+            accessions={'P61981'},
+            foldx_path=TEST_FOLDX_CSV, am_path=Path('/nonexistent.tsv'),
+        )
+        assert 'P61981' in index
+        entry = index['P61981'][(1, 'A')]
+        assert 'foldx_ddg' in entry
+        assert 'am_score' not in entry
+
+    def test_missing_foldx_file(self):
+        index = build_protvar_index(
+            accessions={'P61981'},
+            foldx_path=Path('/nonexistent.csv'), am_path=TEST_AM_TSV,
+        )
+        assert 'P61981' in index
+        entry = index['P61981'][(1, 'A')]
+        assert 'am_score' in entry
+        assert 'foldx_ddg' not in entry
+
+    def test_both_missing_returns_empty(self):
+        index = build_protvar_index(
+            accessions={'P61981'},
+            foldx_path=Path('/nonexistent.csv'),
+            am_path=Path('/nonexistent.tsv'),
+        )
+        assert index == {}
+
+    def test_empty_accessions(self):
+        index = build_protvar_index(
+            accessions=set(),
+            foldx_path=TEST_FOLDX_CSV, am_path=TEST_AM_TSV,
+        )
+        assert index == {}
+
+    def test_position_filtering(self):
+        index = build_protvar_index(
+            accessions={'P61981'},
+            variant_positions={'P61981': {1}},
+            foldx_path=TEST_FOLDX_CSV, am_path=TEST_AM_TSV,
+        )
+        assert (1, 'A') in index['P61981']
+        assert (2, 'A') not in index['P61981']
+
+    def test_default_paths_are_set(self):
+        """Default paths are defined (not validated — real files are large)."""
+        assert DEFAULT_FOLDX_EXPORT is not None
+        assert DEFAULT_AM_FILE is not None
+
+
+# ── Test Class 7: Score Lookup ───────────────────────────────────────
+
+@pytest.mark.protvar
+class TestLookup:
+    """Test lookup_score() function."""
+
+    def test_existing_variant(self, small_index):
+        result = lookup_score(small_index, 'P61981', 1, 'A')
+        assert result is not None
+        assert abs(result['am_score'] - 0.363) < 0.001
+        assert abs(result['foldx_ddg'] - 0.114505) < 0.0001
+
+    def test_missing_protein(self, small_index):
+        assert lookup_score(small_index, 'NONEXISTENT', 1, 'A') is None
+
+    def test_missing_position(self, small_index):
+        assert lookup_score(small_index, 'P61981', 999, 'A') is None
+
+    def test_isoform_stripping(self, small_index):
+        result = lookup_score(small_index, 'P61981-2', 1, 'A')
+        assert result is not None
+
+    def test_plddt_in_result(self, small_index):
+        result = lookup_score(small_index, 'P61981', 1, 'A')
+        assert abs(result['plddt'] - 54.50) < 0.01
+
+    def test_am_class_in_result(self, small_index):
+        result = lookup_score(small_index, 'P61981', 1, 'D')
+        assert result['am_class'] == 'pathogenic'
+
+
+# ── Test Class 8: Variant Detail Parsing ─────────────────────────────
+
+@pytest.mark.protvar
+class TestVariantDetailParsing:
     """Test _parse_variant_details_for_protvar() function."""
 
     def test_single_variant(self):
-        """Parses single variant correctly."""
-        result = _parse_variant_details_for_protvar("R4A:interface_core:pathogenic")
-        assert result == [('R', 4, 'A')]
+        result = _parse_variant_details_for_protvar('K81P:interface_core:pathogenic')
+        assert result == [('K', 81, 'P')]
 
     def test_multiple_variants(self):
-        """Parses multiple pipe-separated variants."""
         result = _parse_variant_details_for_protvar(
-            "R4A:interface_core:pathogenic|K10E:surface_non_interface:-"
+            'K81P:interface_core:pathogenic|E82K:interface_rim:VUS'
         )
-        assert result == [('R', 4, 'A'), ('K', 10, 'E')]
+        assert len(result) == 2
 
-    def test_truncation_indicator_skipped(self):
-        """Truncation indicator ...(+N more) is ignored."""
+    def test_truncation_marker_skipped(self):
         result = _parse_variant_details_for_protvar(
-            "R4A:interface_core:pathogenic|...(+5 more)"
+            'K81P:interface_core:pathogenic|...(+5 more)'
         )
-        assert result == [('R', 4, 'A')]
+        assert len(result) == 1
 
     def test_empty_string(self):
-        """Empty string returns empty list."""
         assert _parse_variant_details_for_protvar('') == []
 
-    def test_stop_codon_variant(self):
-        """Stop codon variant with * is parsed."""
-        result = _parse_variant_details_for_protvar("R4*:interface_core:pathogenic")
-        assert result == [('R', 4, '*')]
+    def test_stop_codon(self):
+        result = _parse_variant_details_for_protvar('K81*:interface_core:pathogenic')
+        assert result == [('K', 81, '*')]
 
 
-# ── Test Class 10: Format Details ────────────────────────────────────
+# ── Test Class 9: Formatting ─────────────────────────────────────────
 
 @pytest.mark.protvar
-class TestFormatDetails:
+class TestFormatting:
     """Test format_protvar_details() function."""
 
+    def test_single_variant(self):
+        result = format_protvar_details([{
+            'ref_aa': 'M', 'position': 1, 'alt_aa': 'A',
+            'am_score': 0.363, 'am_class': 'ambiguous', 'foldx_ddg': 0.114,
+        }])
+        assert result == 'M1A:am=0.36:ambiguous:foldx=0.11'
+
+    def test_missing_am_score(self):
+        result = format_protvar_details([{
+            'ref_aa': 'M', 'position': 1, 'alt_aa': 'A',
+            'am_score': None, 'am_class': '', 'foldx_ddg': 0.5,
+        }])
+        assert 'am=-' in result
+
+    def test_missing_foldx_ddg(self):
+        result = format_protvar_details([{
+            'ref_aa': 'M', 'position': 1, 'alt_aa': 'A',
+            'am_score': 0.5, 'am_class': 'ambiguous', 'foldx_ddg': None,
+        }])
+        assert 'foldx=-' in result
+
     def test_empty_list(self):
-        """Empty input returns empty string."""
         assert format_protvar_details([]) == ''
 
-    def test_single_variant_format(self):
-        """Single variant formatted correctly."""
-        variants = [{'ref_aa': 'R', 'position': 4, 'alt_aa': 'A',
-                      'am_score': 0.9137, 'am_class': 'PATHOGENIC',
-                      'foldx_ddg': 3.177}]
-        result = format_protvar_details(variants)
-        assert result == 'R4A:am=0.91:PATHOGENIC:foldx=3.18'
-
-    def test_none_scores_show_dash(self):
-        """None scores display as dash."""
-        variants = [{'ref_aa': 'K', 'position': 10, 'alt_aa': 'E',
-                      'am_score': None, 'am_class': None,
-                      'foldx_ddg': None}]
-        result = format_protvar_details(variants)
-        assert result == 'K10E:am=-:-:foldx=-'
-
-    def test_truncation_with_limit(self):
-        """Excess variants show truncation indicator."""
+    def test_truncation(self):
         variants = [
-            {'ref_aa': 'R', 'position': i, 'alt_aa': 'A',
-             'am_score': 0.5, 'am_class': 'AMBIGUOUS', 'foldx_ddg': 1.0}
-            for i in range(1, 6)
+            {'ref_aa': 'M', 'position': i, 'alt_aa': 'A',
+             'am_score': 0.5, 'am_class': 'ambiguous', 'foldx_ddg': 0.1}
+            for i in range(25)
+        ]
+        result = format_protvar_details(variants)
+        assert '...(+5 more)' in result
+
+    def test_custom_limit(self):
+        variants = [
+            {'ref_aa': 'M', 'position': i, 'alt_aa': 'A',
+             'am_score': 0.5, 'am_class': 'ambiguous', 'foldx_ddg': 0.1}
+            for i in range(5)
         ]
         result = format_protvar_details(variants, limit=3)
         assert '...(+2 more)' in result
-        assert result.count('|') == 3  # 3 entries + truncation
+
+
+# ── Test Class 10: Chain Scoring ─────────────────────────────────────
+
+@pytest.mark.protvar
+class TestChainScoring:
+    """Test _score_chain_variants_protvar() function."""
+
+    def test_am_mean_computed(self, small_index):
+        result = _score_chain_variants_protvar(
+            'P61981', 'M1A:interface_core:pathogenic', small_index,
+        )
+        assert abs(result['am_mean'] - 0.363) < 0.001
+
+    def test_foldx_mean_computed(self, small_index):
+        result = _score_chain_variants_protvar(
+            'P61981', 'M1A:interface_core:pathogenic', small_index,
+        )
+        assert abs(result['foldx_mean'] - 0.114505) < 0.001
+
+    def test_pathogenic_count(self, small_index):
+        result = _score_chain_variants_protvar(
+            'P61981', 'M1D:interface_core:pathogenic', small_index,
+        )
+        assert result['am_n_pathogenic'] == 1
+
+    def test_benign_not_counted(self, small_index):
+        result = _score_chain_variants_protvar(
+            'P61981', 'M1F:interface_core:pathogenic', small_index,
+        )
+        assert result['am_n_pathogenic'] == 0
+
+    def test_multiple_variants_mean(self, small_index):
+        details = 'M1A:interface_core:pathogenic|M1D:interface_core:pathogenic'
+        result = _score_chain_variants_protvar('P61981', details, small_index)
+        expected_am = round(mean([0.363, 0.809]), 4)
+        assert abs(result['am_mean'] - expected_am) < 0.001
+
+    def test_empty_details(self, small_index):
+        result = _score_chain_variants_protvar('P61981', '', small_index)
+        assert result['am_mean'] == ''
+        assert result['foldx_mean'] == ''
+        assert result['am_n_pathogenic'] == 0
+
+    def test_unknown_protein(self, small_index):
+        result = _score_chain_variants_protvar(
+            'NONEXISTENT', 'M1A:interface_core:pathogenic', small_index,
+        )
+        assert result['am_mean'] == ''
+        assert result['foldx_mean'] == ''
+
+    def test_details_string_generated(self, small_index):
+        result = _score_chain_variants_protvar(
+            'P61981', 'M1A:interface_core:pathogenic', small_index,
+        )
+        assert 'M1A:am=' in result['details']
 
 
 # ── Test Class 11: Annotation ────────────────────────────────────────
 
 @pytest.mark.protvar
 class TestAnnotation:
-    """Test annotate_results_with_protvar() and _score_chain_variants_protvar()."""
+    """Test annotate_results_with_protvar() function."""
 
-    def _build_test_index(self, responses_dir):
-        """Build a protvar_index from test data."""
-        return {
-            'P61981': {
-                4: {
-                    'scores': _load_test_json(responses_dir, "score_P61981_4.json"),
-                    'interactions': _load_test_json(responses_dir, "interaction_P61981_4.json"),
-                    'foldx': _load_test_json(responses_dir, "foldx_P61981_4.json"),
-                },
-            },
-            'P24534': {
-                81: {
-                    'scores': _load_test_json(responses_dir, "score_P24534_81.json"),
-                    'interactions': _load_test_json(responses_dir, "interaction_P24534_81.json"),
-                    'foldx': _load_test_json(responses_dir, "foldx_P24534_81.json"),
-                },
-            },
-        }
-
-    def test_adds_all_columns(self, test_protvar_responses_dir):
-        """All 8 CSV columns are set after annotation."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row(
-            details_a='R4A:interface_core:pathogenic',
-            details_b='P81A:surface_non_interface:-',
-        )]
-        annotate_results_with_protvar(results, idx)
-        for col in CSV_FIELDNAMES_PROTVAR:
-            assert col in results[0], f"Missing column: {col}"
-
-    def test_am_mean_computed(self, test_protvar_responses_dir):
-        """AlphaMissense mean is computed correctly for chain A."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row(details_a='R4A:interface_core:pathogenic')]
-        annotate_results_with_protvar(results, idx)
-        # Single variant R4A, AM score = 0.9137
-        assert results[0]['protvar_am_mean_a'] == TEST_AM_SCORE_R4A
-
-    def test_foldx_mean_computed(self, test_protvar_responses_dir):
-        """FoldX mean ΔΔG is computed correctly for chain A."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row(details_a='R4A:interface_core:pathogenic')]
-        annotate_results_with_protvar(results, idx)
-        assert abs(results[0]['protvar_foldx_mean_a'] - TEST_FOLDX_DDG_R4A) < 0.001
-
-    def test_no_variants_produces_empty(self, test_protvar_responses_dir):
-        """No variant details → empty columns."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row()]
-        annotate_results_with_protvar(results, idx)
-        assert results[0]['protvar_am_mean_a'] == ''
-        assert results[0]['protvar_details_a'] == ''
-
-    def test_empty_index_produces_empty_details(self):
-        """Empty ProtVar index → no scores but columns still set."""
-        results = [_make_result_row(details_a='R4A:interface_core:pathogenic')]
-        annotate_results_with_protvar(results, {})
-        assert results[0]['protvar_am_mean_a'] == ''
-        assert results[0]['protvar_details_a'] != ''  # formatted but with dashes
-
-    def test_both_chains_annotated(self, test_protvar_responses_dir):
-        """Both chain A and chain B are annotated independently."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row(
-            details_a='R4A:interface_core:pathogenic',
-            details_b='P81A:surface_non_interface:-',
-        )]
-        annotate_results_with_protvar(results, idx)
-        # Chain A has interactions, chain B does not
+    def test_annotates_both_chains(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': 'P24534',
+            'variant_details_a': 'M1A:interface_core:pathogenic',
+            'variant_details_b': 'M1D:interface_core:pathogenic',
+        }]
+        annotate_results_with_protvar(results, small_index)
         assert results[0]['protvar_am_mean_a'] != ''
         assert results[0]['protvar_am_mean_b'] != ''
 
-    def test_modifies_in_place(self, test_protvar_responses_dir):
-        """Results list is modified in-place, not copied."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row(details_a='R4A:interface_core:pathogenic')]
-        original_id = id(results[0])
-        annotate_results_with_protvar(results, idx)
-        assert id(results[0]) == original_id
+    def test_empty_details_produces_empty_columns(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': 'P24534',
+            'variant_details_a': '', 'variant_details_b': '',
+        }]
+        annotate_results_with_protvar(results, small_index)
+        assert results[0]['protvar_am_mean_a'] == ''
+        assert results[0]['protvar_foldx_mean_a'] == ''
+        assert results[0]['protvar_am_n_pathogenic_a'] == ''
+        assert results[0]['protvar_details_a'] == ''
 
-    def test_verbose_prints_stats(self, test_protvar_responses_dir, capsys):
-        """Verbose mode prints annotation statistics."""
-        idx = self._build_test_index(test_protvar_responses_dir)
-        results = [_make_result_row(details_a='R4A:interface_core:pathogenic')]
-        annotate_results_with_protvar(results, idx, verbose=True)
-        captured = capsys.readouterr()
-        assert 'ProtVar' in captured.err
-        assert 'annotated' in captured.err
-
-
-# ── Test Class 12: CSV Fieldnames ────────────────────────────────────
-
-@pytest.mark.protvar
-class TestCSVFieldnames:
-    """Test CSV column configuration."""
-
-    def test_column_count(self):
-        """Exactly 8 ProtVar columns."""
-        assert len(CSV_FIELDNAMES_PROTVAR) == 8
-
-    def test_all_columns_have_suffix(self):
-        """All columns end with _a or _b."""
+    def test_all_8_columns_set(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': 'P24534',
+            'variant_details_a': 'M1A:interface_core:pathogenic',
+            'variant_details_b': 'M1A:interface_core:pathogenic',
+        }]
+        annotate_results_with_protvar(results, small_index)
         for col in CSV_FIELDNAMES_PROTVAR:
-            assert col.endswith('_a') or col.endswith('_b'), \
-                f"Column {col} missing _a/_b suffix"
+            assert col in results[0], f"Missing column: {col}"
 
-    def test_no_duplicate_columns(self):
-        """No duplicate column names."""
-        assert len(CSV_FIELDNAMES_PROTVAR) == len(set(CSV_FIELDNAMES_PROTVAR))
+    def test_missing_protein(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': '', 'protein_b': '',
+            'variant_details_a': '', 'variant_details_b': '',
+        }]
+        annotate_results_with_protvar(results, small_index)
+        assert results[0]['protvar_am_mean_a'] == ''
+
+    def test_isoform_accession(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981-2', 'protein_b': 'P24534',
+            'variant_details_a': 'M1A:interface_core:pathogenic',
+            'variant_details_b': '',
+        }]
+        annotate_results_with_protvar(results, small_index)
+        assert results[0]['protvar_am_mean_a'] != ''
+
+    def test_pathogenic_count_column(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': '',
+            'variant_details_a': 'M1D:interface_core:pathogenic|M1F:surface_non_interface:benign',
+            'variant_details_b': '',
+        }]
+        annotate_results_with_protvar(results, small_index)
+        assert results[0]['protvar_am_n_pathogenic_a'] == 1
+
+    def test_foldx_mean_column(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': '',
+            'variant_details_a': 'M1A:interface_core:pathogenic',
+            'variant_details_b': '',
+        }]
+        annotate_results_with_protvar(results, small_index)
+        assert isinstance(results[0]['protvar_foldx_mean_a'], float)
+
+    def test_multiple_results(self, small_index):
+        results = [
+            {'complex_name': 'test1', 'protein_a': 'P61981', 'protein_b': 'P24534',
+             'variant_details_a': 'M1A:interface_core:pathogenic',
+             'variant_details_b': 'M1A:interface_core:pathogenic'},
+            {'complex_name': 'test2', 'protein_a': 'P61981', 'protein_b': '',
+             'variant_details_a': 'V2A:surface_non_interface:benign',
+             'variant_details_b': ''},
+        ]
+        annotate_results_with_protvar(results, small_index)
+        assert results[0]['protvar_am_mean_a'] != ''
+        assert results[1]['protvar_am_mean_a'] != ''
+
+    def test_details_string_set(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': '',
+            'variant_details_a': 'M1A:interface_core:pathogenic',
+            'variant_details_b': '',
+        }]
+        annotate_results_with_protvar(results, small_index)
+        assert 'M1A:am=' in results[0]['protvar_details_a']
+
+    def test_modifies_in_place(self, small_index):
+        results = [{
+            'complex_name': 'test', 'protein_a': 'P61981', 'protein_b': '',
+            'variant_details_a': 'M1A:interface_core:pathogenic',
+            'variant_details_b': '',
+        }]
+        ret = annotate_results_with_protvar(results, small_index)
+        assert ret is None
 
 
-# ── Test Class 13: CLI ───────────────────────────────────────────────
+# ── Test Class 12: CLI ───────────────────────────────────────────────
 
 @pytest.mark.protvar
 @pytest.mark.cli
 class TestCLI:
     """Test standalone CLI argument parsing."""
 
-    def test_parser_construction(self):
-        """Parser builds without error."""
-        parser = build_argument_parser()
-        assert parser is not None
+    def test_parser_creation(self):
+        assert build_argument_parser() is not None
 
     def test_summary_subcommand(self):
-        """Summary subcommand is recognised."""
-        parser = build_argument_parser()
-        args = parser.parse_args(["summary"])
-        assert args.command == "summary"
+        args = build_argument_parser().parse_args(['summary'])
+        assert args.command == 'summary'
 
     def test_lookup_subcommand(self):
-        """Lookup subcommand parses protein and position."""
-        parser = build_argument_parser()
-        args = parser.parse_args(["lookup", "--protein", "P61981", "--position", "4"])
-        assert args.command == "lookup"
-        assert args.protein == "P61981"
+        args = build_argument_parser().parse_args(['lookup', '--protein', 'P61981'])
+        assert args.command == 'lookup'
+        assert args.protein == 'P61981'
+
+    def test_lookup_with_position(self):
+        args = build_argument_parser().parse_args(
+            ['lookup', '--protein', 'P61981', '--position', '4'])
         assert args.position == 4
 
-    def test_custom_cache_dir(self):
-        """--cache-dir is parsed correctly."""
-        parser = build_argument_parser()
-        args = parser.parse_args(["--cache-dir", "/tmp/my_cache", "summary"])
-        assert args.cache_dir == "/tmp/my_cache"
+    def test_custom_foldx_export(self):
+        args = build_argument_parser().parse_args(
+            ['--foldx-export', '/custom/path.csv', 'summary'])
+        assert args.foldx_export == '/custom/path.csv'
+
+    def test_custom_am_file(self):
+        args = build_argument_parser().parse_args(
+            ['--am-file', '/custom/am.tsv', 'summary'])
+        assert args.am_file == '/custom/am.tsv'
 
 
-# ── Test Class 14: Regression Values ────────────────────────────────
+# ── Test Class 13: Regression Values ─────────────────────────────────
 
 @pytest.mark.protvar
 @pytest.mark.regression
 class TestRegressionValues:
-    """Regression tests with known reference values."""
+    """Verify exact numerical values from test data for P61981."""
 
-    def test_am_score_r4a_regression(self, test_protvar_responses_dir):
-        """AlphaMissense score for P61981 R4A matches known value."""
-        scores = _load_test_json(test_protvar_responses_dir, "score_P61981_4.json")
-        am = extract_am_score(scores, 'A')
-        assert am == TEST_AM_SCORE_R4A
+    def test_p61981_m1a_am_score(self, small_index):
+        result = lookup_score(small_index, 'P61981', 1, 'A')
+        assert result['am_score'] == 0.363
 
-    def test_foldx_ddg_r4a_regression(self, test_protvar_responses_dir):
-        """FoldX ΔΔG for P61981 R4A matches known value."""
-        foldx = _load_test_json(test_protvar_responses_dir, "foldx_P61981_4.json")
-        ddg = extract_foldx_ddg(foldx, 'A')
-        assert abs(ddg - TEST_FOLDX_DDG_R4A) < 0.001
+    def test_p61981_m1a_foldx_ddg(self, small_index):
+        result = lookup_score(small_index, 'P61981', 1, 'A')
+        assert abs(result['foldx_ddg'] - 0.114505) < 1e-6
 
-    def test_interface_check_regression(self, test_protvar_responses_dir):
-        """P61981 position 4 is confirmed at interface by ProtVar."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P61981_4.json")
-        assert check_protvar_interface(interactions, "P61981", 4) is True
+    def test_p61981_pos1_plddt(self, small_index):
+        result = lookup_score(small_index, 'P61981', 1, 'A')
+        assert result['plddt'] == 54.50
 
-    def test_no_interaction_regression(self, test_protvar_responses_dir):
-        """P24534 position 81 has no ProtVar interactions."""
-        interactions = _load_test_json(test_protvar_responses_dir,
-                                       "interaction_P24534_81.json")
-        assert interactions == []
-        assert check_protvar_interface(interactions, "P24534", 81) is False
+    def test_p61981_pos2_plddt(self, small_index):
+        result = lookup_score(small_index, 'P61981', 2, 'A')
+        assert result['plddt'] == 71.09
+
+    def test_p24534_m1w_destabilising(self, small_index):
+        result = lookup_score(small_index, 'P24534', 1, 'W')
+        assert abs(result['foldx_ddg'] - 4.79105) < 1e-4
+        assert result['foldx_ddg'] > FOLDX_DESTABILISING_THRESHOLD

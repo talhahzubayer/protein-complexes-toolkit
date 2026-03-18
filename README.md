@@ -12,7 +12,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`, 103 with `--foldx`) with automated quality flags, paradox detection, and optional enrichment
+- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate up to 13 figures with adaptive rendering for datasets from hundreds to millions of complexes
@@ -26,9 +26,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Protein sequence clustering: STRING cluster parsing, UniProt-mapped cluster indexing, homologous pair detection, and optional API-based homology scores
 - Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis
 - EVE stability scoring: evolutionary variant effect predictions mapped to pipeline variants via UniProt ID mapping, with per-chain EVE score summaries and pathogenicity classification
-- ProtVar API cross-validation: AlphaMissense pathogenicity scores, interaction predictions with pDockQ, and pre-computed FoldX ddG for interface variant positions
-- FoldX local stability predictions: subprocess-based FoldX BuildModel execution on AlphaFold2 complex structures with RepairPDB, SHA256-keyed caching, variant filtering (pathogenic + VUS at confident interface contacts), and per-chain DDG summaries
-- 805-test suite (783 real + 22 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API/subprocess tests
+- Offline AlphaMissense + monomeric FoldX scoring: pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) loaded from local files for instant variant scoring with no API dependency
+- 739-test suite (717 passing + 1 skipped + 21 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -47,12 +46,11 @@ protein-complexes-toolkit/
 ├── protein_clustering.py    # Protein sequence clustering and homology detection
 ├── variant_mapper.py        # Genetic variant mapping and structural context classification
 ├── stability_scorer.py      # EVE stability scoring and variant effect predictions
-├── protvar_client.py        # ProtVar API client (AlphaMissense, FoldX, interaction predictions)
-├── foldx_scorer.py          # FoldX local stability predictions (DDG computation, caching)
+├── protvar_client.py        # Offline AlphaMissense + monomeric FoldX scorer (local data files)
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (783 tests + 22 future placeholders)
+├── tests/                   # Test suite (706 tests + 21 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -69,36 +67,35 @@ protein-complexes-toolkit/
 │   ├── test_variant_mapper.py
 │   ├── test_stability_scorer.py
 │   ├── test_protvar_client.py
-│   ├── test_foldx_scorer.py
 │   └── offline_test_data/
-│       └── databases/                           # Small database excerpts for offline testing
-│           ├── string_api_responses/            # Pre-captured API responses (7 JSON files)
-│           ├── protvar_responses/               # Pre-captured ProtVar API responses (6 JSON files)
-│           ├── foldx_outputs/                  # Pre-captured FoldX BuildModel outputs (2 .fxout files)
-│           ├── test_aliases.txt                 # STRING aliases excerpt
-│           ├── test_biogrid.tab3.txt            # BioGRID excerpt
-│           ├── test_humap.pairsWprob            # HuMAP excerpt
-│           ├── test_humap_malformed.pairsWprob  # Malformed HuMAP for edge-case tests
-│           ├── test_huri.tsv                    # HuRI excerpt
-│           ├── test_string_clusters.txt         # STRING clusters excerpt
-│           ├── test_string_links.txt            # STRING links excerpt
-│           ├── test_uniprot_variants.txt        # UniProt variants excerpt (20 rows)
-│           ├── test_clinvar_variants.txt        # ClinVar excerpt (6 rows)
-│           ├── test_exac_constraint.txt         # ExAC constraint excerpt (5 rows)
-│           ├── test_eve_scores.csv              # EVE scores excerpt (80 rows from 1433G_HUMAN)
-│           └── test_idmapping.dat               # UniProt ID mapping excerpt (8 rows)
-├── data/                                 # External databases (not included in repo)
-│    ├── ppi/                             # PPI databases (see "Setting Up Data")
-│    ├── clusters/                        # STRING sequence clusters (see "Setting Up Data")
-│    ├── variants/                        # Variant databases (see "Setting Up Data")
-│    ├── stability/                       # Stability prediction data (see "Setting Up Data")
-│    │    ├── HUMAN_9606_idmapping.dat    # UniProt ID mapping (accession -> entry name)
-│    │    └── EVE_all_data/               # EVE variant effect scores (3,211 CSVs)
-│    ├── string_api_cache/                # STRING API response cache (auto-generated)
-│    ├── protvar_cache/                   # ProtVar API response cache (auto-generated)
-│    └── foldx_cache/                     # FoldX DDG result cache (auto-generated)
-├── foldx5_Windows/                       # FoldX binary (not included in repo - see "Setting Up Data")
-└── Test_Data/							  # Not included in repo (see "Setting Up Test Data")
+│       └── databases/                            # Small database excerpts for offline testing
+│           ├── string_api_responses/             # Pre-captured API responses (7 JSON files)
+│           ├── protvar_responses/                # Pre-captured ProtVar API responses (6 JSON files, historical)
+│           ├── test_afdb_foldx_export.csv        # AFDB FoldX export excerpt (P61981 + P24534)
+│           ├── test_alphamissense.tsv            # AlphaMissense excerpt (P61981 + P24534)
+│           ├── test_aliases.txt                  # STRING aliases excerpt
+│           ├── test_biogrid.tab3.txt             # BioGRID excerpt
+│           ├── test_humap.pairsWprob             # HuMAP excerpt
+│           ├── test_humap_malformed.pairsWprob   # Malformed HuMAP for edge-case tests
+│           ├── test_huri.tsv                     # HuRI excerpt
+│           ├── test_string_clusters.txt          # STRING clusters excerpt
+│           ├── test_string_links.txt             # STRING links excerpt
+│           ├── test_uniprot_variants.txt         # UniProt variants excerpt (20 rows)
+│           ├── test_clinvar_variants.txt         # ClinVar excerpt (6 rows)
+│           ├── test_exac_constraint.txt          # ExAC constraint excerpt (5 rows)
+│           ├── test_eve_scores.csv               # EVE scores excerpt (80 rows from 1433G_HUMAN)
+│           └── test_idmapping.dat                # UniProt ID mapping excerpt (8 rows)
+├── data/                                         # External databases (not included in repo)
+│    ├── ppi/                                     # PPI databases (see "Setting Up Data")
+│    ├── clusters/                                # STRING sequence clusters (see "Setting Up Data")
+│    ├── variants/                                # Variant databases (see "Setting Up Data")
+│    ├── stability/                               # Stability prediction data (see "Setting Up Data")
+│    │    ├── HUMAN_9606_idmapping.dat            # UniProt ID mapping (accession -> entry name)
+│    │    ├── EVE_all_data/                       # EVE variant effect scores (3,211 CSVs)
+│    │    ├── AlphaMissense_aa_substitutions.tsv  # AlphaMissense pathogenicity (216M variants)
+│    │    └── afdb_foldx_export_20250210.csv      # AFDB FoldX DDG + pLDDT (209M substitutions)
+│    └── string_api_cache/                        # STRING API response cache (auto-generated)
+└── Test_Data/							          # Not included in repo (see "Setting Up Test Data")
 ```
 
 
@@ -146,15 +143,9 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                                            │
                                                            ▼ (optional --protvar)
                                                protvar_client.py
-                                             (ProtVar API cross-validation:
-                                              AlphaMissense, FoldX ddG,
-                                              interaction predictions)
-                                                           │
-                                                           ▼ (optional --foldx)
-                                                 foldx_scorer.py
-                                             (local FoldX BuildModel on
-                                              complex structures, DDG
-                                              for interface variants)
+                                             (offline AlphaMissense +
+                                              monomeric FoldX scoring
+                                              from local data files)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -182,7 +173,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`, 103 with `--foldx`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional ProtVar cross-validation adds AlphaMissense scores, FoldX ddG, and interface agreement via `--protvar` (requires `--variants`). Optional FoldX local stability predictions add per-chain DDG means, destabilising counts, and coverage via `--foldx` (requires `--variants`). STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional offline AlphaMissense + monomeric FoldX scoring adds pathogenicity scores, DDG values, and pathogenic variant counts via `--protvar` (requires `--variants`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
 **visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present in the input CSV.
 
@@ -198,9 +189,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **stability_scorer.py**: Integrates EVE (Evolutionary model of Variant Effect) pathogenicity predictions with the variant mapping pipeline. Loads per-protein EVE score CSVs keyed by UniProt entry name (e.g. `1433G_HUMAN.csv`) using a `HUMAN_9606_idmapping.dat` mapping file to convert from pipeline accessions (e.g. `P61981`). Lazy-loads only EVE CSVs for proteins in the current run. `annotate_results_with_stability()` adds 8 CSV columns: per-chain mean EVE scores, pathogenic counts, coverage fractions, and pipe-separated stability detail strings. Isoform accessions are automatically stripped to canonical before EVE lookup. Standalone CLI supports `summary` (coverage stats) and `lookup` (per-protein/position score query) subcommands.
 
-**foldx_scorer.py**: Runs FoldX BuildModel locally on AlphaFold2 complex PDB structures to compute DDG (change in binding free energy) for interface variants. Wraps the FoldX binary via `subprocess.run()` with RepairPDB before mutations. Filters to pathogenic + VUS variants at confident interface contacts (PAE <5 Angstrom + pLDDT >= 70) in High/Medium tier complexes. SHA256-keyed caching of FoldX outputs (matching `string_api.py` / `protvar_client.py` pattern). `numberOfRuns=3` for balanced runtime vs statistical reliability. DDG > 1.6 kcal/mol is conventionally destabilising. `annotate_results_with_foldx()` adds 8 CSV columns: per-chain DDG means, destabilising counts, coverage fractions, and pipe-separated detail strings. Standalone CLI supports `summary` (cache statistics) and `lookup` (per-variant DDG query) subcommands. Note: ProtVar's pre-computed FoldX ddG (`--protvar`) uses monomeric PDB structures (folding stability), while local FoldX (`--foldx`) uses complex structures (binding stability) -- these are complementary measurements.
-
-**protvar_client.py**: Cross-validates pipeline variant predictions against the ProtVar API (EBI). Queries three endpoints per variant position: `/score/{acc}/{pos}` for AlphaMissense pathogenicity scores, `/prediction/interaction/{acc}/{pos}` for interface predictions with pDockQ scores and binding residues, and `/prediction/foldx/{acc}/{pos}` for pre-computed FoldX ddG stability predictions. Architecture mirrors `string_api.py`: rate-limited requests (1s between calls), automatic retry with exponential backoff on HTTP 429/5xx, and SHA256-keyed JSON response caching (auto-enabled to `data/protvar_cache/`). Isoform accessions are stripped to canonical before API lookup (e.g. `P61981-2` to `P61981`). `annotate_results_with_protvar()` adds 8 CSV columns: per-chain AlphaMissense mean scores, FoldX mean ddG, interface agreement fractions, and pipe-separated detail strings. Standalone CLI supports `summary` (cache statistics) and `lookup` (per-protein/position score query) subcommands. Raises `ProtVarAPIError` on failure after retries.
+**protvar_client.py**: Offline pathogenicity and stability scoring using two pre-computed data files: AlphaMissense pathogenicity scores (`AlphaMissense_aa_substitutions.tsv`, 216M variants from DeepMind) and AFDB monomeric FoldX DDG values (`afdb_foldx_export_20250210.csv`, 209M substitutions from EBI). Both files are streamed with accession/position filtering for memory efficiency. No API dependency — all scoring is local. `annotate_results_with_protvar()` adds 8 CSV columns: per-chain AlphaMissense mean scores, monomeric FoldX mean DDG, AlphaMissense pathogenic variant counts, and pipe-separated detail strings. Isoform accessions are automatically stripped to canonical. Standalone CLI supports `summary` (data statistics) and `lookup` (per-protein/position score query) subcommands.
 
 **variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
@@ -263,23 +252,14 @@ mkdir -p data/ppi data/clusters data/variants data/stability
 
 > **Note:** The EVE bulk download page offers several archives (MSAs, VCF files, PRC/ROC curves). Only the **variant files** archive is needed - the others are model training inputs or diagnostic plots not used by the pipeline. The `HUMAN_9606_idmapping.dat` file maps UniProt accessions to entry names (e.g. `P61981` -> `1433G_HUMAN`) which are used as EVE CSV filenames.
 
-6. **Obtain FoldX** (required for `--foldx`, optional otherwise):
+6. Download AlphaMissense and AFDB monomeric FoldX data into `data/stability/` (required for `--protvar`):
 
-The `foldx5_Windows/` directory is **not included** in this repository. FoldX is proprietary software that requires a free academic licence. To obtain it:
+| File | Source | Download |
+|------|--------|----------|
+| `AlphaMissense_aa_substitutions.tsv` | Zenodo | [zenodo.org/records/10813168](https://zenodo.org/records/10813168) - download `AlphaMissense_aa_substitutions.tsv.gz`, decompress into `data/stability/` |
+| `afdb_foldx_export_20250210.csv` | EBI | [ftp.ebi.ac.uk/pub/databases/ProtVar/predictions/stability/](https://ftp.ebi.ac.uk/pub/databases/ProtVar/predictions/stability/) - Pre-computed monomeric FoldX DDG + pLDDT for all human protein positions. Download `2025.02.10_foldx_energy.csv.gz`, decompress into `data/stability/` |
 
-1. Create an account at [foldxsuite.crg.eu](https://foldxsuite.crg.eu/)
-2. Request the appropriate licence (free for academic/non-commercial use)
-3. Once approved, you will receive a download link via email
-4. Download the FoldX binary and extract it into the project root as `foldx5_Windows/`
-
-The directory should contain at minimum:
-```
-foldx5_Windows/
-├── foldx_1_20270131.exe    # FoldX executable (or equivalent version)
-└── rotabase.txt            # Rotamer library (required)
-```
-
-> **Note:** FoldX is only needed for the `--foldx` flag (Phase D.3 local stability predictions). All other pipeline features work without it. The test suite does not require the FoldX binary - all FoldX subprocess calls are mocked in tests.
+> **Note:** These 2 files (~14 GB total) provide offline AlphaMissense pathogenicity scores and monomeric FoldX stability predictions. They replace the previous ProtVar API dependency, eliminating the need for internet access during `--protvar` scoring.
 
 7. Verify the directory contents:
 ```
@@ -298,10 +278,12 @@ data/
 │   └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
 └── stability/
     ├── HUMAN_9606_idmapping.dat               # UniProt ID mapping (~145 MB)
-    └── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
-        ├── 1433G_HUMAN.csv
-        ├── 1433Z_HUMAN.csv
-        └── ...
+    ├── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
+    │   ├── 1433G_HUMAN.csv
+    │   ├── 1433Z_HUMAN.csv
+    │   └── ...
+    ├── AlphaMissense_aa_substitutions.tsv     # AlphaMissense pathogenicity (~6.3 GB)
+    └── afdb_foldx_export_20250210.csv         # AFDB FoldX DDG + pLDDT (~7.7 GB)
 ```
 
 
@@ -479,33 +461,24 @@ python stability_scorer.py lookup --stability-dir data/stability/ --protein P619
 ### ProtVar Cross-Validation
 
 ```bash
-# With ProtVar API cross-validation (requires --variants)
+# With offline AlphaMissense + monomeric FoldX scoring (requires --variants)
 python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --protvar
 
-# Standalone: look up ProtVar data for a position
+# With custom AlphaMissense file path
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --protvar --am-file data/stability/AlphaMissense_aa_substitutions.tsv
+
+# Standalone: look up scores for a protein/position
 python protvar_client.py lookup --protein P61981 --position 4
 
-# Standalone: cache summary
+# Standalone: data file summary
 python protvar_client.py summary
 ```
 
-### FoldX Local Stability Predictions
+### Full Pipeline
 
 ```bash
-# With FoldX local stability predictions (requires --variants)
-python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --foldx
-
-# With custom FoldX binary path
-python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --variants --foldx --foldx-binary /path/to/foldx
-
 # Full pipeline with all features
-python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar --foldx
-
-# Standalone: look up FoldX DDG for a variant
-python foldx_scorer.py lookup --pdb complex.pdb --chain A --position 81 --wildtype K --mutant P
-
-# Standalone: cache summary
-python foldx_scorer.py summary --cache-dir data/foldx_cache
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar
 ```
 
 ### Database Ingestion & ID Mapping
@@ -592,9 +565,6 @@ python -m pytest tests/ -m "stability" -v
 # ProtVar API tests (mocked, no network)
 python -m pytest tests/ -m "protvar" -v
 
-# FoldX local stability tests (mocked, no binary execution)
-python -m pytest tests/ -m "foldx" -v
-
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
 ```
@@ -622,7 +592,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (48 base columns, 60 with enrichment, 67 with clustering, 79 with variants, 87 with stability, 95 with protvar, 103 with foldx)
+### CSV (48 base columns, 60 with enrichment, 67 with clustering, 79 with variants, 87 with stability, 95 with protvar)
 
 The main output CSV groups columns into:
 
@@ -640,8 +610,7 @@ The main output CSV groups columns into:
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |
 | **Variants** (with `--variants`) | n_variants_a/b, n_interface_variants_a/b, n_pathogenic_interface_variants, interface_variant_enrichment, variant_details_a/b, gene_constraint_pli_a/b, gene_constraint_mis_z_a/b |
 | **Stability** (with `--stability`) | eve_score_mean_a/b, eve_n_pathogenic_a/b, eve_coverage_a/b, stability_details_a/b |
-| **ProtVar** (with `--protvar`) | protvar_am_mean_a/b, protvar_foldx_mean_a/b, protvar_interface_agreement_a/b, protvar_details_a/b |
-| **FoldX** (with `--foldx`) | foldx_ddg_mean_a/b, foldx_n_destabilising_a/b, foldx_coverage_a/b, foldx_details_a/b |
+| **ProtVar** (with `--protvar`) | protvar_am_mean_a/b, protvar_foldx_mean_a/b, protvar_am_n_pathogenic_a/b, protvar_details_a/b |
 
 ### JSONL Interface Export
 
@@ -681,8 +650,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
 - **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
 - **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, toolkit integration with `--stability` flag
-- **ProtVar API Cross-Validation (D.1):** ProtVar API client for AlphaMissense scores, FoldX ddG, and interaction predictions; rate-limited caching mirroring `string_api.py` pattern; 8 CSV columns; toolkit integration with `--protvar` flag
-- **FoldX Local Stability Predictions (D.3):** Subprocess-based FoldX BuildModel execution on AlphaFold2 complex structures with RepairPDB, SHA256-keyed caching, variant filtering (pathogenic + VUS at confident interface contacts), numberOfRuns=3; 8 CSV columns; toolkit integration with `--foldx` flag
+- **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns; toolkit integration with `--protvar` flag
 
 ### Planned
 - **Disease & Pathway Integration:** Map complexes to KEGG/Reactome pathways, build interaction networks
@@ -692,7 +660,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **805 tests** across 18 modules (783 real + 22 future placeholders):
+The test suite contains **739 tests** across 16 modules (718 real + 21 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -709,13 +677,12 @@ The test suite contains **805 tests** across 18 modules (783 real + 22 future pl
 | test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
 | test_variant_mapper.py | 103 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context (cross-chain distance), enrichment, CLI, toolkit integration |
 | test_stability_scorer.py | 59 | EVE score loading, entry-name mapping, index building, annotation, formatting, parsing, CSV columns, CLI, regression |
-| test_protvar_client.py | 68 | ProtVar API caching, score extraction, interface agreement, annotation, regression, CLI |
-| test_foldx_scorer.py | 84 | FoldX binary validation, caching, variant filtering, mutation formatting, PDB preparation, output parsing, DDG computation, annotation, CSV columns, CLI, regression |
-| test_future_aims.py | 7 + 22 | 7 real database tests + 22 future placeholders |
+| test_protvar_client.py | 88 | Offline AlphaMissense TSV loading, AFDB FoldX CSV loading, AM variant parsing, combined index building, score lookup, chain scoring, detail formatting, annotation, CSV columns, CLI, regression |
+| test_future_aims.py | 14 + 21 | 14 real tests (7 database + 7 variant/stability) + 21 future placeholders |
 
-**Results:** 781 passing, 1 skipped (Fig 10 - all test complexes are dimers), 22 future placeholders (deselected by default), 1 warning
+**Results:** 717 passing, 1 skipped (Fig 10 — all test complexes are dimers), 21 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (ProtVar API cross-validation), `foldx` (FoldX local stability predictions, mocked), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `future` (unimplemented features)
 
 
 ## Acknowledgements

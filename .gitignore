@@ -6,9 +6,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# FoldX
-foldx5_Windows/
-
 # Pytest
 .pytest_cache/
 tests/test_output/

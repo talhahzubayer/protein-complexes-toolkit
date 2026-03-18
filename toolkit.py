@@ -42,6 +42,7 @@ Usage:
     python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -v
 """
 
+import gc
 import os
 import sys
 import argparse
@@ -620,7 +621,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False, include_foldx: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -642,12 +643,9 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
     if include_protvar:
         from protvar_client import CSV_FIELDNAMES_PROTVAR
         fieldnames.extend(CSV_FIELDNAMES_PROTVAR)
-    if include_foldx:
-        from foldx_scorer import CSV_FIELDNAMES_FOLDX
-        fieldnames.extend(CSV_FIELDNAMES_FOLDX)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False, include_foldx: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -659,9 +657,8 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_variants: Whether to include variant mapping columns.
         include_stability: Whether to include stability scoring columns (EVE scores).
         include_protvar: Whether to include ProtVar API cross-validation columns.
-        include_foldx: Whether to include FoldX local stability prediction columns.
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar, include_foldx)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar)
 
     with open(output_path, 'w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
@@ -1231,7 +1228,8 @@ Examples:
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--workers", "-w", type=int, default=1,
                         help="Number of parallel workers (default: 1 = sequential). "
-                             "Values >1 enable multiprocessing via ProcessPoolExecutor.")
+                             "Used for initial complex analysis. Values >1 enable "
+                             "multiprocessing via ProcessPoolExecutor.")
     parser.add_argument("--checkpoint", action="store_true",
                         help="Enable periodic checkpointing (saves progress every "
                              f"{CHECKPOINT_INTERVAL} complexes to <output>{CHECKPOINT_SUFFIX})")
@@ -1273,20 +1271,14 @@ Examples:
                         nargs='?', const='__default__', default=None,
                         help="Score variant stability using EVE evolutionary predictions. "
                              "Requires --variants. Default: data/stability/")
-    parser.add_argument("--protvar", metavar="CACHE_DIR",
+    parser.add_argument("--protvar", metavar="FOLDX_EXPORT",
                         nargs='?', const='__default__', default=None,
-                        help="Cross-validate variants with ProtVar API (AlphaMissense scores, "
-                             "interaction predictions, FoldX ddG). Requires --variants. "
-                             "Incompatible with --no-api. Default cache: data/protvar_cache/")
-    parser.add_argument("--foldx", metavar="CACHE_DIR",
-                        nargs='?', const='__default__', default=None,
-                        help="Run local FoldX stability predictions on interface variants. "
-                             "Requires --variants and the FoldX binary. "
-                             "Default cache: data/foldx_cache/")
-    parser.add_argument("--foldx-binary", metavar="PATH",
-                        default=None,
-                        help="Path to FoldX executable. "
-                             "Default: foldx5_Windows/foldx_1_20270131.exe")
+                        help="Score variants with offline AlphaMissense + monomeric FoldX data. "
+                             "Requires --variants. "
+                             "Default: data/stability/afdb_foldx_export_20250210.csv")
+    parser.add_argument("--am-file", metavar="AM_PATH", default=None,
+                        help="Path to AlphaMissense_aa_substitutions.tsv. "
+                             "Default: data/stability/AlphaMissense_aa_substitutions.tsv")
     return parser
 
 
@@ -1340,32 +1332,22 @@ def main() -> None:
         if not getattr(args, '_variants_enabled', False):
             print("Error: --protvar requires --variants", file=sys.stderr)
             sys.exit(1)
-        if args.no_api:
-            print("Error: --protvar requires API access, incompatible with --no-api",
+        if args.protvar == '__default__':
+            from protvar_client import DEFAULT_FOLDX_EXPORT
+            args.protvar = str(DEFAULT_FOLDX_EXPORT)
+        if not Path(args.protvar).exists():
+            print(f"Error: AFDB FoldX export not found: {args.protvar}",
                   file=sys.stderr)
             sys.exit(1)
-        if args.protvar == '__default__':
-            from protvar_client import PROTVAR_API_DEFAULT_CACHE_DIR
-            args.protvar = str(PROTVAR_API_DEFAULT_CACHE_DIR)
+        # Resolve AlphaMissense file path
+        if args.am_file is None:
+            from protvar_client import DEFAULT_AM_FILE
+            args.am_file = str(DEFAULT_AM_FILE)
+        if not Path(args.am_file).exists():
+            print(f"Error: AlphaMissense file not found: {args.am_file}",
+                  file=sys.stderr)
+            sys.exit(1)
     args._protvar_enabled = args.protvar is not None
-
-    if args.foldx is not None:
-        if not getattr(args, '_variants_enabled', False):
-            print("Error: --foldx requires --variants", file=sys.stderr)
-            sys.exit(1)
-        if args.foldx == '__default__':
-            from foldx_scorer import DEFAULT_FOLDX_CACHE_DIR
-            args.foldx = str(DEFAULT_FOLDX_CACHE_DIR)
-        # Validate FoldX binary exists
-        from foldx_scorer import validate_foldx_binary, DEFAULT_FOLDX_BINARY, DEFAULT_ROTABASE, FoldXError
-        foldx_bin = Path(args.foldx_binary) if args.foldx_binary else DEFAULT_FOLDX_BINARY
-        foldx_rotabase = foldx_bin.parent / "rotabase.txt"
-        try:
-            validate_foldx_binary(foldx_bin, foldx_rotabase)
-        except FoldXError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    args._foldx_enabled = args.foldx is not None
 
     if args.resume:
         args.checkpoint = True
@@ -1536,6 +1518,20 @@ def main() -> None:
         print(f"Clustering complete: {len(results)} complexes annotated "
               f"in {cluster_elapsed:.1f}s", file=sys.stderr)
 
+        # Free clustering data structures no longer needed
+        del clusters_df, cluster_to_proteins, protein_to_clusters
+        del uniprot_index, cluster_to_uniprot
+
+    # Free enrichment data structures no longer needed after clustering
+    if args.enrich:
+        try:
+            del dbs
+        except NameError:
+            pass
+        del mapper, lookup
+        db_pair_sets = None
+        db_evidence = None
+
     # Variant mapping (structural context, enrichment, gene constraint)
     include_variants = False
     if getattr(args, '_variants_enabled', False):
@@ -1630,6 +1626,14 @@ def main() -> None:
         print(f"Variant mapping complete: {len(results)} complexes annotated "
               f"in {variant_elapsed:.1f}s", file=sys.stderr)
 
+        # Free variant data structures no longer needed
+        del variants_df, variant_idx, gene_lookup
+        try:
+            del clinvar_df
+        except NameError:
+            pass
+        del exac_df
+
     # Stability scoring (EVE evolutionary predictions)
     include_stability = False
     if getattr(args, '_stability_enabled', False):
@@ -1664,8 +1668,12 @@ def main() -> None:
         print(f"Stability scoring complete: {len(results)} complexes annotated "
               f"in {stability_elapsed:.1f}s", file=sys.stderr)
 
-    # ProtVar API cross-validation (scores, interactions, FoldX ΔΔG)
+        # Free EVE data structures no longer needed
+        del acc_to_entry, eve_index
+
+    # Offline AlphaMissense + monomeric FoldX scoring
     include_protvar = False
+    protvar_index = None
     if getattr(args, '_protvar_enabled', False):
         from protvar_client import (
             build_protvar_index, annotate_results_with_protvar,
@@ -1673,60 +1681,42 @@ def main() -> None:
         )
         protvar_start = time.time()
 
-        # Collect (accession, position) pairs from variant details
-        acc_positions: dict[str, set[int]] = {}
+        # Collect accessions and variant positions from results
+        all_protvar_accessions: set[str] = set()
+        all_variant_positions: dict[str, set[int]] = {}
+
         for row in results:
             for suffix in ('a', 'b'):
                 acc = row.get(f'protein_{suffix}', '')
                 details = row.get(f'variant_details_{suffix}', '')
                 if acc and details:
                     base = acc.split('-')[0] if '-' in acc else acc
+                    all_protvar_accessions.add(base)
                     for _ref, pos, _alt in _parse_variant_details_for_protvar(details):
-                        acc_positions.setdefault(base, set()).add(pos)
+                        all_variant_positions.setdefault(base, set()).add(pos)
 
-        n_proteins = len(acc_positions)
-        n_positions = sum(len(ps) for ps in acc_positions.values())
-        print(f"Querying ProtVar API for {n_positions} positions across "
-              f"{n_proteins} proteins...", file=sys.stderr)
+        n_proteins = len(all_protvar_accessions)
+        n_variant_pos = sum(len(ps) for ps in all_variant_positions.values())
+        print(f"Loading offline scores for {n_proteins} proteins "
+              f"({n_variant_pos} variant positions)...", file=sys.stderr)
 
         protvar_index = build_protvar_index(
-            acc_positions, cache_dir=args.protvar, verbose=True,
+            accessions=all_protvar_accessions,
+            variant_positions=all_variant_positions,
+            foldx_path=args.protvar,
+            am_path=args.am_file,
+            verbose=True,
         )
 
         annotate_results_with_protvar(results, protvar_index, verbose=True)
 
         include_protvar = True
         protvar_elapsed = time.time() - protvar_start
-        print(f"ProtVar cross-validation complete: {len(results)} complexes "
+        print(f"Offline scoring complete: {len(results)} complexes "
               f"annotated in {protvar_elapsed:.1f}s", file=sys.stderr)
 
-    # FoldX local stability predictions
-    include_foldx = False
-    if getattr(args, '_foldx_enabled', False):
-        from foldx_scorer import (
-            annotate_results_with_foldx, DEFAULT_FOLDX_BINARY, DEFAULT_ROTABASE,
-        )
-        foldx_start = time.time()
-        foldx_bin = Path(args.foldx_binary) if args.foldx_binary else DEFAULT_FOLDX_BINARY
-        foldx_rotabase = foldx_bin.parent / "rotabase.txt"
-        pdb_dir = Path(args.dir)
-
-        print(f"Running FoldX local stability predictions...", file=sys.stderr)
-        print(f"  Binary: {foldx_bin}", file=sys.stderr)
-        print(f"  Cache: {args.foldx}", file=sys.stderr)
-
-        annotate_results_with_foldx(
-            results, pdb_dir,
-            binary_path=foldx_bin,
-            rotabase_path=foldx_rotabase,
-            cache_dir=Path(args.foldx),
-            verbose=True,
-        )
-
-        include_foldx = True
-        foldx_elapsed = time.time() - foldx_start
-        print(f"FoldX predictions complete: {len(results)} complexes annotated "
-              f"in {foldx_elapsed:.1f}s", file=sys.stderr)
+        # Free temporary ProtVar collection structures
+        del all_protvar_accessions, all_variant_positions
 
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
@@ -1739,7 +1729,6 @@ def main() -> None:
         include_variants=include_variants,
         include_stability=include_stability,
         include_protvar=include_protvar,
-        include_foldx=include_foldx,
     )
 
     print(f"\n{'=' * 60}")

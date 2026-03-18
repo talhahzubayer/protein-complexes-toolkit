@@ -1,591 +1,395 @@
-#!/usr/bin/env python3
 """
-ProtVar API client for the protein-complexes-toolkit.
+Offline pathogenicity and stability scoring for protein complex variants.
 
-Cross-validates the toolkit's independent interface predictions against ProtVar
-(EBI), which provides pre-computed pathogenicity scores (AlphaMissense, EVE,
-ESM, conservation), interaction predictions, and FoldX ΔΔG values.
+Integrates two pre-computed data sources to score variant effects without
+any API dependency:
+
+1. AlphaMissense (DeepMind) — deep-learning pathogenicity predictions for
+   all possible human amino acid substitutions (~216M variants).
+2. AFDB FoldX export (EBI) — pre-computed FoldX ΔΔG values on monomeric
+   AlphaFold structures with per-position pLDDT (~209M substitutions).
 
 Architecture:
-    - API-backed with aggressive caching: every response is stored as a JSON
-      file so subsequent runs are instant.
-    - Lazy querying: only positions from variants in the current pipeline run
-      are fetched.
-    - Rate-limited with exponential backoff on transient failures.
+    - Offline-first: reads local TSV/CSV files, no API calls
+    - Lazy loading: streams files and filters for pipeline proteins only
+    - Integrates into toolkit.py via --protvar flag (requires --variants)
+    - Standalone CLI for score lookup and coverage statistics
 
-Endpoints used (3 per position):
-    GET /score/{acc}/{pos}                  — multi-tool pathogenicity scores
-    GET /prediction/interaction/{acc}/{pos}  — ProtVar interface predictions
-    GET /prediction/foldx/{acc}/{pos}        — pre-computed FoldX ΔΔG
-
-Usage (as importable module):
-    from protvar_client import build_protvar_index, annotate_results_with_protvar
-
-    acc_positions = {'P61981': {4, 10}, 'P24534': {81}}
-    index = build_protvar_index(acc_positions, verbose=True)
-    annotate_results_with_protvar(results, index, verbose=True)
+Data sources:
+    - AlphaMissense_aa_substitutions.tsv (pathogenicity scores)
+    - afdb_foldx_export_20250210.csv (monomeric FoldX ΔΔG + pLDDT)
 
 Usage (standalone):
     python protvar_client.py summary
+    python protvar_client.py lookup --protein P61981
     python protvar_client.py lookup --protein P61981 --position 4
+
+Usage (via toolkit.py):
+    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants --protvar
 """
 
-import sys
-import json
-import time
-import hashlib
-import re
 import argparse
-from datetime import datetime, timezone
+import csv
+import re
+import sys
 from pathlib import Path
+from statistics import mean
 from typing import Optional, Union
-
-import urllib.request
-import urllib.error
 
 
 # ── Constants ────────────────────────────────────────────────────────
 
-# ProtVar API connection
-PROTVAR_API_BASE_URL = "https://www.ebi.ac.uk/ProtVar/api"
+# Default file paths (both in data/stability/)
+DEFAULT_FOLDX_EXPORT = (
+    Path(__file__).parent / "data" / "stability" / "afdb_foldx_export_20250210.csv"
+)
+DEFAULT_AM_FILE = (
+    Path(__file__).parent / "data" / "stability" / "AlphaMissense_aa_substitutions.tsv"
+)
 
-# Rate limiting and retry
-PROTVAR_API_RATE_LIMIT_PAUSE = 1.0   # Minimum seconds between consecutive requests
-PROTVAR_API_MAX_RETRIES = 3          # Max retry attempts on transient failure
-PROTVAR_API_BACKOFF_FACTOR = 2.0     # Exponential backoff multiplier
-PROTVAR_API_TIMEOUT = 30             # Seconds per HTTP request
-
-# Default cache directory (auto-caching enabled by default)
-PROTVAR_API_DEFAULT_CACHE_DIR = Path(__file__).parent / "data" / "protvar_cache"
+# FoldX destabilisation threshold (kcal/mol, literature convention)
+FOLDX_DESTABILISING_THRESHOLD = 1.6
 
 # Display limit for variant detail strings
 PROTVAR_DETAILS_DISPLAY_LIMIT = 20
 
-# FoldX destabilisation threshold (kcal/mol)
-FOLDX_DESTABILISING_THRESHOLD = 1.6
-
-# Score tool names from ProtVar /score endpoint
-PROTVAR_TOOL_AM = "AM"           # AlphaMissense
-PROTVAR_TOOL_EVE = "EVE"         # EVE evolutionary predictions
-PROTVAR_TOOL_ESM = "ESM"         # ESM-1v language model
-PROTVAR_TOOL_CONSERV = "CONSERV"  # Conservation score
+# Progress reporting interval (lines)
+CHUNK_LOG_INTERVAL = 5_000_000
 
 # Variant detail parsing pattern (shared with stability_scorer.py)
 _VARIANT_DETAIL_PATTERN = re.compile(r'^([A-Z*])(\d+)([A-Z*]):')
 
-# Module-level rate limiting state
-_last_request_time: float = 0.0
+# AlphaMissense variant parsing: REF POS ALT (e.g. M1A, V2G, K81P)
+_AM_VARIANT_PATTERN = re.compile(r'^([A-Z])(\d+)([A-Z])$')
 
-# CSV column names added by this module (8 columns, per-chain a/b)
+# CSV columns added when --protvar is used (8 columns, per-chain a/b)
 CSV_FIELDNAMES_PROTVAR = [
     'protvar_am_mean_a', 'protvar_am_mean_b',
     'protvar_foldx_mean_a', 'protvar_foldx_mean_b',
-    'protvar_interface_agreement_a', 'protvar_interface_agreement_b',
+    'protvar_am_n_pathogenic_a', 'protvar_am_n_pathogenic_b',
     'protvar_details_a', 'protvar_details_b',
 ]
 
 
-# ── Section 1: Custom Exception ──────────────────────────────────────
+# ── Section 1: AlphaMissense Loading ─────────────────────────────────
 
-class ProtVarAPIError(RuntimeError):
-    """Raised when a ProtVar API request fails after all retries are exhausted,
-    or when a non-retryable HTTP error is received.
-
-    Callers should catch this and fall back gracefully:
-
-        try:
-            scores = get_scores("P61981", 4)
-        except ProtVarAPIError as e:
-            warnings.warn(f"ProtVar API unavailable: {e}")
-            scores = []
-    """
-
-
-# ── Section 2: Internal HTTP Helpers ─────────────────────────────────
-
-def _resolve_cache_dir(cache_dir: Optional[Union[str, bool]]) -> Optional[Path]:
-    """Resolve cache_dir parameter to a Path or None.
+def _parse_am_variant(protein_variant: str) -> Optional[tuple[str, int, str]]:
+    """Parse AlphaMissense protein_variant string to (ref_aa, position, alt_aa).
 
     Args:
-        cache_dir: Cache directory specification.
-            None  -> use PROTVAR_API_DEFAULT_CACHE_DIR (auto-caching).
-            str/Path -> use that path.
-            False -> disable caching entirely.
+        protein_variant: Variant string, e.g. 'M1A' (ref + position + alt).
 
     Returns:
-        Path to cache directory, or None if caching is disabled.
+        Tuple of (ref_aa, position, alt_aa), or None if unparseable.
     """
-    if cache_dir is False:
-        return None
-    if cache_dir is None:
-        return PROTVAR_API_DEFAULT_CACHE_DIR
-    return Path(cache_dir)
+    match = _AM_VARIANT_PATTERN.match(protein_variant)
+    if match:
+        return match.group(1), int(match.group(2)), match.group(3)
+    return None
 
 
-def _cache_key(endpoint: str, accession: str, position: int) -> str:
-    """Generate a deterministic cache key from endpoint and parameters.
-
-    Args:
-        endpoint: API endpoint path (e.g. 'score', 'prediction/interaction').
-        accession: UniProt accession.
-        position: Residue position.
-
-    Returns:
-        Hex SHA256 digest string.
-    """
-    key_data = {
-        "endpoint": endpoint,
-        "accession": accession,
-        "position": position,
-    }
-    return hashlib.sha256(
-        json.dumps(key_data, sort_keys=True).encode()
-    ).hexdigest()
-
-
-def _read_cache(cache_dir: Path, key: str) -> Optional[Union[dict, list]]:
-    """Read a cached API response if it exists.
-
-    Args:
-        cache_dir: Directory containing cache files.
-        key: Cache key (SHA256 hex digest).
-
-    Returns:
-        Parsed JSON data, or None if cache miss.
-    """
-    cache_file = cache_dir / f"{key}.json"
-    if not cache_file.exists():
-        return None
-    try:
-        with open(cache_file, encoding="utf-8") as f:
-            cached = json.load(f)
-        return cached.get("data")
-    except (json.JSONDecodeError, KeyError, OSError):
-        return None
-
-
-def _write_cache(cache_dir: Path, key: str, endpoint: str,
-                 data: Union[dict, list]) -> None:
-    """Write an API response to the cache.
-
-    Args:
-        cache_dir: Directory for cache files (created if it does not exist).
-        key: Cache key (SHA256 hex digest).
-        endpoint: API endpoint (stored as metadata).
-        data: Parsed JSON response to cache.
-    """
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{key}.json"
-    payload = {
-        "_timestamp": datetime.now(timezone.utc).isoformat(),
-        "_endpoint": endpoint,
-        "data": data,
-    }
-    with open(cache_file, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-
-
-def _rate_limit() -> None:
-    """Enforce minimum pause between consecutive API requests."""
-    global _last_request_time
-    now = time.monotonic()
-    elapsed = now - _last_request_time
-    if elapsed < PROTVAR_API_RATE_LIMIT_PAUSE:
-        time.sleep(PROTVAR_API_RATE_LIMIT_PAUSE - elapsed)
-
-
-def _make_request(url: str) -> Union[dict, list]:
-    """Execute a ProtVar API GET request with rate limiting, retry, and backoff.
-
-    Unlike STRING API (POST with form data), ProtVar uses GET with path
-    parameters. This function handles rate limiting, retry on transient
-    failures, and error propagation.
-
-    Args:
-        url: Full API URL (e.g. 'https://www.ebi.ac.uk/ProtVar/api/score/P61981/4').
-
-    Returns:
-        Parsed JSON response (dict or list).
-
-    Raises:
-        ProtVarAPIError: On non-retryable HTTP errors or exhausted retries.
-    """
-    global _last_request_time
-
-    last_error: Optional[Exception] = None
-
-    for attempt in range(PROTVAR_API_MAX_RETRIES + 1):
-        # Rate limiting
-        _rate_limit()
-
-        try:
-            req = urllib.request.Request(url)
-            req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=PROTVAR_API_TIMEOUT) as response:
-                _last_request_time = time.monotonic()
-                body = response.read().decode("utf-8")
-                return json.loads(body)
-
-        except urllib.error.HTTPError as e:
-            _last_request_time = time.monotonic()
-            status = e.code
-            last_error = e
-
-            # Retryable errors: 429 (rate limited) and 5xx (server error)
-            if status == 429 or 500 <= status < 600:
-                if attempt < PROTVAR_API_MAX_RETRIES:
-                    wait = PROTVAR_API_BACKOFF_FACTOR ** attempt
-                    print(
-                        f"  ProtVar API: HTTP {status} on {url}, "
-                        f"retrying in {wait:.1f}s "
-                        f"(attempt {attempt + 1}/{PROTVAR_API_MAX_RETRIES})",
-                        file=sys.stderr,
-                    )
-                    time.sleep(wait)
-                    continue
-                else:
-                    raise ProtVarAPIError(
-                        f"ProtVar API: HTTP {status} after "
-                        f"{PROTVAR_API_MAX_RETRIES} retries: {url}"
-                    ) from e
-
-            # Non-retryable error (4xx except 429)
-            try:
-                error_body = e.read().decode("utf-8")
-            except Exception:
-                error_body = ""
-            raise ProtVarAPIError(
-                f"ProtVar API: HTTP {status}: {error_body} ({url})"
-            ) from e
-
-        except urllib.error.URLError as e:
-            _last_request_time = time.monotonic()
-            last_error = e
-            if attempt < PROTVAR_API_MAX_RETRIES:
-                wait = PROTVAR_API_BACKOFF_FACTOR ** attempt
-                print(
-                    f"  ProtVar API: connection error on {url}, "
-                    f"retrying in {wait:.1f}s "
-                    f"(attempt {attempt + 1}/{PROTVAR_API_MAX_RETRIES})",
-                    file=sys.stderr,
-                )
-                time.sleep(wait)
-                continue
-            raise ProtVarAPIError(
-                f"ProtVar API: connection failed after "
-                f"{PROTVAR_API_MAX_RETRIES} retries: {e}"
-            ) from e
-
-    # Safety net (should not reach here)
-    raise ProtVarAPIError(
-        f"ProtVar API: unexpected failure after retries"
-    ) from last_error
-
-
-def _query_endpoint(endpoint: str, accession: str, position: int,
-                    cache_dir: Optional[Union[str, bool]] = None) -> Union[dict, list]:
-    """Internal helper: query a ProtVar endpoint with caching.
-
-    Args:
-        endpoint: API path segment (e.g. 'score', 'prediction/interaction',
-                  'prediction/foldx').
-        accession: UniProt accession.
-        position: Residue position (1-based).
-        cache_dir: Cache directory specification (see _resolve_cache_dir).
-
-    Returns:
-        Parsed JSON response.
-    """
-    resolved = _resolve_cache_dir(cache_dir)
-
-    # Check cache first
-    if resolved is not None:
-        key = _cache_key(endpoint, accession, position)
-        cached = _read_cache(resolved, key)
-        if cached is not None:
-            return cached
-
-    # Make live request
-    url = f"{PROTVAR_API_BASE_URL}/{endpoint}/{accession}/{position}"
-    data = _make_request(url)
-
-    # Write to cache
-    if resolved is not None:
-        key = _cache_key(endpoint, accession, position)
-        _write_cache(resolved, key, endpoint, data)
-
-    return data
-
-
-# ── Section 3: Public API Query Functions ────────────────────────────
-
-def get_scores(accession: str, position: int,
-               cache_dir: Optional[Union[str, bool]] = None) -> list:
-    """Query ProtVar /score/{acc}/{pos} for pathogenicity scores.
-
-    Returns scores from multiple tools (AlphaMissense, EVE, ESM, conservation)
-    for all possible amino acid substitutions at the given position.
-
-    Args:
-        accession: UniProt accession (canonical, no isoform suffix).
-        position: Residue position (1-based).
-        cache_dir: Cache specification (None=default, False=disabled, str=custom).
-
-    Returns:
-        List of score dicts. Each has 'name' (tool), 'mt' (mutant AA),
-        and tool-specific keys like 'amPathogenicity', 'amClass', 'score',
-        'eveClass'.
-    """
-    result = _query_endpoint("score", accession, position, cache_dir)
-    return result if isinstance(result, list) else []
-
-
-def get_interactions(accession: str, position: int,
-                     cache_dir: Optional[Union[str, bool]] = None) -> list:
-    """Query ProtVar /prediction/interaction/{acc}/{pos} for interaction data.
-
-    Returns predicted interaction partners with binding residue lists and
-    pDockQ scores for the given residue position.
-
-    Args:
-        accession: UniProt accession (canonical, no isoform suffix).
-        position: Residue position (1-based).
-        cache_dir: Cache specification (None=default, False=disabled, str=custom).
-
-    Returns:
-        List of interaction dicts. Each has 'a' (accession A), 'b' (accession B),
-        'aresidues' (list[int]), 'bresidues' (list[int]), 'pdockq' (float),
-        'pdbModel' (str). Empty list if no interactions.
-    """
-    result = _query_endpoint("prediction/interaction", accession, position, cache_dir)
-    return result if isinstance(result, list) else []
-
-
-def get_foldx(accession: str, position: int,
-              cache_dir: Optional[Union[str, bool]] = None) -> list:
-    """Query ProtVar /prediction/foldx/{acc}/{pos} for FoldX ΔΔG predictions.
-
-    Returns pre-computed FoldX ΔΔG values for all possible amino acid
-    substitutions at the given position. Values >1.6 kcal/mol are
-    conventionally considered destabilising.
-
-    Args:
-        accession: UniProt accession (canonical, no isoform suffix).
-        position: Residue position (1-based).
-        cache_dir: Cache specification (None=default, False=disabled, str=custom).
-
-    Returns:
-        List of FoldX dicts. Each has 'proteinAcc', 'position', 'wildType',
-        'mutatedType', 'foldxDdg' (float), 'plddt' (float). Empty list if
-        no data.
-    """
-    result = _query_endpoint("prediction/foldx", accession, position, cache_dir)
-    return result if isinstance(result, list) else []
-
-
-# ── Section 4: Index Building ────────────────────────────────────────
-
-def build_protvar_index(
-    acc_positions: dict[str, set[int]],
-    cache_dir: Optional[Union[str, bool]] = None,
+def load_alphamissense_scores(
+    filepath: Path,
+    accessions: frozenset[str],
+    variant_positions: Optional[dict[str, set[int]]] = None,
     verbose: bool = False,
-) -> dict[str, dict[int, dict]]:
-    """Query ProtVar for all (accession, position) pairs and build a lookup index.
+) -> dict[str, dict[tuple[int, str], dict]]:
+    """Stream AlphaMissense TSV and load scores for specified proteins.
 
-    Each position is queried once for all 3 endpoints (scores, interactions,
-    foldx). Results are cached so subsequent runs are instant.
+    The file has 3 '#'-prefixed comment lines, a header, then tab-separated
+    data: uniprot_id, protein_variant, am_pathogenicity, am_class.
 
     Args:
-        acc_positions: Dict mapping UniProt accession to set of positions.
-            Example: {'P61981': {4, 10}, 'P24534': {81}}.
-        cache_dir: Cache specification (None=default, False=disabled, str=custom).
+        filepath: Path to AlphaMissense_aa_substitutions.tsv.
+        accessions: Set of UniProt accessions to load (base accessions).
+        variant_positions: Optional dict mapping accession to set of positions
+            to filter for.  If None, all positions for matching accessions
+            are loaded.
         verbose: Print progress to stderr.
 
     Returns:
-        Nested dict: {accession: {position: {'scores': list, 'interactions': list,
-        'foldx': list}}}.
+        Dict keyed by accession, sub-keyed by (position, alt_aa):
+        {'P61981': {(1, 'A'): {'am_score': 0.363, 'am_class': 'ambiguous'}}}
     """
-    index: dict[str, dict[int, dict]] = {}
+    if not filepath.exists():
+        if verbose:
+            print(f"  AlphaMissense file not found: {filepath}", file=sys.stderr)
+        return {}
 
-    # Count total positions for progress
-    total = sum(len(positions) for positions in acc_positions.values())
-    done = 0
-    errors = 0
+    index: dict[str, dict[tuple[int, str], dict]] = {}
+    scanned = 0
+    kept = 0
 
-    if verbose and total > 0:
-        print(f"ProtVar: querying {total} positions across "
-              f"{len(acc_positions)} proteins...", file=sys.stderr)
+    with open(filepath, encoding="utf-8") as f:
+        for line in f:
+            # Skip comment lines (#-prefixed header)
+            if line.startswith('#'):
+                continue
+            # Skip the column header line
+            if line.startswith('uniprot_id'):
+                continue
 
-    for accession in sorted(acc_positions):
-        positions = sorted(acc_positions[accession])
-        if accession not in index:
-            index[accession] = {}
+            scanned += 1
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 4:
+                continue
 
-        for pos in positions:
-            done += 1
+            uniprot_id = parts[0]
+            if uniprot_id not in accessions:
+                if scanned % CHUNK_LOG_INTERVAL == 0 and verbose:
+                    print(f"    AlphaMissense: scanned {scanned:,} rows, "
+                          f"kept {kept:,}...", file=sys.stderr)
+                continue
+
+            parsed = _parse_am_variant(parts[1])
+            if parsed is None:
+                continue
+
+            ref_aa, pos, alt_aa = parsed
+
+            # Position filtering
+            if variant_positions is not None:
+                acc_positions = variant_positions.get(uniprot_id)
+                if acc_positions is not None and pos not in acc_positions:
+                    if scanned % CHUNK_LOG_INTERVAL == 0 and verbose:
+                        print(f"    AlphaMissense: scanned {scanned:,} rows, "
+                              f"kept {kept:,}...", file=sys.stderr)
+                    continue
+
             try:
-                scores = get_scores(accession, pos, cache_dir=cache_dir)
-                interactions = get_interactions(accession, pos, cache_dir=cache_dir)
-                foldx = get_foldx(accession, pos, cache_dir=cache_dir)
-                index[accession][pos] = {
-                    'scores': scores,
-                    'interactions': interactions,
-                    'foldx': foldx,
-                }
-            except ProtVarAPIError as e:
-                errors += 1
-                if verbose:
-                    print(f"  ProtVar: error for {accession}/{pos}: {e}",
-                          file=sys.stderr)
-                index[accession][pos] = {
-                    'scores': [],
-                    'interactions': [],
-                    'foldx': [],
-                }
+                score = float(parts[2])
+            except (ValueError, IndexError):
+                continue
 
-            if verbose and done % 10 == 0:
-                print(f"  ProtVar: {done}/{total} positions queried...",
-                      file=sys.stderr)
+            am_class = parts[3].strip() if len(parts) > 3 else ''
+
+            if uniprot_id not in index:
+                index[uniprot_id] = {}
+            index[uniprot_id][(pos, alt_aa)] = {
+                'am_score': score,
+                'am_class': am_class,
+            }
+            kept += 1
+
+            if scanned % CHUNK_LOG_INTERVAL == 0 and verbose:
+                print(f"    AlphaMissense: scanned {scanned:,} rows, "
+                      f"kept {kept:,}...", file=sys.stderr)
 
     if verbose:
-        n_with_scores = sum(
-            1 for acc in index for pos in index[acc]
-            if index[acc][pos]['scores']
-        )
-        print(f"  ProtVar index: {total} positions, {n_with_scores} with scores, "
-              f"{errors} errors", file=sys.stderr)
+        print(f"  AlphaMissense: scanned {scanned:,} rows, "
+              f"loaded {kept:,} scores for {len(index):,} proteins",
+              file=sys.stderr)
+    return index
+
+
+# ── Section 2: AFDB FoldX Export Loading ─────────────────────────────
+
+def load_foldx_export(
+    filepath: Path,
+    accessions: frozenset[str],
+    variant_positions: Optional[dict[str, set[int]]] = None,
+    verbose: bool = False,
+) -> dict[str, dict[tuple[int, str], dict]]:
+    """Stream AFDB FoldX export CSV and load DDG/pLDDT for specified proteins.
+
+    The CSV has columns: uniprot_accession, uniprot_position,
+    alphafold_fragment_id, alphafold_fragment_position, wild_type,
+    mutated_type, foldx_ddg, plddt.
+
+    Args:
+        filepath: Path to afdb_foldx_export_20250210.csv.
+        accessions: Set of UniProt accessions to load (base accessions).
+        variant_positions: Optional dict mapping accession to set of positions
+            to filter for.
+        verbose: Print progress to stderr.
+
+    Returns:
+        Dict keyed by accession, sub-keyed by (position, alt_aa):
+        {'P61981': {(1, 'A'): {'foldx_ddg': 0.114505, 'plddt': 54.50}}}
+    """
+    if not filepath.exists():
+        if verbose:
+            print(f"  FoldX export not found: {filepath}", file=sys.stderr)
+        return {}
+
+    index: dict[str, dict[tuple[int, str], dict]] = {}
+    scanned = 0
+    kept = 0
+
+    with open(filepath, encoding="utf-8", newline='') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)  # skip header
+        if header is None:
+            return {}
+
+        for row in reader:
+            scanned += 1
+            if len(row) < 8:
+                continue
+
+            acc = row[0]
+            if acc not in accessions:
+                if scanned % CHUNK_LOG_INTERVAL == 0 and verbose:
+                    print(f"    FoldX export: scanned {scanned:,} rows, "
+                          f"kept {kept:,}...", file=sys.stderr)
+                continue
+
+            try:
+                pos = int(row[1])
+            except ValueError:
+                continue
+
+            # Position filtering
+            if variant_positions is not None:
+                acc_positions = variant_positions.get(acc)
+                if acc_positions is not None and pos not in acc_positions:
+                    if scanned % CHUNK_LOG_INTERVAL == 0 and verbose:
+                        print(f"    FoldX export: scanned {scanned:,} rows, "
+                              f"kept {kept:,}...", file=sys.stderr)
+                    continue
+
+            alt_aa = row[5]  # mutated_type
+            try:
+                ddg = float(row[6])
+                plddt = float(row[7])
+            except (ValueError, IndexError):
+                continue
+
+            if acc not in index:
+                index[acc] = {}
+            index[acc][(pos, alt_aa)] = {
+                'foldx_ddg': ddg,
+                'plddt': plddt,
+            }
+            kept += 1
+
+            if scanned % CHUNK_LOG_INTERVAL == 0 and verbose:
+                print(f"    FoldX export: scanned {scanned:,} rows, "
+                      f"kept {kept:,}...", file=sys.stderr)
+
+    if verbose:
+        print(f"  FoldX export: scanned {scanned:,} rows, "
+              f"loaded {kept:,} scores for {len(index):,} proteins",
+              file=sys.stderr)
+    return index
+
+
+# ── Section 3: Index Building ────────────────────────────────────────
+
+def build_protvar_index(
+    accessions: set[str],
+    variant_positions: Optional[dict[str, set[int]]] = None,
+    foldx_path: Optional[Union[str, Path]] = None,
+    am_path: Optional[Union[str, Path]] = None,
+    verbose: bool = False,
+) -> dict[str, dict[tuple[int, str], dict]]:
+    """Build combined index from AlphaMissense + FoldX offline data.
+
+    Streams both files, filtering for the given accessions and optional
+    variant positions.  The returned index merges scores from both sources
+    into a single nested dict.
+
+    Args:
+        accessions: Set of UniProt accessions to load.
+        variant_positions: Optional position filter per accession.
+        foldx_path: Path to AFDB FoldX export CSV.  None → default path.
+        am_path: Path to AlphaMissense TSV.  None → default path.
+        verbose: Print progress to stderr.
+
+    Returns:
+        Merged index: {accession: {(pos, alt): {am_score, am_class,
+        foldx_ddg, plddt}}}
+    """
+    foldx_file = Path(foldx_path) if foldx_path else DEFAULT_FOLDX_EXPORT
+    am_file = Path(am_path) if am_path else DEFAULT_AM_FILE
+
+    # Strip isoform suffixes for base accession lookup
+    base_accessions: set[str] = set()
+    for acc in accessions:
+        base_accessions.add(acc.split('-')[0] if '-' in acc else acc)
+    frozen_accs = frozenset(base_accessions)
+
+    if verbose:
+        print(f"  Building offline score index for {len(frozen_accs):,} proteins...",
+              file=sys.stderr)
+
+    # Load AlphaMissense scores
+    am_index = load_alphamissense_scores(
+        am_file, frozen_accs, variant_positions, verbose,
+    )
+
+    # Load FoldX export scores
+    foldx_index = load_foldx_export(
+        foldx_file, frozen_accs, variant_positions, verbose,
+    )
+
+    # Merge into combined index
+    all_accs = set(am_index.keys()) | set(foldx_index.keys())
+    index: dict[str, dict[tuple[int, str], dict]] = {}
+
+    for acc in all_accs:
+        am_data = am_index.get(acc, {})
+        fx_data = foldx_index.get(acc, {})
+        all_keys = set(am_data.keys()) | set(fx_data.keys())
+
+        merged: dict[tuple[int, str], dict] = {}
+        for key in all_keys:
+            entry: dict = {}
+            if key in am_data:
+                entry.update(am_data[key])
+            if key in fx_data:
+                entry.update(fx_data[key])
+            merged[key] = entry
+        index[acc] = merged
+
+    if verbose:
+        n_am = sum(1 for acc in index.values()
+                   for v in acc.values() if 'am_score' in v)
+        n_fx = sum(1 for acc in index.values()
+                   for v in acc.values() if 'foldx_ddg' in v)
+        print(f"  Combined index: {len(index):,} proteins, "
+              f"{n_am:,} AlphaMissense scores, {n_fx:,} FoldX DDG values",
+              file=sys.stderr)
 
     return index
 
 
-# ── Section 5: Score Extraction Helpers ──────────────────────────────
+# ── Section 4: Score Lookup ──────────────────────────────────────────
 
-def extract_am_score(scores: list[dict], alt_aa: str) -> Optional[float]:
-    """Extract AlphaMissense pathogenicity score for a specific substitution.
-
-    Args:
-        scores: List of score dicts from get_scores().
-        alt_aa: Single-letter mutant amino acid.
-
-    Returns:
-        AlphaMissense pathogenicity float, or None if not found.
-    """
-    for entry in scores:
-        if entry.get('name') == PROTVAR_TOOL_AM and entry.get('mt') == alt_aa:
-            return entry.get('amPathogenicity')
-    return None
-
-
-def extract_am_class(scores: list[dict], alt_aa: str) -> Optional[str]:
-    """Extract AlphaMissense classification for a specific substitution.
-
-    Args:
-        scores: List of score dicts from get_scores().
-        alt_aa: Single-letter mutant amino acid.
-
-    Returns:
-        Classification string ('PATHOGENIC', 'BENIGN', 'AMBIGUOUS'), or None.
-    """
-    for entry in scores:
-        if entry.get('name') == PROTVAR_TOOL_AM and entry.get('mt') == alt_aa:
-            return entry.get('amClass')
-    return None
-
-
-def extract_foldx_ddg(foldx_data: list[dict], alt_aa: str) -> Optional[float]:
-    """Extract FoldX ΔΔG for a specific substitution.
-
-    Args:
-        foldx_data: List of FoldX dicts from get_foldx().
-        alt_aa: Single-letter mutant amino acid.
-
-    Returns:
-        ΔΔG in kcal/mol, or None if not found.
-    """
-    for entry in foldx_data:
-        if entry.get('mutatedType') == alt_aa:
-            return entry.get('foldxDdg')
-    return None
-
-
-def check_protvar_interface(interactions: list[dict], accession: str,
-                            position: int) -> bool:
-    """Check if ProtVar considers a position to be at a binding interface.
-
-    A position is at the interface if it appears in any interaction's
-    'aresidues' or 'bresidues' list for the given accession.
-
-    Args:
-        interactions: List of interaction dicts from get_interactions().
-        accession: UniProt accession to check.
-        position: Residue position.
-
-    Returns:
-        True if position is at an interface, False otherwise.
-    """
-    if not interactions:
-        return False
-
-    base_acc = accession.split('-')[0] if '-' in accession else accession
-
-    for entry in interactions:
-        a_acc = str(entry.get('a', ''))
-        b_acc = str(entry.get('b', ''))
-        a_base = a_acc.split('-')[0] if '-' in a_acc else a_acc
-        b_base = b_acc.split('-')[0] if '-' in b_acc else b_acc
-
-        if a_base == base_acc and position in entry.get('aresidues', []):
-            return True
-        if b_base == base_acc and position in entry.get('bresidues', []):
-            return True
-    return False
-
-
-def compute_interface_agreement(
-    toolkit_interface_positions: set[int],
-    protvar_index_for_protein: dict[int, dict],
+def lookup_score(
+    index: dict,
     accession: str,
-) -> Union[float, str]:
-    """Compute fraction of toolkit interface positions confirmed by ProtVar.
-
-    For each position the toolkit classified as interface (interface_core or
-    interface_rim), checks whether ProtVar also considers it a binding
-    interface position.
+    position: int,
+    alt_aa: str,
+) -> Optional[dict]:
+    """Look up scores for a specific variant in the combined index.
 
     Args:
-        toolkit_interface_positions: Set of positions the toolkit identified
-            as interface residues.
-        protvar_index_for_protein: Position-level index for one protein.
-        accession: UniProt accession.
+        index: Combined index from build_protvar_index().
+        accession: UniProt accession (isoform suffixes stripped automatically).
+        position: Residue position (1-based).
+        alt_aa: Mutant amino acid (single letter).
 
     Returns:
-        Float in [0, 1] if there are interface positions to compare,
-        empty string if no data.
+        Dict with available scores ({am_score, am_class, foldx_ddg, plddt}),
+        or None if not found.
     """
-    if not toolkit_interface_positions:
-        return ''
-
-    agree = 0
-    checked = 0
-    for pos in toolkit_interface_positions:
-        if pos in protvar_index_for_protein:
-            checked += 1
-            interactions = protvar_index_for_protein[pos].get('interactions', [])
-            if check_protvar_interface(interactions, accession, pos):
-                agree += 1
-
-    if checked == 0:
-        return ''
-    return round(agree / checked, 4)
+    base = accession.split('-')[0] if '-' in accession else accession
+    acc_data = index.get(base)
+    if acc_data is None:
+        return None
+    return acc_data.get((position, alt_aa))
 
 
-# ── Section 6: Annotation ────────────────────────────────────────────
+# ── Section 5: Variant Detail Parsing ────────────────────────────────
 
-def _parse_variant_details_for_protvar(details_str: str) -> list[tuple[str, int, str]]:
+def _parse_variant_details_for_protvar(
+    details_str: str,
+) -> list[tuple[str, int, str]]:
     """Parse variant_details string to (ref_aa, position, alt_aa) tuples.
 
     Parses the pipe-separated variant detail strings produced by
-    variant_mapper.format_variant_details(). Format:
+    variant_mapper.format_variant_details().  Format:
         K81P:interface_core:pathogenic|E82K:interface_rim:VUS
 
     Args:
@@ -611,36 +415,23 @@ def _parse_variant_details_for_protvar(details_str: str) -> list[tuple[str, int,
     return variants
 
 
-def _extract_context_from_detail(detail_part: str) -> str:
-    """Extract structural context from a variant detail part.
-
-    Args:
-        detail_part: Single variant string, e.g. 'K81P:interface_core:pathogenic'.
-
-    Returns:
-        Context string (e.g. 'interface_core') or empty string.
-    """
-    parts = detail_part.split(':')
-    if len(parts) >= 2:
-        return parts[1]
-    return ''
-
+# ── Section 6: Formatting ────────────────────────────────────────────
 
 def format_protvar_details(
     scored_variants: list[dict],
     limit: int = PROTVAR_DETAILS_DISPLAY_LIMIT,
 ) -> str:
-    """Format ProtVar-scored variants into a pipe-separated summary string.
+    """Format scored variants into a pipe-separated summary string.
 
     Format: REF{POS}ALT:am={score}:{class}:foldx={ddg}
 
     Args:
-        scored_variants: List of dicts with keys 'ref_aa', 'position', 'alt_aa',
-            'am_score', 'am_class', 'foldx_ddg'.
+        scored_variants: List of dicts with keys 'ref_aa', 'position',
+            'alt_aa', 'am_score', 'am_class', 'foldx_ddg'.
         limit: Maximum number of variants to display.
 
     Returns:
-        Pipe-separated string, e.g. 'R4A:am=0.91:PATHOGENIC:foldx=3.18'.
+        Pipe-separated string, e.g. 'M1A:am=0.36:ambiguous:foldx=0.11'.
         Empty string if no variants.
     """
     if not scored_variants:
@@ -673,74 +464,50 @@ def format_protvar_details(
     return result
 
 
+# ── Section 7: Chain Scoring ─────────────────────────────────────────
+
 def _score_chain_variants_protvar(
     accession: str,
     details_str: str,
-    protvar_index: dict[str, dict[int, dict]],
+    protvar_index: dict,
 ) -> dict:
-    """Score variants for one chain using the ProtVar index.
+    """Score variants for one chain using the combined offline index.
 
     Args:
         accession: UniProt accession for this chain.
         details_str: Pipe-separated variant detail string from Phase C.
-        protvar_index: Full ProtVar index from build_protvar_index().
+        protvar_index: Combined index from build_protvar_index().
 
     Returns:
         Dict with keys:
             'am_mean': float or '' (mean AlphaMissense score),
             'foldx_mean': float or '' (mean FoldX ΔΔG),
-            'n_interactions': int (number of ProtVar interaction partners),
+            'am_n_pathogenic': int (count of pathogenic AM variants),
             'details': str (formatted detail string),
-            'n_scored': int (number of variants with AM scores),
-            'interface_positions': set[int] (positions classified as interface by toolkit).
     """
     base_acc = accession.split('-')[0] if '-' in accession else accession
-    protein_data = protvar_index.get(base_acc, {})
+    acc_data = protvar_index.get(base_acc, {})
+
     variants = _parse_variant_details_for_protvar(details_str)
 
-    am_scores = []
-    foldx_ddgs = []
-    scored_list = []
-    interaction_partners: set[str] = set()
-    interface_positions: set[int] = set()
-
-    # Extract interface positions from variant detail contexts
-    if details_str:
-        for part in details_str.split('|'):
-            part = part.strip()
-            if part.startswith('...(+'):
-                continue
-            ctx = _extract_context_from_detail(part)
-            if ctx.startswith('interface'):
-                match = _VARIANT_DETAIL_PATTERN.match(part)
-                if match:
-                    interface_positions.add(int(match.group(2)))
+    am_scores: list[float] = []
+    foldx_ddgs: list[float] = []
+    n_pathogenic = 0
+    scored_list: list[dict] = []
 
     for ref_aa, pos, alt_aa in variants:
-        pos_data = protein_data.get(pos, {})
-        scores = pos_data.get('scores', [])
-        foldx_data = pos_data.get('foldx', [])
-        interactions = pos_data.get('interactions', [])
+        entry = acc_data.get((pos, alt_aa), {})
 
-        am = extract_am_score(scores, alt_aa)
-        am_cls = extract_am_class(scores, alt_aa)
-        ddg = extract_foldx_ddg(foldx_data, alt_aa)
+        am = entry.get('am_score')
+        am_cls = entry.get('am_class', '')
+        ddg = entry.get('foldx_ddg')
 
         if am is not None:
             am_scores.append(am)
+            if am_cls == 'pathogenic':
+                n_pathogenic += 1
         if ddg is not None:
             foldx_ddgs.append(ddg)
-
-        # Collect interaction partners
-        for entry in interactions:
-            a_acc = str(entry.get('a', ''))
-            b_acc = str(entry.get('b', ''))
-            a_base = a_acc.split('-')[0] if '-' in a_acc else a_acc
-            b_base = b_acc.split('-')[0] if '-' in b_acc else b_acc
-            if a_base == base_acc:
-                interaction_partners.add(b_acc)
-            elif b_base == base_acc:
-                interaction_partners.add(a_acc)
 
         scored_list.append({
             'ref_aa': ref_aa,
@@ -752,31 +519,31 @@ def _score_chain_variants_protvar(
         })
 
     return {
-        'am_mean': round(sum(am_scores) / len(am_scores), 4) if am_scores else '',
-        'foldx_mean': round(sum(foldx_ddgs) / len(foldx_ddgs), 4) if foldx_ddgs else '',
-        'n_interactions': len(interaction_partners),
+        'am_mean': round(mean(am_scores), 4) if am_scores else '',
+        'foldx_mean': round(mean(foldx_ddgs), 4) if foldx_ddgs else '',
+        'am_n_pathogenic': n_pathogenic,
         'details': format_protvar_details(scored_list),
-        'n_scored': len(am_scores),
-        'interface_positions': interface_positions,
     }
 
 
+# ── Section 8: Annotation ───────────────────────────────────────────
+
 def annotate_results_with_protvar(
     results: list[dict],
-    protvar_index: dict[str, dict[int, dict]],
+    protvar_index: dict,
     verbose: bool = False,
 ) -> None:
-    """Annotate result rows with ProtVar data (in-place).
+    """Annotate result rows with offline AlphaMissense + FoldX data (in-place).
 
-    Main entry point from toolkit.py. For each complex:
+    Main entry point from toolkit.py.  For each complex:
     1. Parses variant_details_a/b to extract variants
-    2. Looks up ProtVar scores, interactions, and FoldX data
-    3. Computes AlphaMissense mean, FoldX mean, interface agreement
+    2. Looks up AlphaMissense scores and FoldX DDG from offline index
+    3. Computes means, pathogenic counts
     4. Formats detail strings
 
     Args:
-        results: List of per-complex result dicts. Modified in-place.
-        protvar_index: Index from build_protvar_index().
+        results: List of per-complex result dicts.  Modified in-place.
+        protvar_index: Combined index from build_protvar_index().
         verbose: Print progress to stderr.
     """
     annotated = 0
@@ -792,155 +559,146 @@ def annotate_results_with_protvar(
                 )
                 row[f'protvar_am_mean_{suffix}'] = chain_result['am_mean']
                 row[f'protvar_foldx_mean_{suffix}'] = chain_result['foldx_mean']
-
-                # Compute interface agreement for this chain
-                base_acc = acc.split('-')[0] if '-' in acc else acc
-                protein_data = protvar_index.get(base_acc, {})
-                agreement = compute_interface_agreement(
-                    chain_result['interface_positions'],
-                    protein_data,
-                    acc,
-                )
-                row[f'protvar_interface_agreement_{suffix}'] = agreement
+                row[f'protvar_am_n_pathogenic_{suffix}'] = chain_result['am_n_pathogenic']
                 row[f'protvar_details_{suffix}'] = chain_result['details']
 
-                if chain_result['n_scored'] > 0:
+                if chain_result['am_mean'] != '':
                     annotated += 1
             else:
                 row[f'protvar_am_mean_{suffix}'] = ''
                 row[f'protvar_foldx_mean_{suffix}'] = ''
-                row[f'protvar_interface_agreement_{suffix}'] = ''
+                row[f'protvar_am_n_pathogenic_{suffix}'] = ''
                 row[f'protvar_details_{suffix}'] = ''
 
     if verbose:
-        print(f"  ProtVar: annotated {annotated} chains with scores "
+        print(f"  ProtVar offline: annotated {annotated} chains with scores "
               f"across {len(results)} complexes", file=sys.stderr)
 
 
-# ── Section 7: Standalone CLI ────────────────────────────────────────
+# ── Section 9: Standalone CLI ────────────────────────────────────────
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser for standalone use.
-
-    Returns:
-        Configured ArgumentParser.
-    """
+    """Build the CLI argument parser for standalone use."""
     parser = argparse.ArgumentParser(
-        description="ProtVar API client — cross-validate interface predictions "
-                    "with ProtVar pathogenicity scores, interactions, and FoldX ΔΔG.",
+        description="Offline AlphaMissense + monomeric FoldX scoring for "
+                    "protein variants.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--cache-dir",
-        default=str(PROTVAR_API_DEFAULT_CACHE_DIR),
-        help=f"Cache directory for API responses (default: {PROTVAR_API_DEFAULT_CACHE_DIR}).",
+        "--foldx-export",
+        default=str(DEFAULT_FOLDX_EXPORT),
+        help=f"Path to AFDB FoldX export CSV (default: {DEFAULT_FOLDX_EXPORT}).",
+    )
+    parser.add_argument(
+        "--am-file",
+        default=str(DEFAULT_AM_FILE),
+        help=f"Path to AlphaMissense TSV (default: {DEFAULT_AM_FILE}).",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Sub-commands")
 
     # summary sub-command
-    subparsers.add_parser("summary", help="Print cache statistics.")
+    subparsers.add_parser("summary", help="Print data file statistics.")
 
     # lookup sub-command
     lookup_parser = subparsers.add_parser(
-        "lookup",
-        help="Look up ProtVar data for a protein position.",
+        "lookup", help="Look up scores for a specific protein.",
     )
     lookup_parser.add_argument(
-        "--protein", required=True,
-        help="UniProt accession (e.g. P61981).",
+        "--protein", required=True, help="UniProt accession.",
     )
     lookup_parser.add_argument(
-        "--position", required=True, type=int,
-        help="Residue position (1-based).",
+        "--position", type=int, default=None,
+        help="Residue position (optional, show all if omitted).",
     )
 
     return parser
 
 
-def _cli_summary(cache_dir: Path) -> None:
-    """Print cache statistics to stdout.
+def _cli_summary(foldx_path: str, am_path: str) -> None:
+    """Print summary statistics for both data files (streaming, no full load)."""
+    foldx_file = Path(foldx_path)
+    am_file = Path(am_path)
 
-    Args:
-        cache_dir: Path to cache directory.
-    """
-    if not cache_dir.exists():
-        print(f"Cache directory does not exist: {cache_dir}")
-        print("No cached ProtVar responses.")
+    print("ProtVar Offline Data Summary")
+    print("=" * 50)
+
+    # AlphaMissense
+    if am_file.exists():
+        n_lines = 0
+        proteins: set[str] = set()
+        with open(am_file, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith('#') or line.startswith('uniprot_id'):
+                    continue
+                parts = line.split('\t', 1)
+                if parts:
+                    proteins.add(parts[0])
+                n_lines += 1
+        print(f"\nAlphaMissense: {am_file.name}")
+        print(f"  Rows: {n_lines:,}")
+        print(f"  Proteins: {len(proteins):,}")
+    else:
+        print(f"\nAlphaMissense: NOT FOUND ({am_file})")
+
+    # FoldX export
+    if foldx_file.exists():
+        n_lines = 0
+        proteins = set()
+        with open(foldx_file, encoding="utf-8", newline='') as f:
+            reader = csv.reader(f)
+            next(reader, None)  # skip header
+            for row in reader:
+                if row:
+                    proteins.add(row[0])
+                n_lines += 1
+        print(f"\nAFDB FoldX Export: {foldx_file.name}")
+        print(f"  Rows: {n_lines:,}")
+        print(f"  Proteins: {len(proteins):,}")
+    else:
+        print(f"\nAFDB FoldX Export: NOT FOUND ({foldx_file})")
+
+
+def _cli_lookup(
+    foldx_path: str,
+    am_path: str,
+    accession: str,
+    position: Optional[int],
+) -> None:
+    """Look up scores for a specific protein (or position)."""
+    acc_set = {accession}
+    pos_filter = None
+    if position is not None:
+        pos_filter = {accession: {position}}
+
+    index = build_protvar_index(
+        accessions=acc_set,
+        variant_positions=pos_filter,
+        foldx_path=foldx_path,
+        am_path=am_path,
+        verbose=True,
+    )
+
+    acc_data = index.get(accession, {})
+    if not acc_data:
+        print(f"No data found for {accession}", file=sys.stderr)
         return
 
-    cache_files = list(cache_dir.glob("*.json"))
-    print(f"ProtVar API cache: {cache_dir}")
-    print(f"  Cached responses: {len(cache_files)}")
+    print(f"\nScores for {accession}:")
+    print(f"{'Pos':>5} {'Alt':>3} {'AM Score':>9} {'AM Class':>12} "
+          f"{'FoldX DDG':>10} {'pLDDT':>6}")
+    print("-" * 55)
 
-    if cache_files:
-        # Count unique proteins (approximate from cache metadata)
-        endpoints: dict[str, int] = {}
-        for f in cache_files:
-            try:
-                with open(f, encoding="utf-8") as fh:
-                    meta = json.load(fh)
-                ep = meta.get("_endpoint", "unknown")
-                endpoints[ep] = endpoints.get(ep, 0) + 1
-            except (json.JSONDecodeError, OSError):
-                pass
-        for ep, count in sorted(endpoints.items()):
-            print(f"    {ep}: {count} cached")
-
-
-def _cli_lookup(accession: str, position: int,
-                cache_dir: Optional[str] = None) -> None:
-    """Look up and display ProtVar data for a protein position.
-
-    Args:
-        accession: UniProt accession.
-        position: Residue position.
-        cache_dir: Cache directory path.
-    """
-    print(f"Looking up ProtVar data for {accession} position {position}...")
-    print()
-
-    # Scores
-    scores = get_scores(accession, position, cache_dir=cache_dir)
-    am_entries = [s for s in scores if s.get('name') == PROTVAR_TOOL_AM]
-    eve_entries = [s for s in scores if s.get('name') == PROTVAR_TOOL_EVE]
-    conserv_entries = [s for s in scores if s.get('name') == PROTVAR_TOOL_CONSERV]
-
-    print(f"=== Scores ({len(scores)} entries) ===")
-    print(f"  AlphaMissense: {len(am_entries)} substitutions")
-    for s in sorted(am_entries, key=lambda x: x.get('amPathogenicity', 0), reverse=True)[:5]:
-        print(f"    → {s.get('mt', '?')}: {s.get('amPathogenicity', '?')} ({s.get('amClass', '?')})")
-    if len(am_entries) > 5:
-        print(f"    ... and {len(am_entries) - 5} more")
-
-    print(f"  EVE: {len(eve_entries)} substitutions")
-    if conserv_entries:
-        print(f"  Conservation: {conserv_entries[0].get('score', '?')}")
-    print()
-
-    # Interactions
-    interactions = get_interactions(accession, position, cache_dir=cache_dir)
-    print(f"=== Interactions ({len(interactions)} partners) ===")
-    for entry in interactions[:5]:
-        print(f"  {entry.get('a', '?')} ↔ {entry.get('b', '?')} "
-              f"(pDockQ: {entry.get('pdockq', '?'):.4f})")
-    is_interface = check_protvar_interface(interactions, accession, position)
-    print(f"  Position {position} is at interface: {is_interface}")
-    print()
-
-    # FoldX
-    foldx_data = get_foldx(accession, position, cache_dir=cache_dir)
-    print(f"=== FoldX ΔΔG ({len(foldx_data)} substitutions) ===")
-    destab = [f for f in foldx_data
-              if f.get('foldxDdg', 0) > FOLDX_DESTABILISING_THRESHOLD]
-    print(f"  Destabilising (>{FOLDX_DESTABILISING_THRESHOLD} kcal/mol): "
-          f"{len(destab)}/{len(foldx_data)}")
-    for f in sorted(foldx_data, key=lambda x: x.get('foldxDdg', 0), reverse=True)[:5]:
-        wt = f.get('wildType', '?')
-        mt = f.get('mutatedType', '?')
-        ddg = f.get('foldxDdg', 0)
-        flag = " ⚠ DESTABILISING" if ddg > FOLDX_DESTABILISING_THRESHOLD else ""
-        print(f"    {wt}{position}{mt}: ΔΔG = {ddg:.3f}{flag}")
+    for (pos, alt), scores in sorted(acc_data.items()):
+        am = scores.get('am_score')
+        am_str = f"{am:.4f}" if am is not None else '-'
+        am_cls = scores.get('am_class', '-')
+        ddg = scores.get('foldx_ddg')
+        ddg_str = f"{ddg:.4f}" if ddg is not None else '-'
+        plddt = scores.get('plddt')
+        plddt_str = f"{plddt:.1f}" if plddt is not None else '-'
+        print(f"{pos:>5} {alt:>3} {am_str:>9} {am_cls:>12} "
+              f"{ddg_str:>10} {plddt_str:>6}")
 
 
 def main() -> None:
@@ -948,16 +706,13 @@ def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
 
-    if not args.command:
-        parser.print_help()
-        sys.exit(0)
-
-    cache_dir = Path(args.cache_dir) if args.cache_dir else PROTVAR_API_DEFAULT_CACHE_DIR
-
     if args.command == "summary":
-        _cli_summary(cache_dir)
+        _cli_summary(args.foldx_export, args.am_file)
     elif args.command == "lookup":
-        _cli_lookup(args.protein, args.position, cache_dir=str(cache_dir))
+        _cli_lookup(args.foldx_export, args.am_file,
+                    args.protein, args.position)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

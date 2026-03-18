@@ -214,9 +214,6 @@ class TestStabilityScoring:
         """EVE scores correctly loaded and mapped."""
         pytest.skip("Converted to real test — see TestEVEScoreLookupReal below")
 
-    def test_foldx_ddg_computation(self):
-        """FoldX ΔΔG computed for interface variant."""
-        pytest.skip("Not yet implemented")
 
 
 # ── EVE Score Lookup (converted from placeholder) ────────────────
