@@ -686,3 +686,179 @@ class TestEnrichmentAugmentation:
         annotate_results_with_pathways(results, reactome_index, enrichment_df=None)
         # Should work fine without enrichment
         assert "n_shared_pathways" in results[0]
+
+
+# ── Section: TestInvertReactomeIndex ────────────────────────────────
+
+@pytest.mark.pathways
+class TestInvertReactomeIndex:
+    """Test pathway→proteins index inversion."""
+
+    def test_invert_returns_dict(self, reactome_index):
+        from pathway_network import invert_reactome_index
+        result = invert_reactome_index(reactome_index)
+        assert isinstance(result, dict)
+
+    def test_invert_has_pathway_ids(self, reactome_index):
+        from pathway_network import invert_reactome_index
+        result = invert_reactome_index(reactome_index)
+        # Should contain known Reactome IDs
+        assert any(pid.startswith("R-HSA-") for pid in result)
+
+    def test_invert_proteins_are_sets(self, reactome_index):
+        from pathway_network import invert_reactome_index
+        result = invert_reactome_index(reactome_index)
+        for proteins in result.values():
+            assert isinstance(proteins, set)
+
+    def test_invert_contains_test_proteins(self, reactome_index):
+        from pathway_network import invert_reactome_index
+        result = invert_reactome_index(reactome_index)
+        # TP53 should be in at least some pathways
+        tp53_pathways = [pid for pid, prots in result.items() if ACC_TP53 in prots]
+        assert len(tp53_pathways) == TP53_UNIQUE_PATHWAYS
+
+    def test_invert_roundtrip_consistency(self, reactome_index):
+        """Inverting should preserve the total number of (protein, pathway) pairs."""
+        from pathway_network import invert_reactome_index
+        # Count forward direction
+        forward_pairs = sum(len(mappings) for mappings in reactome_index.values())
+        # Count inverted direction
+        inverted = invert_reactome_index(reactome_index)
+        inverted_pairs = sum(len(prots) for prots in inverted.values())
+        # May differ due to deduplication, but inverted should not exceed forward
+        assert inverted_pairs <= forward_pairs
+
+
+# ── Section: TestPerPathwayPPIEnrichment ────────────────────────────
+
+@pytest.mark.pathways
+class TestPerPathwayPPIEnrichment:
+    """Test per-pathway PPI enrichment query and annotation integration."""
+
+    def test_per_pathway_enrichment_with_mock(self, reactome_index):
+        """Mocked API should produce per-pathway stats."""
+        from unittest.mock import patch
+        from pathway_network import invert_reactome_index, run_per_pathway_ppi_enrichment
+
+        pathway_proteins = invert_reactome_index(reactome_index)
+
+        # Pick a few pathways shared between TP53 and YWHAG
+        pids_a = {m["pathway_id"] for m in reactome_index.get(ACC_TP53, [])}
+        pids_b = {m["pathway_id"] for m in reactome_index.get(ACC_YWHAG, [])}
+        shared = pids_a & pids_b
+
+        mock_result = {
+            "p_value": 0.001,
+            "number_of_edges": 10,
+            "expected_number_of_edges": 5,
+        }
+
+        with patch("string_api.query_ppi_enrichment", return_value=mock_result):
+            stats = run_per_pathway_ppi_enrichment(
+                pathway_proteins, shared, verbose=False,
+            )
+
+        assert len(stats) > 0
+        for pid, s in stats.items():
+            assert "p_value" in s
+            assert "ratio" in s
+            assert s["ratio"] == 2.0  # 10/5
+
+    def test_per_pathway_enrichment_skips_small(self, reactome_index):
+        """Pathways with <2 proteins should be skipped."""
+        from unittest.mock import patch, MagicMock
+        from pathway_network import run_per_pathway_ppi_enrichment
+
+        # Create a pathway with only 1 protein
+        pathway_proteins = {"R-HSA-TINY": {"P04637"}}
+        mock_fn = MagicMock()
+
+        with patch("string_api.query_ppi_enrichment", mock_fn):
+            stats = run_per_pathway_ppi_enrichment(
+                pathway_proteins, {"R-HSA-TINY"}, verbose=False,
+            )
+
+        assert len(stats) == 0
+        mock_fn.assert_not_called()
+
+    def test_per_pathway_enrichment_handles_failure(self, reactome_index):
+        """API failures for individual pathways should not crash."""
+        from unittest.mock import patch
+        from pathway_network import invert_reactome_index, run_per_pathway_ppi_enrichment
+
+        pathway_proteins = invert_reactome_index(reactome_index)
+        pids_a = {m["pathway_id"] for m in reactome_index.get(ACC_TP53, [])}
+        pids_b = {m["pathway_id"] for m in reactome_index.get(ACC_YWHAG, [])}
+        shared = pids_a & pids_b
+
+        with patch("string_api.query_ppi_enrichment",
+                    side_effect=Exception("API error")):
+            stats = run_per_pathway_ppi_enrichment(
+                pathway_proteins, shared, verbose=False,
+            )
+
+        assert stats == {}
+
+    def test_annotation_with_per_pathway_ppi(self, reactome_index):
+        """annotate_results_with_pathways with pathway_ppi_stats picks best pathway."""
+        from pathway_network import annotate_results_with_pathways
+
+        results = [
+            {"protein_a": ACC_TP53, "protein_b": ACC_YWHAG,
+             "pdockq": 0.45, "quality_tier_v2": "Medium"},
+        ]
+
+        # Find shared pathways
+        pids_a = {m["pathway_id"] for m in reactome_index.get(ACC_TP53, [])}
+        pids_b = {m["pathway_id"] for m in reactome_index.get(ACC_YWHAG, [])}
+        shared = pids_a & pids_b
+        shared_list = sorted(shared)
+
+        # Mock per-pathway stats with different p-values
+        pathway_ppi_stats = {}
+        for i, pid in enumerate(shared_list):
+            pathway_ppi_stats[pid] = {
+                "p_value": 0.01 * (i + 1),  # increasing p-values
+                "ratio": 2.0 + i * 0.1,
+                "n_proteins": 10,
+                "sampled": False,
+            }
+
+        annotate_results_with_pathways(
+            results, reactome_index,
+            pathway_ppi_stats=pathway_ppi_stats,
+        )
+
+        # Should pick the most significant (lowest p-value)
+        assert results[0]["ppi_enrichment_pvalue"] != ""
+        assert results[0]["ppi_enrichment_ratio"] != ""
+        # p-value should be the smallest one (first in sorted order)
+        assert results[0]["ppi_enrichment_pvalue"] == f"{0.01:.2e}"
+
+    def test_annotation_no_shared_pathways_empty_ppi(self, reactome_index):
+        """Complexes with no shared pathways get empty PPI columns."""
+        from pathway_network import annotate_results_with_pathways
+
+        results = [
+            {"protein_a": ACC_EEF1B2, "protein_b": ACC_EEF1B2,
+             "pdockq": 0.30, "quality_tier_v2": "Medium"},
+        ]
+
+        pathway_ppi_stats = {"R-HSA-UNRELATED": {
+            "p_value": 0.001, "ratio": 3.0,
+            "n_proteins": 50, "sampled": False,
+        }}
+
+        annotate_results_with_pathways(
+            results, reactome_index,
+            pathway_ppi_stats=pathway_ppi_stats,
+        )
+
+        # EEF1B2 with itself has shared pathways, but none in pathway_ppi_stats
+        # The columns should still have some value or empty
+        assert "ppi_enrichment_pvalue" in results[0]
+
+    def test_ppi_enrichment_min_proteins_constant(self):
+        from pathway_network import PPI_ENRICHMENT_MIN_PROTEINS
+        assert PPI_ENRICHMENT_MIN_PROTEINS == 2

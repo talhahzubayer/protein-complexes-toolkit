@@ -682,3 +682,208 @@ class TestEdgeCases:
         from disease_annotations import _lookup_annotation
         result = _lookup_annotation("P61981-3", annotation_index, api_fallback=False)
         assert len(result["diseases"]) == YWHAG_DISEASES
+
+
+# ── Section: TestAPIFallbackParsing ────────────────────────────────
+
+@pytest.mark.disease
+class TestAPIFallbackParsing:
+    """Test API fallback response parsing for PTM positions and disease schema."""
+
+    def test_ptm_position_dict_unwrap(self):
+        """PTM positions returned as dicts should be unwrapped to integers."""
+        from disease_annotations import fetch_uniprot_annotation_api
+        from unittest.mock import patch, MagicMock
+        import json
+
+        mock_data = {
+            "comments": [],
+            "features": [
+                {
+                    "type": "Modified residue",
+                    "location": {
+                        "position": {"value": 42, "modifier": "EXACT"},
+                    },
+                    "description": "Phosphoserine",
+                },
+            ],
+            "uniProtKBCrossReferences": [],
+            "keywords": [],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("disease_annotations.urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_uniprot_annotation_api("FAKE123")
+
+        assert result is not None
+        assert len(result["ptm_sites"]) == 1
+        assert result["ptm_sites"][0]["position"] == "42"
+        assert "value" not in result["ptm_sites"][0]["position"]
+
+    def test_ptm_position_plain_int(self):
+        """PTM positions returned as plain ints should work unchanged."""
+        from disease_annotations import fetch_uniprot_annotation_api
+        from unittest.mock import patch, MagicMock
+        import json
+
+        mock_data = {
+            "comments": [],
+            "features": [
+                {
+                    "type": "Glycosylation",
+                    "location": {"position": 99},
+                    "description": "N-linked",
+                },
+            ],
+            "uniProtKBCrossReferences": [],
+            "keywords": [],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("disease_annotations.urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_uniprot_annotation_api("FAKE456")
+
+        assert result is not None
+        assert result["ptm_sites"][0]["position"] == "99"
+
+    def test_ptm_start_end_dict_unwrap(self):
+        """start/end position dicts should be unwrapped to integers."""
+        from disease_annotations import fetch_uniprot_annotation_api
+        from unittest.mock import patch, MagicMock
+        import json
+
+        mock_data = {
+            "comments": [],
+            "features": [
+                {
+                    "type": "Cross-link",
+                    "location": {
+                        "start": {"value": 10, "modifier": "EXACT"},
+                        "end": {"value": 20, "modifier": "EXACT"},
+                    },
+                    "description": "Isopeptide bond",
+                },
+            ],
+            "uniProtKBCrossReferences": [],
+            "keywords": [],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("disease_annotations.urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_uniprot_annotation_api("FAKE789")
+
+        assert result is not None
+        assert result["ptm_sites"][0]["position"] == "10-20"
+
+    def test_ptm_start_end_same_value_collapses(self):
+        """start==end position dicts should collapse to single position."""
+        from disease_annotations import fetch_uniprot_annotation_api
+        from unittest.mock import patch, MagicMock
+        import json
+
+        mock_data = {
+            "comments": [],
+            "features": [
+                {
+                    "type": "Modified residue",
+                    "location": {
+                        "start": {"value": 5, "modifier": "EXACT"},
+                        "end": {"value": 5, "modifier": "EXACT"},
+                    },
+                    "description": "Phosphothreonine",
+                },
+            ],
+            "uniProtKBCrossReferences": [],
+            "keywords": [],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("disease_annotations.urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_uniprot_annotation_api("FAKE_SAME")
+
+        assert result is not None
+        assert result["ptm_sites"][0]["position"] == "5"
+
+    def test_disease_note_schema(self):
+        """Current API returns disease in note.texts format — should be parsed."""
+        from disease_annotations import fetch_uniprot_annotation_api
+        from unittest.mock import patch, MagicMock
+        import json
+
+        mock_data = {
+            "comments": [
+                {
+                    "commentType": "DISEASE",
+                    "note": {
+                        "texts": [
+                            {"value": "Associated with autoimmune gastritis"}
+                        ]
+                    },
+                },
+            ],
+            "features": [],
+            "uniProtKBCrossReferences": [],
+            "keywords": [],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("disease_annotations.urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_uniprot_annotation_api("P18434")
+
+        assert result is not None
+        assert len(result["diseases"]) == 1
+        assert "autoimmune gastritis" in result["diseases"][0]["disease_name"]
+
+    def test_disease_empty_fields_filtered(self):
+        """Disease dicts with all empty fields should not be created."""
+        from disease_annotations import fetch_uniprot_annotation_api
+        from unittest.mock import patch, MagicMock
+        import json
+
+        mock_data = {
+            "comments": [
+                {
+                    "commentType": "DISEASE",
+                    # No disease object and no note — nothing to parse
+                },
+            ],
+            "features": [],
+            "uniProtKBCrossReferences": [],
+            "keywords": [],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("disease_annotations.urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_uniprot_annotation_api("EMPTY_DISEASE")
+
+        assert result is not None
+        assert len(result["diseases"]) == 0
+
+    def test_display_limit_is_50(self):
+        """DETAILS_DISPLAY_LIMIT should be 50 after the fix."""
+        from disease_annotations import DETAILS_DISPLAY_LIMIT
+        assert DETAILS_DISPLAY_LIMIT == 50

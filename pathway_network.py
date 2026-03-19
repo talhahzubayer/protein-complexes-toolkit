@@ -55,6 +55,7 @@ NETWORK_PDOCKQ_THRESHOLD = 0.23       # Medium+ tier for network edges
 NETWORK_MAX_NODES_FOR_PLOT = 500      # Cap for readable spring layout
 PATHWAY_DISPLAY_LIMIT = 20            # Max pathways before truncation
 STRING_PPI_ENRICHMENT_LIMIT = 1000    # Safe limit for PPI enrichment (2000 times out)
+PPI_ENRICHMENT_MIN_PROTEINS = 2       # Minimum proteins for meaningful enrichment test
 
 CSV_FIELDNAMES_PATHWAYS = [
     'reactome_pathways_a', 'reactome_pathways_b',
@@ -330,6 +331,111 @@ def run_ppi_enrichment(
         if verbose:
             print(f"  PPI enrichment failed: {e}", file=sys.stderr)
         return None
+
+
+def invert_reactome_index(
+    reactome_index: dict[str, list[dict]],
+) -> dict[str, set[str]]:
+    """Invert protein→pathways index to pathway→proteins.
+
+    Parameters
+    ----------
+    reactome_index : dict[str, list[dict]]
+        From ``load_reactome_mappings()``.
+
+    Returns
+    -------
+    dict[str, set[str]]
+        ``{pathway_id: {accession, ...}}``.
+    """
+    pathway_proteins: dict[str, set[str]] = defaultdict(set)
+    for acc, mappings in reactome_index.items():
+        for m in mappings:
+            pathway_proteins[m["pathway_id"]].add(acc)
+    return dict(pathway_proteins)
+
+
+def run_per_pathway_ppi_enrichment(
+    pathway_proteins: dict[str, set[str]],
+    pathway_ids: set[str],
+    cache_dir: Optional[Union[str, bool]] = None,
+    verbose: bool = False,
+) -> dict[str, dict]:
+    """Query STRING PPI enrichment per Reactome pathway.
+
+    For each pathway in *pathway_ids*, sends its member proteins to
+    ``query_ppi_enrichment`` and collects per-pathway enrichment stats.
+
+    Pathways with fewer than ``PPI_ENRICHMENT_MIN_PROTEINS`` members are
+    skipped.  Pathways exceeding ``STRING_PPI_ENRICHMENT_LIMIT`` are
+    down-sampled with a deterministic seed (pathway ID hash).
+
+    Parameters
+    ----------
+    pathway_proteins : dict[str, set[str]]
+        From ``invert_reactome_index()``.
+    pathway_ids : set[str]
+        Pathway IDs to query (typically shared pathways across all complexes).
+    cache_dir : str, bool, or None
+        Passed through to ``query_ppi_enrichment``.
+    verbose : bool
+        Print progress to stderr.
+
+    Returns
+    -------
+    dict[str, dict]
+        ``{pathway_id: {p_value, ratio, n_proteins, sampled}}``.
+    """
+    try:
+        from string_api import query_ppi_enrichment
+    except ImportError:
+        return {}
+
+    eligible = sorted(pid for pid in pathway_ids
+                      if len(pathway_proteins.get(pid, set())) >= PPI_ENRICHMENT_MIN_PROTEINS)
+
+    if verbose:
+        print(f"  Per-pathway PPI enrichment: {len(eligible)} pathways "
+              f"(of {len(pathway_ids)} shared)", file=sys.stderr)
+
+    results: dict[str, dict] = {}
+    for i, pid in enumerate(eligible):
+        proteins = list(pathway_proteins[pid])
+        sampled = False
+
+        if len(proteins) > STRING_PPI_ENRICHMENT_LIMIT:
+            random.seed(hash(pid))
+            proteins = random.sample(proteins, STRING_PPI_ENRICHMENT_LIMIT)
+            sampled = True
+
+        try:
+            raw = query_ppi_enrichment(proteins, cache_dir=cache_dir)
+        except Exception as e:
+            if verbose:
+                print(f"    Pathway {pid} failed: {e}", file=sys.stderr)
+            continue
+
+        p_val = raw.get("p_value")
+        obs = raw.get("number_of_edges", 0)
+        exp = raw.get("expected_number_of_edges", 0)
+        ratio = (obs / exp) if exp and exp > 0 else 0.0
+
+        results[pid] = {
+            "p_value": p_val,
+            "ratio": ratio,
+            "n_proteins": len(pathway_proteins[pid]),
+            "sampled": sampled,
+        }
+
+        if verbose and (i + 1) % 50 == 0:
+            print(f"    {i + 1}/{len(eligible)} pathways queried...",
+                  file=sys.stderr)
+
+    if verbose:
+        print(f"  Per-pathway PPI enrichment complete: "
+              f"{len(results)}/{len(eligible)} succeeded", file=sys.stderr)
+
+    return results
 
 
 # ── Network Construction ─────────────────────────────────────────
@@ -818,6 +924,7 @@ def annotate_results_with_pathways(
     reactome_index: dict[str, list[dict]],
     pathway_stats: Optional[dict[str, dict]] = None,
     ppi_stats: Optional[dict] = None,
+    pathway_ppi_stats: Optional[dict[str, dict]] = None,
     network_stats: Optional[dict[str, dict]] = None,
     enrichment_df: Optional[object] = None,
     verbose: bool = False,
@@ -841,7 +948,12 @@ def annotate_results_with_pathways(
     pathway_stats : dict or None
         Pathway quality stats from ``compute_pathway_quality_stats``.
     ppi_stats : dict or None
-        PPI enrichment from ``run_ppi_enrichment``.
+        Legacy global PPI enrichment from ``run_ppi_enrichment``.
+        Used only as fallback when *pathway_ppi_stats* is not provided.
+    pathway_ppi_stats : dict or None
+        Per-pathway PPI enrichment from ``run_per_pathway_ppi_enrichment``.
+        When provided, each row gets the enrichment of its best (most
+        significant) shared pathway.
     network_stats : dict or None
         Per-node network stats from ``compute_network_stats``.
     enrichment_df : pd.DataFrame or None
@@ -870,17 +982,18 @@ def annotate_results_with_pathways(
             print(f"  STRING enrichment: {len(enrichment_fdr)} terms, "
                   f"{sig_count} significant (FDR < 0.05)", file=sys.stderr)
 
-    # Pre-compute PPI enrichment values
-    ppi_pvalue = ""
-    ppi_ratio = ""
-    if ppi_stats:
+    # Pre-compute global PPI enrichment values (legacy fallback)
+    global_ppi_pvalue = ""
+    global_ppi_ratio = ""
+    if ppi_stats and not pathway_ppi_stats:
         p_val = ppi_stats.get("p_value")
         if p_val is not None:
-            ppi_pvalue = f"{p_val:.2e}" if isinstance(p_val, (int, float)) else str(p_val)
+            global_ppi_pvalue = (f"{p_val:.2e}"
+                                 if isinstance(p_val, (int, float)) else str(p_val))
         obs = ppi_stats.get("number_of_edges", 0)
         exp = ppi_stats.get("expected_number_of_edges", 0)
         if exp and exp > 0:
-            ppi_ratio = f"{obs / exp:.2f}"
+            global_ppi_ratio = f"{obs / exp:.2f}"
 
     for row in results:
         protein_a = row.get("protein_a", "")
@@ -917,9 +1030,29 @@ def annotate_results_with_pathways(
         else:
             row["pathway_quality_context"] = ""
 
-        # PPI enrichment (same for all rows — it's a global stat)
-        row["ppi_enrichment_pvalue"] = ppi_pvalue
-        row["ppi_enrichment_ratio"] = ppi_ratio
+        # PPI enrichment — per-pathway when available, global fallback
+        if pathway_ppi_stats and shared:
+            # Pick shared pathway with the lowest (most significant) p-value
+            best_ppi = None
+            best_p = float("inf")
+            for pid in shared:
+                pstats = pathway_ppi_stats.get(pid)
+                if pstats and pstats.get("p_value") is not None:
+                    pv = float(pstats["p_value"])
+                    if pv < best_p:
+                        best_p = pv
+                        best_ppi = pstats
+            if best_ppi is not None:
+                pv = best_ppi["p_value"]
+                row["ppi_enrichment_pvalue"] = (
+                    f"{pv:.2e}" if isinstance(pv, (int, float)) else str(pv))
+                row["ppi_enrichment_ratio"] = f"{best_ppi['ratio']:.2f}"
+            else:
+                row["ppi_enrichment_pvalue"] = ""
+                row["ppi_enrichment_ratio"] = ""
+        else:
+            row["ppi_enrichment_pvalue"] = global_ppi_pvalue
+            row["ppi_enrichment_ratio"] = global_ppi_ratio
 
         # Network stats per protein
         if network_stats:

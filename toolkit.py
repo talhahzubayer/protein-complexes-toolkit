@@ -1799,7 +1799,8 @@ def main() -> None:
             load_reactome_mappings, compute_pathway_quality_stats,
             annotate_results_with_pathways, run_ppi_enrichment,
             run_string_enrichment, build_interaction_network,
-            compute_network_stats,
+            compute_network_stats, invert_reactome_index,
+            run_per_pathway_ppi_enrichment,
             REACTOME_MAPPINGS_FILENAME, DEFAULT_PATHWAYS_DIR,
             _HAS_NETWORKX,
         )
@@ -1837,7 +1838,7 @@ def main() -> None:
         # Optional: STRING API enrichment (only if --no-api not set)
         # Follows offline-first + API validation pattern: local Reactome provides
         # the base, STRING enrichment validates with p-values / FDR
-        ppi_stats = None
+        pathway_ppi_stats = None
         enrichment_df = None
         if not args.no_api:
             gene_symbols = []
@@ -1848,8 +1849,27 @@ def main() -> None:
                         gene_symbols.append(gs)
             gene_symbols = list(set(gene_symbols))
             if gene_symbols:
-                ppi_stats = run_ppi_enrichment(gene_symbols, verbose=True)
                 enrichment_df = run_string_enrichment(gene_symbols, verbose=True)
+
+            # Per-pathway PPI enrichment (replaces global enrichment)
+            if reactome_index:
+                pathway_proteins = invert_reactome_index(reactome_index)
+                # Collect all shared pathway IDs across complexes
+                shared_pathway_ids: set[str] = set()
+                for row in results:
+                    pa = row.get('protein_a', '')
+                    pb = row.get('protein_b', '')
+                    ba = pa.split('-')[0] if '-' in pa else pa
+                    bb = pb.split('-')[0] if '-' in pb else pb
+                    pids_a = {m['pathway_id'] for m in
+                              (reactome_index.get(pa, []) or reactome_index.get(ba, []))}
+                    pids_b = {m['pathway_id'] for m in
+                              (reactome_index.get(pb, []) or reactome_index.get(bb, []))}
+                    shared_pathway_ids.update(pids_a & pids_b)
+                if shared_pathway_ids:
+                    pathway_ppi_stats = run_per_pathway_ppi_enrichment(
+                        pathway_proteins, shared_pathway_ids, verbose=True,
+                    )
 
         # Optional: build network and compute node-level stats
         network_stats = None
@@ -1864,7 +1884,7 @@ def main() -> None:
         annotate_results_with_pathways(
             results, reactome_index,
             pathway_stats=pathway_stats,
-            ppi_stats=ppi_stats,
+            pathway_ppi_stats=pathway_ppi_stats,
             network_stats=network_stats,
             enrichment_df=enrichment_df,
             verbose=True,

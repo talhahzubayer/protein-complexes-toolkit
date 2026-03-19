@@ -41,7 +41,7 @@ from typing import Optional, Union
 DEFAULT_DISEASE_DIR = Path(__file__).parent / "data" / "pathways"
 UNIPROT_XML_FILENAME = "uniprot_sprot_human.xml"
 
-DETAILS_DISPLAY_LIMIT = 20  # Max items before "(+N more)" truncation
+DETAILS_DISPLAY_LIMIT = 50  # Max items before "(+N more)" truncation
 
 UNIPROT_XML_NAMESPACE = "https://uniprot.org/uniprot"
 
@@ -295,16 +295,29 @@ def fetch_uniprot_annotation_api(accession: str) -> Optional[dict]:
     for comment in data.get("comments", []):
         if comment.get("commentType") != "DISEASE":
             continue
+        # Try structured disease object (legacy API schema)
         disease = comment.get("disease", {})
+        disease_name = disease.get("diseaseId", "")
+        acronym = disease.get("acronym", "")
         omim_id = ""
         for xref in disease.get("dbReferences", []):
             if xref.get("type") == "MIM":
                 omim_id = xref.get("id", "")
-        diseases.append({
-            "disease_name": disease.get("diseaseId", ""),
-            "acronym": disease.get("acronym", ""),
-            "omim_id": omim_id,
-        })
+        # Current API schema: disease info in note.texts[].value
+        if not disease_name and not omim_id:
+            note = comment.get("note", {})
+            for text_entry in note.get("texts", []):
+                val = text_entry.get("value", "").strip()
+                if val:
+                    disease_name = val
+                    break  # take first note text as disease description
+        # Only record if we found meaningful data
+        if disease_name or omim_id:
+            diseases.append({
+                "disease_name": disease_name,
+                "acronym": acronym,
+                "omim_id": omim_id,
+            })
 
     ptm_sites: list[dict] = []
     for feat in data.get("features", []):
@@ -314,9 +327,16 @@ def fetch_uniprot_annotation_api(accession: str) -> Optional[dict]:
             location = feat.get("location", {})
             position = ""
             if "position" in location:
-                position = str(location["position"])
+                raw_pos = location["position"]
+                position = str(raw_pos.get("value", "")) if isinstance(raw_pos, dict) else str(raw_pos)
             elif "start" in location and "end" in location:
-                position = f"{location['start']}-{location['end']}"
+                start = location["start"]
+                end = location["end"]
+                if isinstance(start, dict):
+                    start = start.get("value", "")
+                if isinstance(end, dict):
+                    end = end.get("value", "")
+                position = str(start) if start == end else f"{start}-{end}"
             ptm_sites.append({
                 "type": ftype.lower().replace(" ", "_"),
                 "position": position,
