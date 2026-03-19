@@ -59,9 +59,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
-from scipy.stats import gaussian_kde, spearmanr, wilcoxon, mannwhitneyu, kruskal, chi2_contingency
+from scipy.stats import gaussian_kde, spearmanr, wilcoxon, mannwhitneyu, kruskal, chi2_contingency, fisher_exact
 from matplotlib.path import Path as MplPath
 import re as _re
+import textwrap as _textwrap
 
 try:
     import seaborn as sns
@@ -140,7 +141,7 @@ SIGNIFICANCE_COLORS = {
     'Unknown': '#bdc3c7',
 }
 
-# Phase E figure constants (Figs 14-15, 17)
+# Phase E figure constants (Figs 14-15, 16)
 SHARED_PATHWAY_BINS = [
     (0, 3, '0\u20133'), (4, 10, '4\u201310'),
     (11, 30, '11\u201330'), (31, float('inf'), '31+'),
@@ -1958,6 +1959,12 @@ def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
         patch.set_facecolor('#ecf0f1')
         patch.set_alpha(0.8)
 
+    # Global median dashed line for baseline reference
+    valid_pdockq = pdockq[~np.isnan(pdockq)]
+    global_median = float(np.nanmedian(valid_pdockq)) if len(valid_pdockq) > 0 else 0
+    ax_a.axhline(y=global_median, color='grey', linestyle='--', linewidth=0.8,
+                 alpha=0.6, label=f'Dataset median ({global_median:.2f})')
+
     ax_a.set_xticks(range(len(bin_labels)))
     ax_a.set_xticklabels(bin_labels, fontsize=FONT_TICK)
 
@@ -1981,12 +1988,20 @@ def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
             ax_a.text(i, upper + (ax_a.get_ylim()[1] - ax_a.get_ylim()[0]) * 0.03,
                       f'n={n:,}', ha='center', va='bottom', fontsize=7, color='#555555')
 
+    # Spearman rho on raw ungrouped data
+    valid_mask = ~np.isnan(pdockq)
+    n_shared_valid = n_shared.values[valid_mask] if hasattr(n_shared, 'values') else n_shared[valid_mask]
+    pdockq_valid = pdockq[valid_mask]
+    rho, rho_p = spearmanr(n_shared_valid, pdockq_valid) if len(pdockq_valid) >= 3 else (0, 1)
+
     # Mann-Whitney: first bin vs last bin
     if bin_ns[0] >= 2 and bin_ns[-1] >= 2:
         stat, p_val = mannwhitneyu(bin_data[0], bin_data[-1], alternative='two-sided')
         p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
-        ax_a.text(0.02, 0.95, f'{bin_labels[0]} vs {bin_labels[-1]}: {p_str}',
-                  transform=ax_a.transAxes, ha='left', va='top',
+        ax_a.text(0.98, 0.95,
+                  f'{bin_labels[0]} vs {bin_labels[-1]}: {p_str}\n'
+                  f'Spearman \u03c1 = {rho:.3f}',
+                  transform=ax_a.transAxes, ha='right', va='top',
                   fontsize=8, bbox=dict(boxstyle='round,pad=0.3',
                                         facecolor='white', edgecolor='grey', alpha=0.8))
 
@@ -1994,7 +2009,9 @@ def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
     mean_handle = Line2D([0], [0], marker='D', color='w', markerfacecolor='black',
                          markersize=5, linestyle='None', label='Mean')
     median_handle = Line2D([0], [0], color='black', linewidth=1.5, label='Median')
-    ax_a.legend(handles=[mean_handle, median_handle], fontsize=7,
+    global_median_handle = Line2D([0], [0], color='grey', linestyle='--',
+                                   linewidth=0.8, label='Dataset median')
+    ax_a.legend(handles=[mean_handle, median_handle, global_median_handle], fontsize=7,
                 loc='center right', framealpha=0.9)
 
     _apply_common_style(ax_a, 'Shared Pathway Depth vs pDockQ',
@@ -2022,11 +2039,11 @@ def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
     ax_b.set_xticks(range(len(TIER_ORDER)))
     ax_b.set_xticklabels(TIER_ORDER, fontsize=FONT_TICK)
 
-    # Secondary y-axis with raw enrichment ratio
-    ax_b2 = ax_b.secondary_yaxis('right',
-                                  functions=(lambda x: 10**x, lambda x: np.log10(np.maximum(x, 1e-10))))
-    ax_b2.set_ylabel('Enrichment Ratio', fontsize=FONT_AXIS_LABEL)
-    ax_b2.tick_params(labelsize=FONT_TICK)
+    # Reference line at ratio = 1.0 (log10(1) = 0) — null expectation
+    ax_b.axhline(y=0.0, color='grey', linestyle='--', linewidth=0.8, alpha=0.6)
+    # Ensure y=0 is visible even if all data is above 0
+    ymin_b, ymax_b = ax_b.get_ylim()
+    ax_b.set_ylim(min(ymin_b, -0.15), ymax_b)
 
     # Kruskal-Wallis test
     non_empty = [d for d in tier_data_b if len(d) >= 2]
@@ -2046,10 +2063,18 @@ def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
     figure.suptitle("Pathway Functional Coherence and Structural Quality",
                     fontsize=FONT_TITLE + 1, fontweight='bold', y=0.96)
 
-    # Caption
-    figure.text(0.5, -0.01,
-                'Shared pathways = Reactome pathways present in both proteins. '
-                'Enrichment ratio = STRING PPI observed/expected edges.',
+    # Caption — all values computed, no hardcoded dataset sizes
+    n_valid = int(np.sum(~np.isnan(pdockq)))
+    n_enrichment = int(((enrichment > 0) & enrichment.notna()).sum())
+    right_n_note = f', n = {n_enrichment:,}' if n_enrichment != n_valid else ''
+    caption_14 = (
+    f'Left: pDockQ distributions across shared Reactome pathway counts '
+    f'(Mann\u2013Whitney {bin_labels[0]} vs {bin_labels[-1]}, \u03c1 = {rho:.3f}, n = {n_valid:,}). '
+    f'Right: STRING PPI enrichment ratios by structural quality tier (Kruskal\u2013Wallis{right_n_note}). '
+    f'Dashed lines mark the dataset median ({global_median:.2f}, left) and null expectation '
+    f'(log\u2081\u2080 = 0, right).'
+    )
+    figure.text(0.5, -0.01, caption_14,
                 ha='center', fontsize=7, style='italic', color='#777777')
 
     _save_figure(figure, '14_Pathway_Coherence.png')
@@ -2128,7 +2153,8 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
                   fontsize=9, bbox=dict(boxstyle='round,pad=0.3',
                                         facecolor='white', edgecolor='grey', alpha=0.8))
 
-    # Drug target disease prevalence — text annotation box
+    # Drug target disease prevalence — text annotation box with Fisher test
+    baseline_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
     if 'is_drug_target_a' in df.columns:
         drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
         drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
@@ -2136,20 +2162,33 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
         n_drug = is_drug.sum()
         if n_drug >= 2:
             drug_disease_pct = (is_drug & has_disease).sum() / n_drug * 100
+            # Fisher exact test: drug-target vs non-drug-target disease prevalence
+            n_drug_dis = int((is_drug & has_disease).sum())
+            n_drug_no = int(n_drug) - n_drug_dis
+            n_nondrug_dis = int(has_disease.sum()) - n_drug_dis
+            n_nondrug_no = int(len(df)) - n_drug_dis - n_drug_no - n_nondrug_dis
+            fisher_table = [[n_drug_dis, n_drug_no],
+                            [n_nondrug_dis, n_nondrug_no]]
+            _, fisher_p = fisher_exact(fisher_table, alternative='two-sided')
+            fisher_p_str = 'p < 0.001' if fisher_p < 0.001 else f'p = {fisher_p:.2e}'
             ax_a.text(0.02, 0.35,
-                      f'Drug targets: {drug_disease_pct:.0f}%\ndisease-associated\n(n = {n_drug})',
+                      f'Drug targets: {drug_disease_pct:.0f}% disease-assoc.\n'
+                      f'vs {baseline_pct:.0f}% baseline '
+                      f'(Fisher {fisher_p_str})\n'
+                      f'(n = {n_drug})',
                       transform=ax_a.transAxes, ha='left', va='top',
                       fontsize=8, color='#9b59b6',
                       bbox=dict(boxstyle='round,pad=0.3', facecolor='#f4ecf7',
                                 edgecolor='#9b59b6', alpha=0.9))
 
-    ax_a.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
+    ax_a.legend(fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
     _apply_common_style(ax_a, 'Disease Prevalence by Quality Tier',
                         'Quality Tier', '% of Tier')
     _despine(ax_a)
 
     # ── Panel B: top diseases by tier (stacked horizontal bars) ──
     disease_tier_counts: dict[str, dict[str, int]] = {}
+    disease_protein_counts: dict[str, set] = {}  # unique accessions per disease
 
     for _, row in df.iterrows():
         tier = row.get(tier_col, '')
@@ -2159,6 +2198,7 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
             details_str = row.get(f'disease_details_{suffix}', '')
             if not isinstance(details_str, str) or not details_str.strip():
                 continue
+            accession = str(row.get(f'protein_{suffix}', ''))
             for entry in details_str.split('|'):
                 entry = entry.strip()
                 if not entry or entry.startswith('...'):
@@ -2168,11 +2208,14 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
                     continue
                 disease_tier_counts.setdefault(name, {t: 0 for t in TIER_ORDER})
                 disease_tier_counts[name][tier] += 1
+                disease_protein_counts.setdefault(name, set())
+                if accession:
+                    disease_protein_counts[name].add(accession)
 
     if disease_tier_counts:
-        # Select top 10 by total count, sort by % High descending
+        # Select top 10 by unique protein count, sort by % High descending
         sorted_diseases = sorted(disease_tier_counts.keys(),
-                                 key=lambda d: sum(disease_tier_counts[d].values()),
+                                 key=lambda d: len(disease_protein_counts.get(d, set())),
                                  reverse=True)[:10]
 
         def _frac_high(d):
@@ -2199,18 +2242,40 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
 
         ax_b.set_yticklabels([_truncate_name(name) for name in sorted_diseases], fontsize=8)
         ax_b.invert_yaxis()
-        ax_b.set_xlim(0, max(left) * 1.15)
+        ax_b.set_xlim(0, max(left) * 1.30)
 
-        # Total count annotation at end of each bar
+        # Total count + unique proteins annotation at end of each bar
+        xlim_upper = max(left) * 1.30
         for i, d in enumerate(sorted_diseases):
             total = sum(disease_tier_counts[d].values())
-            ax_b.text(left[i] + max(left) * 0.02, i, f'{total}',
-                      va='center', fontsize=7, color='#555555')
+            n_prots = len(disease_protein_counts.get(d, set()))
+            label_text = f'{total} ({n_prots} proteins)'
+            label_x = left[i] + max(left) * 0.02
+            if label_x + len(label_text) * 0.35 > xlim_upper:
+                # Bar too close to boundary — place label inside in white
+                ax_b.text(left[i] - max(left) * 0.02, i, label_text,
+                          va='center', ha='right', fontsize=7, color='white',
+                          fontweight='bold')
+            else:
+                ax_b.text(label_x, i, label_text,
+                          va='center', fontsize=7, color='#555555')
 
-        ax_b.legend(fontsize=FONT_TICK - 1, loc='upper right', framealpha=1.0)
+        ax_b.legend(fontsize=FONT_TICK - 1, loc='center right', framealpha=1.0)
         _apply_common_style(ax_b, 'Top Disease Categories by Tier',
-                            'Complex-Disease Annotations', '')
+                            'Annotations (unique proteins shown)', '')
         _despine(ax_b)
+
+        # Hub-protein footnote if any top disease has few unique proteins but many annotations
+        has_hub = any(
+            len(disease_protein_counts.get(d, set())) <= 3
+            and sum(disease_tier_counts[d].values()) >= 20
+            for d in sorted_diseases
+        )
+        if has_hub:
+            ax_b.text(0.5, -0.08,
+                      '\u2020 Diseases with \u22643 unique proteins may reflect hub-protein effects.',
+                      transform=ax_b.transAxes, ha='center', va='top',
+                      fontsize=6.5, style='italic', color='#777777')
     else:
         ax_b.text(0.5, 0.5, 'No disease details\navailable',
                   transform=ax_b.transAxes, ha='center', va='center',
@@ -2220,6 +2285,19 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
     figure.subplots_adjust(top=0.88, wspace=0.45)
     figure.suptitle("Disease Association Enrichment Across Quality Tiers",
                     fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
+
+    # Caption — dynamic values, no hardcoded dataset sizes
+    n_effective = len(df)
+    overall_disease_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
+    caption_15 = (
+    f'Left: Disease annotation prevalence across quality tiers (\u03c7\u00b2, n = {n_effective:,}). '
+    f'Higher prevalence in lower tiers likely reflects annotation bias toward well-studied '
+    f'disordered proteins. Right: Top diseases ranked by unique proteins, displaying total '
+    f'annotations and protein counts.'
+    )
+    figure.text(0.5, -0.01, caption_15,
+                ha='center', fontsize=7, style='italic', color='#777777')
+
     _save_figure(figure, '15_Disease_Enrichment.png')
 
 
@@ -2227,30 +2305,111 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
 # enrichment is reported as an annotation box in Fig 15 Panel A instead.
 
 
-def plot_fig17_pathway_network(df: pd.DataFrame,
-                                max_pathways: int = 25,
-                                min_shared_complexes: int = 20) -> None:
-    """Fig 17: Pathway-level network coloured by pDockQ.
+def _compute_reactome_depths(hierarchy: dict) -> dict:
+    """Compute depth level for each Reactome pathway via BFS from roots.
 
-    Nodes are the top N Reactome pathways by complex count. Edges connect
-    pathways that share complexes above a threshold. Node colour encodes
-    mean pDockQ (RdYlGn), node size encodes complex count, edges are grey
-    with width proportional to shared complex count.
+    Parameters
+    ----------
+    hierarchy : dict
+        ``{parent_pathway_id: [child_pathway_id, ...]}``.
+
+    Returns
+    -------
+    dict
+        ``{pathway_id: depth}`` where roots are depth 0.
+    """
+    from collections import deque
+
+    # Find all pathway IDs that appear
+    all_children: set = set()
+    all_parents: set = set()
+    for parent, children in hierarchy.items():
+        all_parents.add(parent)
+        for child in children:
+            all_children.add(child)
+
+    # Roots = parents that never appear as children
+    roots = all_parents - all_children
+
+    # BFS from roots
+    depths: dict = {}
+    queue = deque()
+    for root in roots:
+        depths[root] = 0
+        queue.append(root)
+
+    while queue:
+        node = queue.popleft()
+        for child in hierarchy.get(node, []):
+            if child not in depths:
+                depths[child] = depths[node] + 1
+                queue.append(child)
+
+    return depths
+
+
+def plot_fig16_pathway_network(df: pd.DataFrame,
+                                max_pathways: int = 20,
+                                min_shared_complexes: int = 20,
+                                hierarchy_file: Optional[str] = 'data/pathways/ReactomePathwaysRelation.txt',
+                                filter_hierarchy: bool = True,
+                                depth_level: int = 1) -> None:
+    """Fig 16: Pathway-level network coloured by % High-tier complexes.
+
+    Nodes are the top N Reactome pathways at a single hierarchy depth level.
+    Edges connect pathways that share complexes above a threshold, with
+    hierarchical parent-child links excluded. Node colour encodes
+    % High-tier complexes (RdYlGn), node size encodes complex count, edges
+    are grey with width proportional to shared complex count.
 
     Uses kamada_kawai_layout for deterministic, reproducible layout.
+
+    Parameters
+    ----------
+    hierarchy_file : str or None
+        Path to ReactomePathwaysRelation.txt. Default searches in
+        ``data/pathways/``. Set to None to disable hierarchy filtering.
+    filter_hierarchy : bool
+        If True (default), remove parent-child edges from the network.
+    depth_level : int
+        Reactome hierarchy depth to display (0 = top-level, 1 = second-level).
+        Falls back to depth+1 if fewer than 5 pathways have data at target depth.
 
     Requires NetworkX and 'reactome_pathways_a' column.
     """
     if not _HAS_NETWORKX:
-        print("  Skipping Fig 17 — NetworkX not installed")
+        print("  Skipping Fig 16 — NetworkX not installed")
         return
 
     if 'reactome_pathways_a' not in df.columns:
-        print("  Skipping Fig 17 — no pathway data available")
+        print("  Skipping Fig 16 — no pathway data available")
         return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    # ── Load hierarchy for edge filtering and depth computation ──
+    hierarchy_pairs: set = set()
+    pathway_depths: dict = {}
+    hierarchy_loaded = False
+    if filter_hierarchy and hierarchy_file:
+        try:
+            from pathway_network import load_reactome_hierarchy
+            hierarchy = load_reactome_hierarchy(hierarchy_file)
+            for parent, children in hierarchy.items():
+                for child in children:
+                    hierarchy_pairs.add((parent, child))
+                    hierarchy_pairs.add((child, parent))
+            pathway_depths = _compute_reactome_depths(hierarchy)
+            hierarchy_loaded = True
+        except FileNotFoundError:
+            print(f"  Warning: hierarchy file not found ({hierarchy_file}), "
+                  f"skipping hierarchy filtering")
+        except Exception as e:
+            print(f"  Warning: could not load hierarchy file: {e}")
 
     # ── Build pathway co-occurrence data ──
     pathway_complexes: dict[str, list[float]] = {}
+    pathway_tiers: dict[str, list[str]] = {}  # for % High-tier colouring
     pathway_names: dict[str, str] = {}
     edge_data: dict[tuple, list[float]] = {}
 
@@ -2259,6 +2418,7 @@ def plot_fig17_pathway_network(df: pd.DataFrame,
         if pd.isna(pdockq_val):
             continue
         pdockq_val = float(pdockq_val)
+        tier = str(row.get(tier_col, ''))
 
         complex_pids = set()
         for suffix in ('a', 'b'):
@@ -2276,6 +2436,7 @@ def plot_fig17_pathway_network(df: pd.DataFrame,
 
         for pid in complex_pids:
             pathway_complexes.setdefault(pid, []).append(pdockq_val)
+            pathway_tiers.setdefault(pid, []).append(tier)
 
         pid_list = sorted(complex_pids)
         for i in range(len(pid_list)):
@@ -2284,29 +2445,72 @@ def plot_fig17_pathway_network(df: pd.DataFrame,
                 edge_data.setdefault(key, []).append(pdockq_val)
 
     if not pathway_complexes:
-        print("  Skipping Fig 17 — no parseable pathway data")
+        print("  Skipping Fig 16 — no parseable pathway data")
         return
 
-    # ── Select top N pathways by complex count ──
-    sorted_pids = sorted(pathway_complexes.keys(),
-                         key=lambda p: len(pathway_complexes[p]), reverse=True)
+    # ── Filter to target depth level ──
+    effective_depth = depth_level
+    if hierarchy_loaded and pathway_depths:
+        # Filter pathway_complexes to target depth
+        depth_candidates = {pid for pid in pathway_complexes
+                            if pathway_depths.get(pid) == depth_level}
+        # Fall back to depth+1 if too few pathways at target depth
+        if len(depth_candidates) < 5:
+            depth_candidates_fallback = {pid for pid in pathway_complexes
+                                          if pathway_depths.get(pid) == depth_level + 1}
+            if len(depth_candidates_fallback) >= 5:
+                depth_candidates = depth_candidates_fallback
+                effective_depth = depth_level + 1
+                print(f"  Fig 16: fell back to depth {effective_depth} "
+                      f"({len(depth_candidates)} pathways)")
+            # If still too few, use all pathways (no depth filter)
+            elif len(depth_candidates) < 5:
+                depth_candidates = set(pathway_complexes.keys())
+                effective_depth = -1  # signals no depth filtering applied
+                print("  Fig 16: too few pathways at target depth, using all depths")
+
+        # Select top N from depth-filtered candidates
+        sorted_pids = sorted(depth_candidates,
+                             key=lambda p: len(pathway_complexes[p]), reverse=True)
+    else:
+        sorted_pids = sorted(pathway_complexes.keys(),
+                             key=lambda p: len(pathway_complexes[p]), reverse=True)
+        effective_depth = -1  # no depth filtering
+
     keep_pids = set(sorted_pids[:max_pathways])
 
     G = nx.Graph()
     for pid in keep_pids:
         vals = pathway_complexes[pid]
+        tiers_list = pathway_tiers.get(pid, [])
+        frac_high = sum(1 for t in tiers_list if t == 'High') / len(tiers_list) if tiers_list else 0
         G.add_node(pid,
                    n_complexes=len(vals),
                    mean_pdockq=float(np.mean(vals)),
+                   frac_high=frac_high,
                    name=pathway_names.get(pid, pid))
 
+    # Build edges — exclude hierarchical parent-child links
+    effective_threshold = min_shared_complexes
     for (p1, p2), vals in edge_data.items():
-        if p1 in keep_pids and p2 in keep_pids and len(vals) >= min_shared_complexes:
+        if p1 in keep_pids and p2 in keep_pids and len(vals) >= effective_threshold:
+            if hierarchy_loaded and (p1, p2) in hierarchy_pairs:
+                continue
             G.add_edge(p1, p2, n_shared=len(vals),
                        mean_pdockq=float(np.mean(vals)))
 
+    # Auto-raise threshold if network is too dense (> 3 edges per node)
+    n_nodes_g = G.number_of_nodes()
+    while G.number_of_edges() > 3 * n_nodes_g and effective_threshold < 10000:
+        effective_threshold *= 2
+        edges_to_remove = [(u, v) for u, v, d in G.edges(data=True)
+                           if d['n_shared'] < effective_threshold]
+        G.remove_edges_from(edges_to_remove)
+        if not edges_to_remove:
+            break  # no more edges to remove at this threshold
+
     if G.number_of_nodes() == 0:
-        print("  Skipping Fig 17 — empty graph after filtering")
+        print("  Skipping Fig 16 — empty graph after filtering")
         return
 
     # ── Layout — shrink inward to leave margin for labels ──
@@ -2315,9 +2519,12 @@ def plot_fig17_pathway_network(df: pd.DataFrame,
 
     figure, ax = plt.subplots(1, 1, figsize=(14, 14))
 
-    # Colour normalisation — fixed 0–0.8 range (≥0.5 = deep green)
-    node_pdockqs = [G.nodes[n]['mean_pdockq'] for n in G.nodes()]
-    vmin, vmax = 0.0, 0.8
+    # Colour normalisation — % High-tier (0% to dynamic max for better spread)
+    node_frac_high = [G.nodes[n]['frac_high'] for n in G.nodes()]
+    vmin = 0.0
+    vmax = max(node_frac_high) if node_frac_high and max(node_frac_high) > 0 else 0.5
+    # Round up to nearest 0.05 for clean tick labels
+    vmax = max(0.05, np.ceil(vmax * 20) / 20)
     norm = plt.Normalize(vmin=vmin, vmax=vmax)
     cmap = plt.cm.RdYlGn
 
@@ -2337,42 +2544,52 @@ def plot_fig17_pathway_network(df: pd.DataFrame,
     counts = [G.nodes[n]['n_complexes'] for n in G.nodes()]
     min_c, max_c = min(counts), max(counts)
     node_sizes = [300 + 2700 * (c - min_c) / max(1, max_c - min_c) for c in counts]
-    node_colors = [cmap(norm(G.nodes[n]['mean_pdockq'])) for n in G.nodes()]
+    node_colors = [cmap(norm(G.nodes[n]['frac_high'])) for n in G.nodes()]
     nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes,
                            node_color=node_colors, edgecolors='black',
                            linewidths=0.8)
 
-    # Label ALL nodes with offset away from centroid
-    centroid = np.mean(list(pos.values()), axis=0)
-    for n in G.nodes():
+    # Label ALL nodes — centred inside node with collision avoidance
+    node_list = list(G.nodes())
+    node_size_map = dict(zip(node_list, node_sizes))
+    label_data = []
+    for n in node_list:
         full_name = pathway_names.get(n, n)
-        name = full_name[:30] + '\u2026' if len(full_name) > 30 else full_name
+        name = full_name[:40] + '\u2026' if len(full_name) > 40 else full_name
+        wrapped = _textwrap.fill(name, width=15)
         x, y = pos[n]
-        dx = x - centroid[0]
-        dy = y - centroid[1]
-        dist = np.sqrt(dx**2 + dy**2)
-        offset = 0.12
-        if dist > 0:
-            lx = x + offset * dx / dist
-            ly = y + offset * dy / dist
-        else:
-            lx, ly = x, y + 0.06
-        ax.text(lx, ly, name, fontsize=8, ha='center', va='center',
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
-                          alpha=0.5, edgecolor='none'))
+        sz = node_size_map[n]
+        fs = 5 + 3 * (sz - 300) / max(1, 2700)
+        label_data.append({'x': x, 'y': y, 'text': wrapped, 'fontsize': fs})
+
+    # Collision nudge — sort top-to-bottom, push overlapping labels apart
+    label_data.sort(key=lambda d: -d['y'])
+    nudge = 0.03
+    for i in range(len(label_data)):
+        for j in range(i + 1, len(label_data)):
+            if (abs(label_data[i]['x'] - label_data[j]['x']) < 0.08 and
+                    abs(label_data[i]['y'] - label_data[j]['y']) < nudge):
+                label_data[j]['y'] = label_data[i]['y'] - nudge
+
+    for ld in label_data:
+        ax.text(ld['x'], ld['y'], ld['text'],
+                fontsize=ld['fontsize'], ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                          alpha=0.6, edgecolor='none'))
 
     ax.axis('off')
-    ax.margins(0.08)
+    ax.margins(0.15)
 
-    # Colourbar — scoped to node data range, 5 evenly spaced ticks
+    # Colourbar — % High-tier complexes
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = figure.colorbar(sm, ax=ax, shrink=0.6, pad=0.06)
-    cbar.set_label('Mean pDockQ', fontsize=12)
+    cbar.set_label('Percentage of High-tier complexes', fontsize=12)
     cbar.ax.tick_params(labelsize=10)
-    tick_vals = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    n_ticks = min(9, int(vmax / 0.05) + 1)
+    tick_vals = np.linspace(vmin, vmax, n_ticks)
     cbar.set_ticks(tick_vals)
-    cbar.set_ticklabels([f'{v:.1f}' for v in tick_vals])
+    cbar.set_ticklabels([f'{v * 100:.0f}%' for v in tick_vals])
 
     # Node-size legend — show min and max with explicit labels
     ref_sizes = [min_c, max_c]
@@ -2385,14 +2602,33 @@ def plot_fig17_pathway_network(df: pd.DataFrame,
                                       markeredgecolor='black', markeredgewidth=0.5,
                                       markersize=max(4, np.sqrt(display_size) / 3),
                                       label=lbl))
-    ax.legend(handles=legend_elements, loc='lower left', fontsize=10,
-              title='Pathway size (complexes)', title_fontsize=11,
-              framealpha=1.0, borderpad=1.2, labelspacing=1.5, handletextpad=1.0,
-              bbox_to_anchor=(-0.05, -0.05))
+    figure.legend(handles=legend_elements, fontsize=10,
+                  title='Pathway size (complexes)', title_fontsize=11,
+                  framealpha=1.0, borderpad=1.2, labelspacing=1.5, handletextpad=1.0,
+                  loc='upper right', bbox_to_anchor=(0.99, 0.97))
 
-    figure.suptitle("Reactome Pathway Network Coloured by pDockQ",
+    figure.suptitle("Reactome Pathway Network by Structural Quality",
                     fontsize=FONT_TITLE + 1, fontweight='bold')
-    _save_figure(figure, '17_Pathway_Network.png')
+
+    # Caption — dynamic values, no hardcoded sizes
+    n_nodes = G.number_of_nodes()
+    n_edges = G.number_of_edges()
+    hier_note = ', hierarchical parent\u2013child links excluded' if hierarchy_loaded else ''
+    depth_note = f'depth level {effective_depth}' if effective_depth >= 0 else 'all depths'
+    threshold_note = (f'\u2265{effective_threshold} shared complexes'
+                      if effective_threshold == min_shared_complexes
+                      else f'\u2265{effective_threshold} shared complexes '
+                           f'(auto-raised from {min_shared_complexes})')
+    caption_16 = (
+    f'Network of the top {n_nodes} Reactome pathways ({depth_note}, \u2265{min_c:,} complexes). '
+    f'Node size and color reflect total complex count and High-tier proportion, respectively. '
+    f'The {n_edges} edges denote pathway overlaps ({threshold_note}{hier_note}), with width '
+    f'scaling by overlap strength.'
+    )
+    figure.text(0.5, 0.01, caption_16,
+                ha='center', fontsize=7, style='italic', color='#777777')
+
+    _save_figure(figure, '16_Pathway_Network.png')
 
 
 # Fig 18 removed — CSV lacks interface residue positions; variant_details
@@ -2605,10 +2841,10 @@ def main() -> None:
 
     # Fig 16 removed (null result p=0.270)
 
-    # Phase E: Pathway-level network (Fig 17)
+    # Phase E: Pathway-level network (Fig 16)
     if col_flags.get('has_pathway_data', False):
-        print("Fig 17 - Pathway-Level Network")
-        plot_fig17_pathway_network(df)
+        print("Fig 16 - Pathway-Level Network")
+        plot_fig16_pathway_network(df)
         figures_generated += 1
 
     # Fig 18 removed (data integrity problem — see code comment)
