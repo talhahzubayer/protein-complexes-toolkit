@@ -396,3 +396,40 @@ def test_foldx_outputs_dir(test_db_dir):
     path = test_db_dir / "foldx_outputs"
     assert path.exists(), f"Missing test data: {path}"
     return path
+
+
+# ── Phase E: Disease & Pathway Test Data ─────────────────────────
+
+@pytest.fixture(scope="session")
+def test_uniprot_xml_path(test_db_dir):
+    """Path to the test UniProt XML annotations file.
+
+    Contains 5 entries: P04637 (TP53, 8 diseases), P24534 (EEF1B2),
+    P61981 (YWHAG, 1 disease), P63104 (YWHAZ, 1 disease),
+    Q2M2I8 (AAK1, drug target).
+    """
+    path = test_db_dir / "test_uniprot_annotations.xml"
+    assert path.exists(), f"Missing test data: {path}"
+    return path
+
+
+@pytest.fixture(scope="session")
+def test_reactome_mappings_path(test_db_dir):
+    """Path to the test Reactome UniProt-to-pathway mappings file.
+
+    Contains 253 human pathway entries for P04637, P24534, P61981, P63104.
+    """
+    path = test_db_dir / "test_reactome_mappings.txt"
+    assert path.exists(), f"Missing test data: {path}"
+    return path
+
+
+@pytest.fixture(scope="session")
+def test_reactome_hierarchy_path(test_db_dir):
+    """Path to the test Reactome pathway hierarchy file.
+
+    Contains 585 parent-child relations for human pathways.
+    """
+    path = test_db_dir / "test_reactome_hierarchy.txt"
+    assert path.exists(), f"Missing test data: {path}"
+    return path

@@ -186,6 +186,8 @@ def detect_columns(df: pd.DataFrame) -> dict:
         'has_composite': 'interface_confidence_score' in columns,
         'has_chain_info': 'n_chains' in columns,
         'has_variant_data': 'n_variants_a' in columns and 'variant_details_a' in columns,
+        'has_disease_data': 'n_diseases_a' in columns,
+        'has_pathway_data': 'reactome_pathways_a' in columns,
     }
 
 #------------------------Data Loading-----------------------------------
@@ -1851,6 +1853,252 @@ def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> N
     _save_figure(figure, '13_Variant_Burden.png')
 
 
+#-------Phase E: Disease & Pathway Figures----------------------------------------
+
+def plot_fig14_pathway_quality_heatmap(df: pd.DataFrame) -> None:
+    """Fig 14: Top Reactome pathways by quality metrics.
+
+    Heatmap showing the top pathways by number of complexes, with colour
+    encoding mean pDockQ and annotations for fraction High-tier.
+    Requires 'reactome_pathways_a' and 'pdockq' columns.
+    """
+    if 'reactome_pathways_a' not in df.columns:
+        print("  Skipping Fig 14 — no pathway data available")
+        return
+
+    # Parse pathway assignments across all complexes
+    pathway_pdockqs: dict[str, list[float]] = {}
+    pathway_tiers: dict[str, list[str]] = {}
+    pathway_names: dict[str, str] = {}
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    for _, row in df.iterrows():
+        pdockq = row.get('pdockq')
+        tier = row.get(tier_col, '')
+        if pd.isna(pdockq):
+            continue
+
+        for suffix in ('a', 'b'):
+            pathways_str = row.get(f'reactome_pathways_{suffix}', '')
+            if not pathways_str or pd.isna(pathways_str):
+                continue
+            for entry in str(pathways_str).split('|'):
+                if entry.startswith('...('):
+                    continue
+                parts = entry.split(':', 1)
+                if len(parts) == 2:
+                    pid, pname = parts
+                    pathway_pdockqs.setdefault(pid, []).append(float(pdockq))
+                    pathway_names[pid] = pname
+                    if tier:
+                        pathway_tiers.setdefault(pid, []).append(str(tier))
+
+    if not pathway_pdockqs:
+        print("  Skipping Fig 14 — no parseable pathway data")
+        return
+
+    # Select top 20 pathways by complex count
+    sorted_pathways = sorted(pathway_pdockqs.keys(),
+                             key=lambda p: len(pathway_pdockqs[p]), reverse=True)[:20]
+
+    names = [pathway_names.get(p, p)[:40] for p in sorted_pathways]
+    mean_pdockq = [np.mean(pathway_pdockqs[p]) for p in sorted_pathways]
+    n_complexes = [len(pathway_pdockqs[p]) for p in sorted_pathways]
+    frac_high = []
+    for p in sorted_pathways:
+        tiers = pathway_tiers.get(p, [])
+        frac_high.append(sum(1 for t in tiers if t == 'High') / len(tiers) if tiers else 0)
+
+    figure, ax = plt.subplots(1, 1, figsize=(10, 8))
+
+    # Horizontal bar chart coloured by mean pDockQ
+    y_pos = np.arange(len(names))
+    colours = plt.cm.RdYlGn(np.array(mean_pdockq))
+    bars = ax.barh(y_pos, n_complexes, color=colours, edgecolor='grey', linewidth=0.5)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel('Number of Complexes', fontsize=FONT_LABEL)
+
+    # Add fraction High annotations
+    for i, (nc, fh) in enumerate(zip(n_complexes, frac_high)):
+        ax.text(nc + max(n_complexes) * 0.01, i, f'{fh:.0%} High',
+                va='center', fontsize=7, color='grey')
+
+    # Colourbar
+    sm = plt.cm.ScalarMappable(cmap='RdYlGn',
+                                norm=plt.Normalize(vmin=min(mean_pdockq),
+                                                   vmax=max(mean_pdockq)))
+    sm.set_array([])
+    cbar = figure.colorbar(sm, ax=ax, pad=0.15, shrink=0.6)
+    cbar.set_label('Mean pDockQ', fontsize=FONT_LABEL)
+
+    figure.suptitle("Top Reactome Pathways by Complex Count",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '14_Pathway_Quality_Heatmap.png')
+
+
+def plot_fig15_disease_burden_network(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 15: Disease burden network.
+
+    Scatter plot showing complexes with disease-associated proteins highlighted.
+    X-axis: pDockQ, Y-axis: total disease associations.
+    Requires 'n_diseases_a' column.
+
+    Falls back to scatter if NetworkX is unavailable (network visualisation
+    is produced by pathway_network.py standalone).
+    """
+    if 'n_diseases_a' not in df.columns:
+        print("  Skipping Fig 15 — no disease data available")
+        return
+
+    figure, ax = plt.subplots(1, 1, figsize=(10, 7))
+
+    # Compute total disease burden per complex
+    n_diseases = df['n_diseases_a'].fillna(0).astype(int) + \
+                 df['n_diseases_b'].fillna(0).astype(int)
+    pdockq = df['pdockq'].values
+
+    valid = ~np.isnan(pdockq)
+    x = pdockq[valid]
+    y = n_diseases.values[valid]
+
+    # Colour by disease burden
+    has_disease = y > 0
+    ax.scatter(x[~has_disease], y[~has_disease],
+               s=8, alpha=0.3, color='#95a5a6', label='No disease', zorder=1)
+    ax.scatter(x[has_disease], y[has_disease],
+               s=15, alpha=0.6, color='#e74c3c', label='Disease-associated', zorder=2)
+
+    # Highlight drug targets if available
+    if 'is_drug_target_a' in df.columns:
+        drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
+        drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else False
+        is_drug = (drug_a | drug_b).values[valid]
+        if is_drug.any():
+            ax.scatter(x[is_drug], y[is_drug],
+                       s=40, alpha=0.8, color='#9b59b6', marker='D',
+                       label='Drug target', zorder=3, edgecolors='black', linewidth=0.5)
+
+    ax.set_xlabel('pDockQ', fontsize=FONT_LABEL)
+    ax.set_ylabel('Total Disease Associations', fontsize=FONT_LABEL)
+    ax.legend(fontsize=FONT_TICK, loc='upper right')
+
+    # Stats
+    n_disease_complexes = has_disease.sum()
+    n_total = len(x)
+    ax.text(0.02, 0.95, f'{n_disease_complexes}/{n_total} complexes with disease associations',
+            transform=ax.transAxes, fontsize=9, va='top')
+
+    figure.suptitle("Disease Association Burden vs Structural Quality",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '15_Disease_Burden.png')
+
+
+def plot_fig16_drug_target_quality(df: pd.DataFrame) -> None:
+    """Fig 16: Drug target quality comparison.
+
+    Box/violin plot comparing pDockQ distribution between complexes containing
+    at least one drug target vs non-drug-target complexes.
+    Requires 'is_drug_target_a' column.
+    """
+    if 'is_drug_target_a' not in df.columns:
+        print("  Skipping Fig 16 — no drug target data available")
+        return
+
+    drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
+    drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
+    is_drug = drug_a | drug_b
+
+    pdockq_drug = df.loc[is_drug, 'pdockq'].dropna()
+    pdockq_other = df.loc[~is_drug, 'pdockq'].dropna()
+
+    if len(pdockq_drug) < 2:
+        print(f"  Skipping Fig 16 — only {len(pdockq_drug)} drug target complexes")
+        return
+
+    figure, ax = plt.subplots(1, 1, figsize=(8, 6))
+
+    parts = ax.violinplot([pdockq_other.values, pdockq_drug.values],
+                          positions=[0, 1], showmeans=True, showmedians=True)
+
+    # Colour the violins
+    for i, pc in enumerate(parts['bodies']):
+        pc.set_facecolor('#3498db' if i == 0 else '#9b59b6')
+        pc.set_alpha(0.6)
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels([f'Non-drug target\n(n={len(pdockq_other):,})',
+                         f'Drug target\n(n={len(pdockq_drug):,})'])
+    ax.set_ylabel('pDockQ', fontsize=FONT_LABEL)
+
+    # Wilcoxon rank-sum test
+    try:
+        from scipy.stats import mannwhitneyu
+        stat, p_val = mannwhitneyu(pdockq_drug, pdockq_other, alternative='two-sided')
+        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.3f}'
+        ax.text(0.5, 0.95, f'Mann-Whitney U: {p_str}',
+                transform=ax.transAxes, ha='center', fontsize=10)
+    except ImportError:
+        pass
+
+    figure.suptitle("pDockQ Distribution: Drug Targets vs Others",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '16_Drug_Target_Quality.png')
+
+
+def plot_fig17_interaction_network(df: pd.DataFrame) -> None:
+    """Fig 17: Interaction network coloured by pDockQ.
+
+    Builds a NetworkX graph from the pipeline CSV and renders a spring-layout
+    network with edges coloured by pDockQ (spec requirement: 'Network plot of
+    biological pathways coloured by predicted pDockQ').
+
+    Nodes are sized by degree. Disease-associated nodes get red borders.
+    Drug target nodes are drawn as diamonds. Gene symbol labels on high-degree nodes.
+
+    Requires NetworkX (skips gracefully if not installed).
+    """
+    try:
+        from pathway_network import (
+            build_interaction_network, plot_network_by_pdockq,
+            plot_disease_network, NETWORK_MAX_NODES_FOR_PLOT,
+            _HAS_NETWORKX,
+        )
+    except ImportError:
+        print("  Skipping Fig 17 — pathway_network module not available")
+        return
+
+    if not _HAS_NETWORKX:
+        print("  Skipping Fig 17 — NetworkX not installed")
+        return
+
+    if 'pdockq' not in df.columns:
+        print("  Skipping Fig 17 — no pDockQ column")
+        return
+
+    results = df.to_dict("records")
+    G = build_interaction_network(results, min_pdockq=0.23)
+
+    if G.number_of_nodes() == 0:
+        print("  Skipping Fig 17 — no edges above pDockQ threshold")
+        return
+
+    output_path = os.path.join(OUTPUT_DIR, '17_Interaction_Network_pDockQ.png')
+    plot_network_by_pdockq(G, output_path, max_nodes=NETWORK_MAX_NODES_FOR_PLOT)
+
+    # Also generate disease overlay if disease data present
+    has_disease = any(G.nodes[n].get("n_diseases", 0) > 0 for n in G.nodes())
+    if has_disease:
+        disease_path = os.path.join(OUTPUT_DIR, '17b_Disease_Network.png')
+        plot_disease_network(G, disease_path, max_nodes=NETWORK_MAX_NODES_FOR_PLOT)
+
+
 #-----------------------------------------------Main Execution--------------------------------------------------------------------
 
 def parse_arguments() -> argparse.Namespace:
@@ -1955,6 +2203,8 @@ def main() -> None:
     print(f"  Composite score:   {'Yes' if col_flags['has_composite'] else 'No'}")
     print(f"  Chain info:        {'Yes' if col_flags['has_chain_info'] else 'No'}")
     print(f"  Variant data:      {'Yes' if col_flags['has_variant_data'] else 'No'}")
+    print(f"  Disease data:      {'Yes' if col_flags.get('has_disease_data', False) else 'No'}")
+    print(f"  Pathway data:      {'Yes' if col_flags.get('has_pathway_data', False) else 'No'}")
 
     # Chain count summary
     if col_flags['has_chain_info']:
@@ -2038,6 +2288,28 @@ def main() -> None:
 
         print("Fig 13 - Interface Variant Density vs Quality")
         plot_fig13_variant_burden(df, density_mode=args.density)
+        figures_generated += 1
+
+    # Phase E: Disease & Pathway figures (Figs 14-16)
+    if col_flags.get('has_pathway_data', False):
+        print("Fig 14 - Pathway Quality Heatmap")
+        plot_fig14_pathway_quality_heatmap(df)
+        figures_generated += 1
+
+    if col_flags.get('has_disease_data', False):
+        print("Fig 15 - Disease Burden vs Structural Quality")
+        plot_fig15_disease_burden_network(df, density_mode=args.density)
+        figures_generated += 1
+
+        if 'is_drug_target_a' in df.columns:
+            print("Fig 16 - Drug Target Quality Comparison")
+            plot_fig16_drug_target_quality(df)
+            figures_generated += 1
+
+    # Phase E: Network visualisation (Fig 17) — requires NetworkX
+    if col_flags.get('has_disease_data', False) or col_flags.get('has_pathway_data', False):
+        print("Fig 17 - Interaction Network (pDockQ)")
+        plot_fig17_interaction_network(df)
         figures_generated += 1
 
     # On-demand: Per-complex PAE heatmaps

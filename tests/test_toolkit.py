@@ -322,7 +322,7 @@ class TestWriteResultsCsv:
         write_results_csv([row], str(output))
         assert output.exists()
 
-        with open(output, 'r', newline='') as f:
+        with open(output, 'r', newline='', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             rows = list(reader)
         assert len(rows) == 1

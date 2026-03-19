@@ -282,22 +282,59 @@ class TestPyMOLScripts:
 
 # ── Pathway & Network Integration ────────────────────────────────
 
-@pytest.mark.future
+@pytest.mark.pathways
 class TestPathwayIntegration:
-    """Tests for pathway and network analysis."""
+    """Cross-references to pathway mapping tests in test_pathway_network.py.
 
-    def test_kegg_pathway_mapping(self):
-        """Protein pairs mapped to KEGG pathways."""
-        pytest.skip("Not yet implemented")
+    These placeholders originally lived here as @pytest.mark.future stubs.
+    Now that pathway_network.py is implemented, the comprehensive tests are in
+    tests/test_pathway_network.py (~59 tests across 10 groups). These methods
+    serve as smoke-test cross-references.
+    """
 
-    def test_reactome_pathway_mapping(self):
-        """Protein pairs mapped to Reactome pathways."""
-        pytest.skip("Not yet implemented")
+    def test_kegg_pathway_mapping(self, test_uniprot_xml_path):
+        """KEGG IDs extracted from UniProt XML.
+        See: TestKEGGParsing in test_disease_annotations.py for full tests.
+        """
+        from disease_annotations import load_uniprot_annotations
+        idx = load_uniprot_annotations(test_uniprot_xml_path, frozenset({'P04637'}))
+        assert len(idx['P04637']['kegg_ids']) >= 1
+        assert idx['P04637']['kegg_ids'][0].startswith('hsa:')
+
+    def test_reactome_pathway_mapping(self, test_reactome_mappings_path):
+        """Protein pairs mapped to Reactome pathways.
+        See: TestReactomeLoading in test_pathway_network.py for full tests.
+        """
+        from pathway_network import load_reactome_mappings
+        idx = load_reactome_mappings(test_reactome_mappings_path, frozenset({'P61981'}))
+        assert len(idx) == 1
+        unique_pids = {m['pathway_id'] for m in idx['P61981']}
+        assert len(unique_pids) >= 50  # YWHAG has 60 pathways
 
     def test_network_graph_construction(self):
-        """Interaction network graph is buildable."""
-        pytest.skip("Not yet implemented")
+        """Interaction network graph is buildable.
+        See: TestNetworkConstruction in test_pathway_network.py for full tests.
+        """
+        from pathway_network import build_interaction_network, _HAS_NETWORKX
+        if not _HAS_NETWORKX:
+            pytest.skip("NetworkX not installed")
+        results = [
+            {'protein_a': 'P04637', 'protein_b': 'P61981', 'pdockq': 0.5},
+        ]
+        G = build_interaction_network(results, min_pdockq=0.0)
+        assert G.number_of_nodes() == 2
+        assert G.number_of_edges() == 1
 
-    def test_paradox_pathway_enrichment(self):
-        """Paradox complexes show pathway clustering."""
-        pytest.skip("Not yet implemented")
+    def test_paradox_pathway_enrichment(self, test_reactome_mappings_path):
+        """Pathway quality stats computable from results.
+        See: TestPathwayQualityStats in test_pathway_network.py for full tests.
+        """
+        from pathway_network import load_reactome_mappings, compute_pathway_quality_stats
+        idx = load_reactome_mappings(
+            test_reactome_mappings_path, frozenset({'P04637', 'P61981'}))
+        results = [
+            {'protein_a': 'P04637', 'protein_b': 'P61981',
+             'pdockq': 0.45, 'quality_tier_v2': 'Medium'},
+        ]
+        stats = compute_pathway_quality_stats(results, idx)
+        assert len(stats) > 0

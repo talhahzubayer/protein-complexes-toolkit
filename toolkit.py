@@ -621,7 +621,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
 #----------------------------Results Output-------------------------------------
 
-def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> list[str]:
+def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False, include_disease: bool = False, include_pathways: bool = False) -> list[str]:
     """Build the CSV column list based on enabled features."""
     fieldnames = list(CSV_FIELDNAMES_BASE)
     if include_enrichment:
@@ -643,9 +643,15 @@ def get_csv_fieldnames(include_interface: bool = False, include_pae: bool = Fals
     if include_protvar:
         from protvar_client import CSV_FIELDNAMES_PROTVAR
         fieldnames.extend(CSV_FIELDNAMES_PROTVAR)
+    if include_disease:
+        from disease_annotations import CSV_FIELDNAMES_DISEASE
+        fieldnames.extend(CSV_FIELDNAMES_DISEASE)
+    if include_pathways:
+        from pathway_network import CSV_FIELDNAMES_PATHWAYS
+        fieldnames.extend(CSV_FIELDNAMES_PATHWAYS)
     return fieldnames
 
-def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False) -> None:
+def write_results_csv(results: list[dict], output_path: str, include_interface: bool = False, include_pae: bool = False, include_enrichment: bool = False, include_clustering: bool = False, include_variants: bool = False, include_stability: bool = False, include_protvar: bool = False, include_disease: bool = False, include_pathways: bool = False) -> None:
     """Write batch analysis results to a CSV file.
     Args:
         results: List of per-complex result dictionaries.
@@ -657,10 +663,12 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_variants: Whether to include variant mapping columns.
         include_stability: Whether to include stability scoring columns (EVE scores).
         include_protvar: Whether to include ProtVar API cross-validation columns.
+        include_disease: Whether to include disease annotation columns (disease, PTM, GO, drug target).
+        include_pathways: Whether to include pathway and network columns.
     """
-    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar)
+    fieldnames = get_csv_fieldnames(include_interface, include_pae, include_enrichment, include_clustering, include_variants, include_stability, include_protvar, include_disease, include_pathways)
 
-    with open(output_path, 'w', newline='') as csv_file:
+    with open(output_path, 'w', newline='', encoding='utf-8-sig') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(results)
@@ -1279,6 +1287,16 @@ Examples:
     parser.add_argument("--am-file", metavar="AM_PATH", default=None,
                         help="Path to AlphaMissense_aa_substitutions.tsv. "
                              "Default: data/stability/AlphaMissense_aa_substitutions.tsv")
+    parser.add_argument("--disease", metavar="PATHWAYS_DIR",
+                        nargs='?', const='__default__', default=None,
+                        help="Annotate with disease associations, PTMs, GO terms, "
+                             "drug targets from UniProt XML. Requires --enrich. "
+                             "Default: data/pathways/")
+    parser.add_argument("--pathways", action="store_true",
+                        help="Map proteins to Reactome pathways (local files) and "
+                             "optionally run STRING API enrichment. Requires --enrich. "
+                             "Uses data/pathways/ for local Reactome files. "
+                             "STRING API enrichment skipped with --no-api.")
     return parser
 
 
@@ -1348,6 +1366,21 @@ def main() -> None:
                   file=sys.stderr)
             sys.exit(1)
     args._protvar_enabled = args.protvar is not None
+
+    if args.disease is not None:
+        if not args.enrich:
+            print("Error: --disease requires --enrich", file=sys.stderr)
+            sys.exit(1)
+        if args.disease == '__default__':
+            from disease_annotations import DEFAULT_DISEASE_DIR
+            args.disease = str(DEFAULT_DISEASE_DIR)
+    args._disease_enabled = args.disease is not None
+
+    if args.pathways:
+        if not args.enrich:
+            print("Error: --pathways requires --enrich", file=sys.stderr)
+            sys.exit(1)
+    args._pathways_enabled = getattr(args, 'pathways', False)
 
     if args.resume:
         args.checkpoint = True
@@ -1718,6 +1751,132 @@ def main() -> None:
         # Free temporary ProtVar collection structures
         del all_protvar_accessions, all_variant_positions
 
+    # Disease annotations (UniProt disease, PTM, GO, drug target)
+    include_disease = False
+    if getattr(args, '_disease_enabled', False):
+        from disease_annotations import (
+            load_uniprot_annotations, annotate_results_with_disease,
+            UNIPROT_XML_FILENAME,
+        )
+        disease_start = time.time()
+        disease_dir = Path(args.disease)
+        xml_path = disease_dir / UNIPROT_XML_FILENAME
+
+        # Collect unique accessions from results
+        disease_accessions: set[str] = set()
+        for row in results:
+            disease_accessions.add(row.get('protein_a', ''))
+            disease_accessions.add(row.get('protein_b', ''))
+        disease_accessions.discard('')
+        # Also add base accessions (strip isoform suffixes)
+        base_disease_acc: set[str] = set()
+        for acc in disease_accessions:
+            base_disease_acc.add(acc.split('-')[0] if '-' in acc else acc)
+        all_disease_accessions = frozenset(disease_accessions | base_disease_acc)
+
+        print(f"Loading disease annotations from: {xml_path}", file=sys.stderr)
+        annotation_index = load_uniprot_annotations(
+            xml_path, all_disease_accessions, verbose=True,
+        )
+
+        annotate_results_with_disease(
+            results, annotation_index,
+            api_fallback=not args.no_api,
+            verbose=True,
+        )
+
+        include_disease = True
+        disease_elapsed = time.time() - disease_start
+        print(f"Disease annotation complete: {len(results)} complexes "
+              f"annotated in {disease_elapsed:.1f}s", file=sys.stderr)
+
+        del annotation_index
+
+    # Pathway mapping (Reactome local + optional STRING API enrichment)
+    include_pathways = False
+    if getattr(args, '_pathways_enabled', False):
+        from pathway_network import (
+            load_reactome_mappings, compute_pathway_quality_stats,
+            annotate_results_with_pathways, run_ppi_enrichment,
+            run_string_enrichment, build_interaction_network,
+            compute_network_stats,
+            REACTOME_MAPPINGS_FILENAME, DEFAULT_PATHWAYS_DIR,
+            _HAS_NETWORKX,
+        )
+        pathway_start = time.time()
+
+        # Determine pathways directory (shared with --disease or default)
+        pathways_dir = Path(args.disease) if getattr(args, '_disease_enabled', False) \
+            else DEFAULT_PATHWAYS_DIR
+
+        # Collect unique accessions from results
+        pathway_accessions: set[str] = set()
+        for row in results:
+            pathway_accessions.add(row.get('protein_a', ''))
+            pathway_accessions.add(row.get('protein_b', ''))
+        pathway_accessions.discard('')
+        base_pathway_acc: set[str] = set()
+        for acc in pathway_accessions:
+            base_pathway_acc.add(acc.split('-')[0] if '-' in acc else acc)
+        all_pathway_accessions = frozenset(pathway_accessions | base_pathway_acc)
+
+        # Load Reactome local mappings
+        reactome_path = pathways_dir / REACTOME_MAPPINGS_FILENAME
+        if reactome_path.exists():
+            reactome_index = load_reactome_mappings(
+                reactome_path, all_pathway_accessions, verbose=True,
+            )
+        else:
+            print(f"Warning: Reactome mappings not found: {reactome_path}",
+                  file=sys.stderr)
+            reactome_index = {}
+
+        # Compute pathway quality statistics
+        pathway_stats = compute_pathway_quality_stats(results, reactome_index)
+
+        # Optional: STRING API enrichment (only if --no-api not set)
+        # Follows offline-first + API validation pattern: local Reactome provides
+        # the base, STRING enrichment validates with p-values / FDR
+        ppi_stats = None
+        enrichment_df = None
+        if not args.no_api:
+            gene_symbols = []
+            for row in results:
+                for gs_key in ('gene_symbol_a', 'gene_symbol_b'):
+                    gs = row.get(gs_key, '')
+                    if gs:
+                        gene_symbols.append(gs)
+            gene_symbols = list(set(gene_symbols))
+            if gene_symbols:
+                ppi_stats = run_ppi_enrichment(gene_symbols, verbose=True)
+                enrichment_df = run_string_enrichment(gene_symbols, verbose=True)
+
+        # Optional: build network and compute node-level stats
+        network_stats = None
+        if _HAS_NETWORKX and len(results) > 0:
+            G = build_interaction_network(results)
+            if G.number_of_nodes() > 0:
+                network_stats = compute_network_stats(G)
+                print(f"  Network: {G.number_of_nodes()} nodes, "
+                      f"{G.number_of_edges()} edges", file=sys.stderr)
+            del G
+
+        annotate_results_with_pathways(
+            results, reactome_index,
+            pathway_stats=pathway_stats,
+            ppi_stats=ppi_stats,
+            network_stats=network_stats,
+            enrichment_df=enrichment_df,
+            verbose=True,
+        )
+
+        include_pathways = True
+        pathway_elapsed = time.time() - pathway_start
+        print(f"Pathway annotation complete: {len(results)} complexes "
+              f"annotated in {pathway_elapsed:.1f}s", file=sys.stderr)
+
+        del reactome_index, pathway_stats
+
     # Write CSV output
     print(f"Writing CSV to {args.output}...", file=sys.stderr)
     write_results_csv(
@@ -1729,6 +1888,8 @@ def main() -> None:
         include_variants=include_variants,
         include_stability=include_stability,
         include_protvar=include_protvar,
+        include_disease=include_disease,
+        include_pathways=include_pathways,
     )
 
     print(f"\n{'=' * 60}")
