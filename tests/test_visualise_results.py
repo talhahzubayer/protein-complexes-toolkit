@@ -16,6 +16,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import numpy as np
+
 import visualise_results
 from visualise_results import (
     load_data,
@@ -33,10 +35,14 @@ from visualise_results import (
     plot_fig11_variant_consequence_flow,
     plot_fig12_variant_density_heatmap,
     plot_fig13_variant_burden,
+    plot_fig14_pathway_coherence,
+    plot_fig15_disease_enrichment,
+    plot_fig17_pathway_network,
     _get_paradox_mask,
     _parse_variant_details,
     _aggregate_all_variants,
     _normalise_significance,
+    _parse_disease_name,
     TIER_COLORS,
     TIER_ORDER,
 )
@@ -410,3 +416,190 @@ class TestVariantFigureGeneration:
         plot_fig13_variant_burden(variant_df, density_mode=False)
         assert any(f.startswith("13_") for f in os.listdir(variant_figures_dir)), \
             "Fig 13 output file not found"
+
+
+# ── Disease Name Parsing Tests ────────────────────────────────────
+
+class TestDiseaseNameParsing:
+    """Tests for _parse_disease_name helper used by Fig 15 Panel B."""
+
+    def test_omim_with_acronym(self):
+        assert _parse_disease_name('OMIM:618428:Popov-Chang syndrome (POPCHAS)') == 'Popov-Chang syndrome (POPCHAS)'
+
+    def test_omim_no_acronym(self):
+        assert _parse_disease_name('OMIM:154700:Marfan syndrome') == 'Marfan syndrome'
+
+    def test_plain_name(self):
+        assert _parse_disease_name('Cancer') == 'Cancer'
+
+    def test_name_with_acronym(self):
+        assert _parse_disease_name('Cardiovascular disease (CVD)') == 'Cardiovascular disease (CVD)'
+
+    def test_empty(self):
+        assert _parse_disease_name('') == ''
+
+    def test_none(self):
+        assert _parse_disease_name(None) == ''
+
+
+# ── Phase E Column Detection Tests ───────────────────────────────
+
+class TestDetectColumnsPhaseE:
+    """Tests for Phase E column detection flags."""
+
+    def test_disease_flag_present(self):
+        df = pd.DataFrame({'n_diseases_a': [1]})
+        assert detect_columns(df)['has_disease_data'] is True
+
+    def test_disease_flag_absent(self):
+        df = pd.DataFrame({'iptm': [0.5]})
+        assert detect_columns(df)['has_disease_data'] is False
+
+    def test_pathway_flag_present(self):
+        df = pd.DataFrame({'reactome_pathways_a': ['R-HSA-1234:Test']})
+        assert detect_columns(df)['has_pathway_data'] is True
+
+    def test_pathway_flag_absent(self):
+        df = pd.DataFrame({'iptm': [0.5]})
+        assert detect_columns(df)['has_pathway_data'] is False
+
+
+# ── Phase E Figure Generation Tests (Figs 14-15, 17) ────────────
+
+@pytest.mark.phase_e
+class TestPhaseEFigureGeneration:
+    """Tests for Figs 14-15, 17 using a synthetic Phase E DataFrame."""
+
+    @pytest.fixture(scope="class")
+    def phase_e_figures_dir(self, test_output_dir):
+        fig_dir = test_output_dir / "phase_e_figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        visualise_results.OUTPUT_DIR = str(fig_dir)
+        return fig_dir
+
+    @pytest.fixture(scope="class")
+    def phase_e_df(self):
+        """30-row synthetic DataFrame with pathway and disease columns."""
+        rng = np.random.RandomState(42)
+
+        pathway_pool = [
+            'R-HSA-109581:Apoptosis',
+            'R-HSA-72766:Translation',
+            'R-HSA-168256:Immune System',
+            'R-HSA-1640170:Cell Cycle',
+            'R-HSA-162582:Signal Transduction',
+            'R-HSA-392499:Metabolism of proteins',
+            'R-HSA-1430728:Metabolism',
+            'R-HSA-556833:Metabolism of lipids',
+        ]
+
+        # Disease name pool for Panel B testing
+        disease_pool = [
+            'OMIM:618428:Night blindness (CSNB1H)',
+            'OMIM:130000:Ehlers-Danlos syndrome (EDS)',
+            'OMIM:154700:Marfan syndrome',
+            'Cancer',
+            'OMIM:107970:Cardiovascular disease (CVD)',
+            'OMIM:176000:Prostate cancer',
+            'Retinitis pigmentosa',
+            'OMIM:601419:Lodder-Merla syndrome',
+        ]
+
+        rows = []
+        for i in range(30):
+            tier = ['High', 'Medium', 'Low'][i % 3]
+
+            # Pathway columns
+            n_pw_a = rng.randint(1, 5)
+            n_pw_b = rng.randint(1, 5)
+            pw_a = rng.choice(pathway_pool, size=min(n_pw_a, len(pathway_pool)), replace=False)
+            pw_b = rng.choice(pathway_pool, size=min(n_pw_b, len(pathway_pool)), replace=False)
+            # Ensure all 4 bins have data
+            if i < 8:
+                shared = rng.randint(0, 4)
+            elif i < 15:
+                shared = rng.randint(4, 11)
+            elif i < 22:
+                shared = rng.randint(11, 31)
+            else:
+                shared = rng.randint(31, 55)
+
+            # Disease details with parseable entries
+            n_dis_a = rng.randint(0, 4)
+            n_dis_b = rng.randint(0, 3)
+            dis_a = '|'.join(rng.choice(disease_pool, size=n_dis_a, replace=False)) if n_dis_a > 0 else ''
+            dis_b = '|'.join(rng.choice(disease_pool, size=n_dis_b, replace=False)) if n_dis_b > 0 else ''
+
+            rows.append({
+                'complex_name': f'PROT{i:02d}_PROT{i + 30:02d}',
+                'iptm': 0.3 + 0.5 * (i / 30),
+                'pdockq': 0.2 + 0.4 * (i / 30),
+                'quality_tier': tier,
+                'quality_tier_v2': tier,
+                'interface_confidence_score': 0.3 + 0.5 * (i / 30),
+                'n_interface_contacts': 20 + i * 3,
+                'n_interface_residues_a': 10 + i,
+                'n_interface_residues_b': 12 + i,
+                # Pathway columns
+                'reactome_pathways_a': '|'.join(pw_a),
+                'reactome_pathways_b': '|'.join(pw_b),
+                'n_reactome_pathways_a': len(pw_a),
+                'n_reactome_pathways_b': len(pw_b),
+                'n_shared_pathways': shared,
+                'pathway_quality_context': f'mean_pdockq={0.3 + 0.01 * i:.3f};frac_high=0.300;n_complexes=10',
+                'ppi_enrichment_pvalue': f'{rng.uniform(0, 0.05):.2e}',
+                'ppi_enrichment_ratio': f'{rng.lognormal(0.5, 0.8):.2f}',
+                'network_degree_a': rng.randint(1, 20),
+                'network_degree_b': rng.randint(1, 20),
+                # Disease columns
+                'n_diseases_a': n_dis_a,
+                'n_diseases_b': n_dis_b,
+                'disease_details_a': dis_a,
+                'disease_details_b': dis_b,
+                'is_drug_target_a': bool(rng.random() > 0.9),
+                'is_drug_target_b': False,
+            })
+        return pd.DataFrame(rows)
+
+    def test_fig14_pathway_coherence(self, phase_e_df, phase_e_figures_dir):
+        plot_fig14_pathway_coherence(phase_e_df)
+        assert any(f.startswith("14_") for f in os.listdir(phase_e_figures_dir)), \
+            "Fig 14 output file not found"
+
+    def test_fig15_disease_enrichment(self, phase_e_df, phase_e_figures_dir):
+        plot_fig15_disease_enrichment(phase_e_df)
+        assert any(f.startswith("15_") for f in os.listdir(phase_e_figures_dir)), \
+            "Fig 15 output file not found"
+
+    def test_fig16_removed(self):
+        """Verify Fig 16 function no longer exists."""
+        assert not hasattr(visualise_results, 'plot_fig16_drug_target_quality'), \
+            "plot_fig16_drug_target_quality should have been removed"
+
+    def test_fig17_pathway_network(self, phase_e_df, phase_e_figures_dir):
+        # Use top-5 pathways with low edge threshold for synthetic 30-row data
+        plot_fig17_pathway_network(phase_e_df,
+                                   max_pathways=5,
+                                   min_shared_complexes=1)
+        assert any(f.startswith("17_") for f in os.listdir(phase_e_figures_dir)), \
+            "Fig 17 output file not found"
+
+    def test_fig17_no_17b_disease_network(self, phase_e_figures_dir):
+        """Verify 17b disease network is no longer generated."""
+        assert not any(f.startswith("17b_") for f in os.listdir(phase_e_figures_dir)), \
+            "17b_Disease_Network.png should not exist"
+
+    def test_fig18_removed(self):
+        """Verify Fig 18 function no longer exists."""
+        assert not hasattr(visualise_results, 'plot_fig18_ptm_interface_landscape'), \
+            "plot_fig18_ptm_interface_landscape should have been removed"
+
+    def test_fig14_skips_missing_columns(self, phase_e_figures_dir):
+        """Fig 14 should gracefully skip when pathway columns are missing."""
+        df = pd.DataFrame({'iptm': [0.5], 'pdockq': [0.3]})
+        plot_fig14_pathway_coherence(df)
+
+    def test_fig15_skips_missing_columns(self, phase_e_figures_dir):
+        """Fig 15 should gracefully skip when disease columns are missing."""
+        df = pd.DataFrame({'iptm': [0.5], 'pdockq': [0.3]})
+        plot_fig15_disease_enrichment(df)

@@ -59,8 +59,21 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
-from scipy.stats import gaussian_kde, spearmanr, wilcoxon
+from scipy.stats import gaussian_kde, spearmanr, wilcoxon, mannwhitneyu, kruskal, chi2_contingency
 from matplotlib.path import Path as MplPath
+import re as _re
+
+try:
+    import seaborn as sns
+    _HAS_SEABORN = True
+except ImportError:
+    _HAS_SEABORN = False
+
+try:
+    import networkx as nx
+    _HAS_NETWORKX = True
+except ImportError:
+    _HAS_NETWORKX = False
 
 # JAX mocking is handled at import time by the reader module
 from read_af2_nojax import load_pkl_without_jax
@@ -126,6 +139,12 @@ SIGNIFICANCE_COLORS = {
     'Benign': '#27ae60',
     'Unknown': '#bdc3c7',
 }
+
+# Phase E figure constants (Figs 14-15, 17)
+SHARED_PATHWAY_BINS = [
+    (0, 3, '0\u20133'), (4, 10, '4\u201310'),
+    (11, 30, '11\u201330'), (31, float('inf'), '31+'),
+]
 
 
 #---------------------Adaptive Scatter Sizing----------------------------------------------
@@ -464,6 +483,35 @@ def _aggregate_all_variants(df: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=['complex_name', 'chain', 'mutation', 'context', 'significance'])
     return pd.DataFrame(rows)
+
+
+# ── Phase E Helpers (Figs 14-18) ─────────────────────────────────
+
+def _despine(ax) -> None:
+    """Remove top and right spines if seaborn is available."""
+    if _HAS_SEABORN:
+        sns.despine(ax=ax)
+
+
+def _parse_disease_name(entry: str) -> str:
+    """Extract disease name from a disease_details entry.
+
+    Input formats:
+        'OMIM:618428:Popov-Chang syndrome (POPCHAS)' → 'Popov-Chang syndrome (POPCHAS)'
+        'OMIM:154700:Marfan syndrome' → 'Marfan syndrome'
+        'Cancer' → 'Cancer'
+        '' → ''
+
+    Returns the disease name without OMIM prefix.
+    """
+    if not entry or not isinstance(entry, str):
+        return ''
+    entry = entry.strip()
+    if entry.startswith('OMIM:'):
+        # Format: OMIM:ID:name
+        parts = entry.split(':', 2)
+        return parts[2] if len(parts) == 3 else entry
+    return entry
 
 
 def _draw_sankey_band(ax, left_y0, left_y1, right_y0, right_y1,
@@ -1853,32 +1901,366 @@ def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> N
     _save_figure(figure, '13_Variant_Burden.png')
 
 
-#-------Phase E: Disease & Pathway Figures----------------------------------------
+# ── Phase E: Disease & Pathway Figures ────────────────────────────
 
-def plot_fig14_pathway_quality_heatmap(df: pd.DataFrame) -> None:
-    """Fig 14: Top Reactome pathways by quality metrics.
 
-    Heatmap showing the top pathways by number of complexes, with colour
-    encoding mean pDockQ and annotations for fraction High-tier.
-    Requires 'reactome_pathways_a' and 'pdockq' columns.
+def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
+    """Fig 14: Pathway Functional Coherence and Structural Quality.
+
+    Two-panel figure: (A) shared-pathway depth vs pDockQ (4 bins: 0-3, 4-10,
+    11-30, 31+) with tier-composition text and Mann-Whitney test; (B) PPI
+    enrichment ratio by quality tier with secondary raw-value axis.
+
+    Requires 'n_shared_pathways' and 'ppi_enrichment_ratio' columns.
     """
-    if 'reactome_pathways_a' not in df.columns:
-        print("  Skipping Fig 14 — no pathway data available")
+    if 'n_shared_pathways' not in df.columns or 'ppi_enrichment_ratio' not in df.columns:
+        print("  Skipping Fig 14 — no shared pathway / enrichment data")
         return
-
-    # Parse pathway assignments across all complexes
-    pathway_pdockqs: dict[str, list[float]] = {}
-    pathway_tiers: dict[str, list[str]] = {}
-    pathway_names: dict[str, str] = {}
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
 
-    for _, row in df.iterrows():
-        pdockq = row.get('pdockq')
-        tier = row.get(tier_col, '')
-        if pd.isna(pdockq):
-            continue
+    # ── Panel A data: bin shared pathways ──
+    n_shared = pd.to_numeric(df['n_shared_pathways'], errors='coerce').fillna(0).astype(int)
+    pdockq = df['pdockq'].values
+    tiers = df[tier_col].values if tier_col in df.columns else np.full(len(df), '')
 
+    bin_data: list[list[float]] = []
+    bin_tier_counts: list[dict] = []
+    bin_labels: list[str] = []
+    bin_ns: list[int] = []
+
+    for lo, hi, label in SHARED_PATHWAY_BINS:
+        mask = (n_shared >= lo) & (n_shared <= hi) & ~np.isnan(pdockq)
+        vals = pdockq[mask]
+        bin_data.append(list(vals))
+        bin_labels.append(label)
+        bin_ns.append(len(vals))
+        tier_arr = tiers[mask]
+        counts = {}
+        for t in TIER_ORDER:
+            counts[t] = int(np.sum(tier_arr == t))
+        bin_tier_counts.append(counts)
+
+    if all(n == 0 for n in bin_ns):
+        print("  Skipping Fig 14 — no valid data for binning")
+        return
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(12, 5.5),
+                                         gridspec_kw={'width_ratios': [3, 2]})
+
+    # ── Panel A: box plots ──
+    bp_a = ax_a.boxplot(bin_data, positions=range(len(bin_labels)),
+                        whis=[5, 95], showfliers=False, showmeans=True, patch_artist=True,
+                        meanprops={'marker': 'D', 'markerfacecolor': 'black', 'markersize': 4},
+                        medianprops={'color': 'black', 'linewidth': 1.5})
+
+    for patch in bp_a['boxes']:
+        patch.set_facecolor('#ecf0f1')
+        patch.set_alpha(0.8)
+
+    ax_a.set_xticks(range(len(bin_labels)))
+    ax_a.set_xticklabels(bin_labels, fontsize=FONT_TICK)
+
+    # Tier-composition text below each box (at Q1)
+    for i, counts in enumerate(bin_tier_counts):
+        total = sum(counts.values())
+        if total == 0:
+            continue
+        h_pct = counts.get('High', 0) / total * 100
+        m_pct = counts.get('Medium', 0) / total * 100
+        l_pct = counts.get('Low', 0) / total * 100
+        q1_val = float(np.percentile(bin_data[i], 25)) if bin_data[i] else 0
+        ax_a.text(i, q1_val - 0.02, f'H:{h_pct:.0f}% M:{m_pct:.0f}% L:{l_pct:.0f}%',
+                  ha='center', va='top', fontsize=6.5, color='#555555',
+                  bbox=dict(boxstyle='round,pad=0.15', facecolor='white', alpha=0.85))
+
+    # Annotate n above each box
+    for i, n in enumerate(bin_ns):
+        if n > 0:
+            upper = np.percentile(bin_data[i], 95) if bin_data[i] else 0
+            ax_a.text(i, upper + (ax_a.get_ylim()[1] - ax_a.get_ylim()[0]) * 0.03,
+                      f'n={n:,}', ha='center', va='bottom', fontsize=7, color='#555555')
+
+    # Mann-Whitney: first bin vs last bin
+    if bin_ns[0] >= 2 and bin_ns[-1] >= 2:
+        stat, p_val = mannwhitneyu(bin_data[0], bin_data[-1], alternative='two-sided')
+        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
+        ax_a.text(0.02, 0.95, f'{bin_labels[0]} vs {bin_labels[-1]}: {p_str}',
+                  transform=ax_a.transAxes, ha='left', va='top',
+                  fontsize=8, bbox=dict(boxstyle='round,pad=0.3',
+                                        facecolor='white', edgecolor='grey', alpha=0.8))
+
+    # Mean diamond legend
+    mean_handle = Line2D([0], [0], marker='D', color='w', markerfacecolor='black',
+                         markersize=5, linestyle='None', label='Mean')
+    median_handle = Line2D([0], [0], color='black', linewidth=1.5, label='Median')
+    ax_a.legend(handles=[mean_handle, median_handle], fontsize=7,
+                loc='center right', framealpha=0.9)
+
+    _apply_common_style(ax_a, 'Shared Pathway Depth vs pDockQ',
+                        'Shared Pathways', 'pDockQ')
+    _despine(ax_a)
+
+    # ── Panel B: PPI enrichment by tier ──
+    enrichment = pd.to_numeric(df['ppi_enrichment_ratio'], errors='coerce')
+    tier_data_b: list[list[float]] = []
+
+    for t in TIER_ORDER:
+        mask = (df[tier_col] == t) & (enrichment > 0) & enrichment.notna()
+        vals = np.log10(enrichment[mask].values)
+        tier_data_b.append(list(vals))
+
+    bp_b = ax_b.boxplot(tier_data_b, positions=range(len(TIER_ORDER)),
+                        whis=[5, 95], showfliers=False, showmeans=True, patch_artist=True,
+                        meanprops={'marker': 'D', 'markerfacecolor': 'black', 'markersize': 4},
+                        medianprops={'color': 'black', 'linewidth': 1.5})
+
+    for i, patch in enumerate(bp_b['boxes']):
+        patch.set_facecolor(TIER_COLORS[TIER_ORDER[i]])
+        patch.set_alpha(0.4)
+
+    ax_b.set_xticks(range(len(TIER_ORDER)))
+    ax_b.set_xticklabels(TIER_ORDER, fontsize=FONT_TICK)
+
+    # Secondary y-axis with raw enrichment ratio
+    ax_b2 = ax_b.secondary_yaxis('right',
+                                  functions=(lambda x: 10**x, lambda x: np.log10(np.maximum(x, 1e-10))))
+    ax_b2.set_ylabel('Enrichment Ratio', fontsize=FONT_AXIS_LABEL)
+    ax_b2.tick_params(labelsize=FONT_TICK)
+
+    # Kruskal-Wallis test
+    non_empty = [d for d in tier_data_b if len(d) >= 2]
+    if len(non_empty) >= 2:
+        h_stat, p_val = kruskal(*non_empty)
+        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
+        ax_b.text(0.95, 0.95, f'H = {h_stat:.1f}, {p_str}',
+                  transform=ax_b.transAxes, ha='right', va='top',
+                  fontsize=8, bbox=dict(boxstyle='round,pad=0.3',
+                                        facecolor='white', edgecolor='grey', alpha=0.8))
+
+    _apply_common_style(ax_b, 'PPI Enrichment by Quality Tier',
+                        'Quality Tier', 'log\u2081\u2080(Enrichment Ratio)')
+    _despine(ax_b)
+
+    figure.subplots_adjust(top=0.85)
+    figure.suptitle("Pathway Functional Coherence and Structural Quality",
+                    fontsize=FONT_TITLE + 1, fontweight='bold', y=0.96)
+
+    # Caption
+    figure.text(0.5, -0.01,
+                'Shared pathways = Reactome pathways present in both proteins. '
+                'Enrichment ratio = STRING PPI observed/expected edges.',
+                ha='center', fontsize=7, style='italic', color='#777777')
+
+    _save_figure(figure, '14_Pathway_Coherence.png')
+
+
+def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
+    """Fig 15: Disease Association Enrichment Across Quality Tiers.
+
+    Two-panel figure: (A) grouped bar chart of disease prevalence by tier
+    with chi-square test and drug-target annotation box; (B) top 10 diseases
+    by frequency as horizontal stacked bars segmented by quality tier.
+
+    Requires 'n_diseases_a' column.
+    """
+    if 'n_diseases_a' not in df.columns:
+        print("  Skipping Fig 15 — no disease data available")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+    if tier_col not in df.columns:
+        print("  Skipping Fig 15 — no quality tier column")
+        return
+
+    total_diseases = df['n_diseases_a'].fillna(0).astype(int)
+    if 'n_diseases_b' in df.columns:
+        total_diseases = total_diseases + df['n_diseases_b'].fillna(0).astype(int)
+
+    has_disease = total_diseases > 0
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5.5),
+                                         gridspec_kw={'width_ratios': [2.5, 2.5]})
+
+    # ── Panel A: disease prevalence by tier ──
+    tier_stats = {}
+    for t in TIER_ORDER:
+        mask = df[tier_col] == t
+        n_tier = mask.sum()
+        n_dis = (mask & has_disease).sum()
+        tier_stats[t] = {'n_tier': n_tier, 'n_disease': n_dis,
+                         'n_no_disease': n_tier - n_dis,
+                         'pct_disease': (n_dis / n_tier * 100) if n_tier > 0 else 0,
+                         'pct_no_disease': ((n_tier - n_dis) / n_tier * 100) if n_tier > 0 else 0}
+
+    x_pos = np.arange(len(TIER_ORDER))
+    width = 0.35
+
+    pct_dis = [tier_stats[t]['pct_disease'] for t in TIER_ORDER]
+    pct_no = [tier_stats[t]['pct_no_disease'] for t in TIER_ORDER]
+    n_dis_vals = [tier_stats[t]['n_disease'] for t in TIER_ORDER]
+    n_no_vals = [tier_stats[t]['n_no_disease'] for t in TIER_ORDER]
+
+    bars_dis = ax_a.bar(x_pos - width / 2, pct_dis, width, color='#c0392b',
+                        alpha=0.7, label='Has disease', edgecolor='grey', linewidth=0.5)
+    bars_no = ax_a.bar(x_pos + width / 2, pct_no, width, color='#d5d8dc',
+                       label='No disease', edgecolor='grey', linewidth=0.5)
+
+    # Annotate counts on bars
+    for i, (bar_d, bar_n, nd, nn) in enumerate(zip(bars_dis, bars_no, n_dis_vals, n_no_vals)):
+        ax_a.text(bar_d.get_x() + bar_d.get_width() / 2, bar_d.get_height() + 1,
+                  f'{nd:,}', ha='center', va='bottom', fontsize=7, color='#555555')
+        ax_a.text(bar_n.get_x() + bar_n.get_width() / 2, bar_n.get_height() + 1,
+                  f'{nn:,}', ha='center', va='bottom', fontsize=7, color='#555555')
+
+    ax_a.set_xticks(x_pos)
+    ax_a.set_xticklabels(TIER_ORDER, fontsize=FONT_TICK)
+    ax_a.set_ylim(0, max(pct_no + pct_dis) * 1.22)
+
+    # Chi-square test
+    contingency = np.array([[tier_stats[t]['n_disease'] for t in TIER_ORDER],
+                            [tier_stats[t]['n_no_disease'] for t in TIER_ORDER]])
+    if contingency.min() >= 5:
+        chi2, p_val, dof, expected = chi2_contingency(contingency)
+        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
+        ax_a.text(0.98, 0.95, f'\u03c7\u00b2 = {chi2:.1f}, {p_str}',
+                  transform=ax_a.transAxes, ha='right', va='top',
+                  fontsize=9, bbox=dict(boxstyle='round,pad=0.3',
+                                        facecolor='white', edgecolor='grey', alpha=0.8))
+
+    # Drug target disease prevalence — text annotation box
+    if 'is_drug_target_a' in df.columns:
+        drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
+        drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
+        is_drug = drug_a | drug_b
+        n_drug = is_drug.sum()
+        if n_drug >= 2:
+            drug_disease_pct = (is_drug & has_disease).sum() / n_drug * 100
+            ax_a.text(0.02, 0.35,
+                      f'Drug targets: {drug_disease_pct:.0f}%\ndisease-associated\n(n = {n_drug})',
+                      transform=ax_a.transAxes, ha='left', va='top',
+                      fontsize=8, color='#9b59b6',
+                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#f4ecf7',
+                                edgecolor='#9b59b6', alpha=0.9))
+
+    ax_a.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
+    _apply_common_style(ax_a, 'Disease Prevalence by Quality Tier',
+                        'Quality Tier', '% of Tier')
+    _despine(ax_a)
+
+    # ── Panel B: top diseases by tier (stacked horizontal bars) ──
+    disease_tier_counts: dict[str, dict[str, int]] = {}
+
+    for _, row in df.iterrows():
+        tier = row.get(tier_col, '')
+        if tier not in TIER_ORDER:
+            continue
+        for suffix in ('a', 'b'):
+            details_str = row.get(f'disease_details_{suffix}', '')
+            if not isinstance(details_str, str) or not details_str.strip():
+                continue
+            for entry in details_str.split('|'):
+                entry = entry.strip()
+                if not entry or entry.startswith('...'):
+                    continue
+                name = _parse_disease_name(entry)
+                if not name:
+                    continue
+                disease_tier_counts.setdefault(name, {t: 0 for t in TIER_ORDER})
+                disease_tier_counts[name][tier] += 1
+
+    if disease_tier_counts:
+        # Select top 10 by total count, sort by % High descending
+        sorted_diseases = sorted(disease_tier_counts.keys(),
+                                 key=lambda d: sum(disease_tier_counts[d].values()),
+                                 reverse=True)[:10]
+
+        def _frac_high(d):
+            total = sum(disease_tier_counts[d].values())
+            return disease_tier_counts[d].get('High', 0) / total if total > 0 else 0
+
+        sorted_diseases.sort(key=_frac_high, reverse=True)
+
+        y_pos = np.arange(len(sorted_diseases))
+        left = np.zeros(len(sorted_diseases))
+
+        for t in TIER_ORDER:
+            widths = np.array([disease_tier_counts[d].get(t, 0) for d in sorted_diseases], dtype=float)
+            ax_b.barh(y_pos, widths, left=left, color=TIER_COLORS[t],
+                      label=t, height=0.6, edgecolor='white', linewidth=0.5)
+            left += widths
+
+        ax_b.set_yticks(y_pos)
+
+        def _truncate_name(name, max_len=50):
+            if len(name) <= max_len:
+                return name
+            return name[:max_len].rsplit(' ', 1)[0] + '...'
+
+        ax_b.set_yticklabels([_truncate_name(name) for name in sorted_diseases], fontsize=8)
+        ax_b.invert_yaxis()
+        ax_b.set_xlim(0, max(left) * 1.15)
+
+        # Total count annotation at end of each bar
+        for i, d in enumerate(sorted_diseases):
+            total = sum(disease_tier_counts[d].values())
+            ax_b.text(left[i] + max(left) * 0.02, i, f'{total}',
+                      va='center', fontsize=7, color='#555555')
+
+        ax_b.legend(fontsize=FONT_TICK - 1, loc='upper right', framealpha=1.0)
+        _apply_common_style(ax_b, 'Top Disease Categories by Tier',
+                            'Complex-Disease Annotations', '')
+        _despine(ax_b)
+    else:
+        ax_b.text(0.5, 0.5, 'No disease details\navailable',
+                  transform=ax_b.transAxes, ha='center', va='center',
+                  fontsize=FONT_AXIS_LABEL, color='#999999')
+        ax_b.set_axis_off()
+
+    figure.subplots_adjust(top=0.88, wspace=0.45)
+    figure.suptitle("Disease Association Enrichment Across Quality Tiers",
+                    fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
+    _save_figure(figure, '15_Disease_Enrichment.png')
+
+
+# Fig 16 removed — null result (p = 0.270, n = 80); drug-target disease
+# enrichment is reported as an annotation box in Fig 15 Panel A instead.
+
+
+def plot_fig17_pathway_network(df: pd.DataFrame,
+                                max_pathways: int = 25,
+                                min_shared_complexes: int = 20) -> None:
+    """Fig 17: Pathway-level network coloured by pDockQ.
+
+    Nodes are the top N Reactome pathways by complex count. Edges connect
+    pathways that share complexes above a threshold. Node colour encodes
+    mean pDockQ (RdYlGn), node size encodes complex count, edges are grey
+    with width proportional to shared complex count.
+
+    Uses kamada_kawai_layout for deterministic, reproducible layout.
+
+    Requires NetworkX and 'reactome_pathways_a' column.
+    """
+    if not _HAS_NETWORKX:
+        print("  Skipping Fig 17 — NetworkX not installed")
+        return
+
+    if 'reactome_pathways_a' not in df.columns:
+        print("  Skipping Fig 17 — no pathway data available")
+        return
+
+    # ── Build pathway co-occurrence data ──
+    pathway_complexes: dict[str, list[float]] = {}
+    pathway_names: dict[str, str] = {}
+    edge_data: dict[tuple, list[float]] = {}
+
+    for _, row in df.iterrows():
+        pdockq_val = row.get('pdockq')
+        if pd.isna(pdockq_val):
+            continue
+        pdockq_val = float(pdockq_val)
+
+        complex_pids = set()
         for suffix in ('a', 'b'):
             pathways_str = row.get(f'reactome_pathways_{suffix}', '')
             if not pathways_str or pd.isna(pathways_str):
@@ -1889,214 +2271,133 @@ def plot_fig14_pathway_quality_heatmap(df: pd.DataFrame) -> None:
                 parts = entry.split(':', 1)
                 if len(parts) == 2:
                     pid, pname = parts
-                    pathway_pdockqs.setdefault(pid, []).append(float(pdockq))
+                    complex_pids.add(pid)
                     pathway_names[pid] = pname
-                    if tier:
-                        pathway_tiers.setdefault(pid, []).append(str(tier))
 
-    if not pathway_pdockqs:
-        print("  Skipping Fig 14 — no parseable pathway data")
+        for pid in complex_pids:
+            pathway_complexes.setdefault(pid, []).append(pdockq_val)
+
+        pid_list = sorted(complex_pids)
+        for i in range(len(pid_list)):
+            for j in range(i + 1, len(pid_list)):
+                key = (pid_list[i], pid_list[j])
+                edge_data.setdefault(key, []).append(pdockq_val)
+
+    if not pathway_complexes:
+        print("  Skipping Fig 17 — no parseable pathway data")
         return
 
-    # Select top 20 pathways by complex count
-    sorted_pathways = sorted(pathway_pdockqs.keys(),
-                             key=lambda p: len(pathway_pdockqs[p]), reverse=True)[:20]
+    # ── Select top N pathways by complex count ──
+    sorted_pids = sorted(pathway_complexes.keys(),
+                         key=lambda p: len(pathway_complexes[p]), reverse=True)
+    keep_pids = set(sorted_pids[:max_pathways])
 
-    names = [pathway_names.get(p, p)[:40] for p in sorted_pathways]
-    mean_pdockq = [np.mean(pathway_pdockqs[p]) for p in sorted_pathways]
-    n_complexes = [len(pathway_pdockqs[p]) for p in sorted_pathways]
-    frac_high = []
-    for p in sorted_pathways:
-        tiers = pathway_tiers.get(p, [])
-        frac_high.append(sum(1 for t in tiers if t == 'High') / len(tiers) if tiers else 0)
+    G = nx.Graph()
+    for pid in keep_pids:
+        vals = pathway_complexes[pid]
+        G.add_node(pid,
+                   n_complexes=len(vals),
+                   mean_pdockq=float(np.mean(vals)),
+                   name=pathway_names.get(pid, pid))
 
-    figure, ax = plt.subplots(1, 1, figsize=(10, 8))
-
-    # Horizontal bar chart coloured by mean pDockQ
-    y_pos = np.arange(len(names))
-    colours = plt.cm.RdYlGn(np.array(mean_pdockq))
-    bars = ax.barh(y_pos, n_complexes, color=colours, edgecolor='grey', linewidth=0.5)
-
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(names, fontsize=8)
-    ax.invert_yaxis()
-    ax.set_xlabel('Number of Complexes', fontsize=FONT_LABEL)
-
-    # Add fraction High annotations
-    for i, (nc, fh) in enumerate(zip(n_complexes, frac_high)):
-        ax.text(nc + max(n_complexes) * 0.01, i, f'{fh:.0%} High',
-                va='center', fontsize=7, color='grey')
-
-    # Colourbar
-    sm = plt.cm.ScalarMappable(cmap='RdYlGn',
-                                norm=plt.Normalize(vmin=min(mean_pdockq),
-                                                   vmax=max(mean_pdockq)))
-    sm.set_array([])
-    cbar = figure.colorbar(sm, ax=ax, pad=0.15, shrink=0.6)
-    cbar.set_label('Mean pDockQ', fontsize=FONT_LABEL)
-
-    figure.suptitle("Top Reactome Pathways by Complex Count",
-                    fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    _save_figure(figure, '14_Pathway_Quality_Heatmap.png')
-
-
-def plot_fig15_disease_burden_network(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 15: Disease burden network.
-
-    Scatter plot showing complexes with disease-associated proteins highlighted.
-    X-axis: pDockQ, Y-axis: total disease associations.
-    Requires 'n_diseases_a' column.
-
-    Falls back to scatter if NetworkX is unavailable (network visualisation
-    is produced by pathway_network.py standalone).
-    """
-    if 'n_diseases_a' not in df.columns:
-        print("  Skipping Fig 15 — no disease data available")
-        return
-
-    figure, ax = plt.subplots(1, 1, figsize=(10, 7))
-
-    # Compute total disease burden per complex
-    n_diseases = df['n_diseases_a'].fillna(0).astype(int) + \
-                 df['n_diseases_b'].fillna(0).astype(int)
-    pdockq = df['pdockq'].values
-
-    valid = ~np.isnan(pdockq)
-    x = pdockq[valid]
-    y = n_diseases.values[valid]
-
-    # Colour by disease burden
-    has_disease = y > 0
-    ax.scatter(x[~has_disease], y[~has_disease],
-               s=8, alpha=0.3, color='#95a5a6', label='No disease', zorder=1)
-    ax.scatter(x[has_disease], y[has_disease],
-               s=15, alpha=0.6, color='#e74c3c', label='Disease-associated', zorder=2)
-
-    # Highlight drug targets if available
-    if 'is_drug_target_a' in df.columns:
-        drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
-        drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else False
-        is_drug = (drug_a | drug_b).values[valid]
-        if is_drug.any():
-            ax.scatter(x[is_drug], y[is_drug],
-                       s=40, alpha=0.8, color='#9b59b6', marker='D',
-                       label='Drug target', zorder=3, edgecolors='black', linewidth=0.5)
-
-    ax.set_xlabel('pDockQ', fontsize=FONT_LABEL)
-    ax.set_ylabel('Total Disease Associations', fontsize=FONT_LABEL)
-    ax.legend(fontsize=FONT_TICK, loc='upper right')
-
-    # Stats
-    n_disease_complexes = has_disease.sum()
-    n_total = len(x)
-    ax.text(0.02, 0.95, f'{n_disease_complexes}/{n_total} complexes with disease associations',
-            transform=ax.transAxes, fontsize=9, va='top')
-
-    figure.suptitle("Disease Association Burden vs Structural Quality",
-                    fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    _save_figure(figure, '15_Disease_Burden.png')
-
-
-def plot_fig16_drug_target_quality(df: pd.DataFrame) -> None:
-    """Fig 16: Drug target quality comparison.
-
-    Box/violin plot comparing pDockQ distribution between complexes containing
-    at least one drug target vs non-drug-target complexes.
-    Requires 'is_drug_target_a' column.
-    """
-    if 'is_drug_target_a' not in df.columns:
-        print("  Skipping Fig 16 — no drug target data available")
-        return
-
-    drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
-    drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
-    is_drug = drug_a | drug_b
-
-    pdockq_drug = df.loc[is_drug, 'pdockq'].dropna()
-    pdockq_other = df.loc[~is_drug, 'pdockq'].dropna()
-
-    if len(pdockq_drug) < 2:
-        print(f"  Skipping Fig 16 — only {len(pdockq_drug)} drug target complexes")
-        return
-
-    figure, ax = plt.subplots(1, 1, figsize=(8, 6))
-
-    parts = ax.violinplot([pdockq_other.values, pdockq_drug.values],
-                          positions=[0, 1], showmeans=True, showmedians=True)
-
-    # Colour the violins
-    for i, pc in enumerate(parts['bodies']):
-        pc.set_facecolor('#3498db' if i == 0 else '#9b59b6')
-        pc.set_alpha(0.6)
-
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels([f'Non-drug target\n(n={len(pdockq_other):,})',
-                         f'Drug target\n(n={len(pdockq_drug):,})'])
-    ax.set_ylabel('pDockQ', fontsize=FONT_LABEL)
-
-    # Wilcoxon rank-sum test
-    try:
-        from scipy.stats import mannwhitneyu
-        stat, p_val = mannwhitneyu(pdockq_drug, pdockq_other, alternative='two-sided')
-        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.3f}'
-        ax.text(0.5, 0.95, f'Mann-Whitney U: {p_str}',
-                transform=ax.transAxes, ha='center', fontsize=10)
-    except ImportError:
-        pass
-
-    figure.suptitle("pDockQ Distribution: Drug Targets vs Others",
-                    fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    _save_figure(figure, '16_Drug_Target_Quality.png')
-
-
-def plot_fig17_interaction_network(df: pd.DataFrame) -> None:
-    """Fig 17: Interaction network coloured by pDockQ.
-
-    Builds a NetworkX graph from the pipeline CSV and renders a spring-layout
-    network with edges coloured by pDockQ (spec requirement: 'Network plot of
-    biological pathways coloured by predicted pDockQ').
-
-    Nodes are sized by degree. Disease-associated nodes get red borders.
-    Drug target nodes are drawn as diamonds. Gene symbol labels on high-degree nodes.
-
-    Requires NetworkX (skips gracefully if not installed).
-    """
-    try:
-        from pathway_network import (
-            build_interaction_network, plot_network_by_pdockq,
-            plot_disease_network, NETWORK_MAX_NODES_FOR_PLOT,
-            _HAS_NETWORKX,
-        )
-    except ImportError:
-        print("  Skipping Fig 17 — pathway_network module not available")
-        return
-
-    if not _HAS_NETWORKX:
-        print("  Skipping Fig 17 — NetworkX not installed")
-        return
-
-    if 'pdockq' not in df.columns:
-        print("  Skipping Fig 17 — no pDockQ column")
-        return
-
-    results = df.to_dict("records")
-    G = build_interaction_network(results, min_pdockq=0.23)
+    for (p1, p2), vals in edge_data.items():
+        if p1 in keep_pids and p2 in keep_pids and len(vals) >= min_shared_complexes:
+            G.add_edge(p1, p2, n_shared=len(vals),
+                       mean_pdockq=float(np.mean(vals)))
 
     if G.number_of_nodes() == 0:
-        print("  Skipping Fig 17 — no edges above pDockQ threshold")
+        print("  Skipping Fig 17 — empty graph after filtering")
         return
 
-    output_path = os.path.join(OUTPUT_DIR, '17_Interaction_Network_pDockQ.png')
-    plot_network_by_pdockq(G, output_path, max_nodes=NETWORK_MAX_NODES_FOR_PLOT)
+    # ── Layout — shrink inward to leave margin for labels ──
+    pos = nx.kamada_kawai_layout(G)
+    pos = {k: v * 0.85 for k, v in pos.items()}
 
-    # Also generate disease overlay if disease data present
-    has_disease = any(G.nodes[n].get("n_diseases", 0) > 0 for n in G.nodes())
-    if has_disease:
-        disease_path = os.path.join(OUTPUT_DIR, '17b_Disease_Network.png')
-        plot_disease_network(G, disease_path, max_nodes=NETWORK_MAX_NODES_FOR_PLOT)
+    figure, ax = plt.subplots(1, 1, figsize=(14, 14))
+
+    # Colour normalisation — fixed 0–0.8 range (≥0.5 = deep green)
+    node_pdockqs = [G.nodes[n]['mean_pdockq'] for n in G.nodes()]
+    vmin, vmax = 0.0, 0.8
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+    cmap = plt.cm.RdYlGn
+
+    # Draw edges first (grey, beneath nodes) with data-relative scaling
+    all_shared = [d['n_shared'] for _, _, d in G.edges(data=True)] if G.number_of_edges() > 0 else [1]
+    min_s, max_s = min(all_shared), max(all_shared)
+
+    for u, v, edata in G.edges(data=True):
+        x_coords = [pos[u][0], pos[v][0]]
+        y_coords = [pos[u][1], pos[v][1]]
+        frac = (edata['n_shared'] - min_s) / max(1, max_s - min_s)
+        width = 0.5 + 4.5 * frac
+        alpha = 0.05 + 0.35 * frac  # weak edges fade, strong edges visible
+        ax.plot(x_coords, y_coords, color='#888888', linewidth=width, alpha=alpha)
+
+    # Draw nodes — data-relative sizing for visible differentiation
+    counts = [G.nodes[n]['n_complexes'] for n in G.nodes()]
+    min_c, max_c = min(counts), max(counts)
+    node_sizes = [300 + 2700 * (c - min_c) / max(1, max_c - min_c) for c in counts]
+    node_colors = [cmap(norm(G.nodes[n]['mean_pdockq'])) for n in G.nodes()]
+    nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes,
+                           node_color=node_colors, edgecolors='black',
+                           linewidths=0.8)
+
+    # Label ALL nodes with offset away from centroid
+    centroid = np.mean(list(pos.values()), axis=0)
+    for n in G.nodes():
+        full_name = pathway_names.get(n, n)
+        name = full_name[:30] + '\u2026' if len(full_name) > 30 else full_name
+        x, y = pos[n]
+        dx = x - centroid[0]
+        dy = y - centroid[1]
+        dist = np.sqrt(dx**2 + dy**2)
+        offset = 0.12
+        if dist > 0:
+            lx = x + offset * dx / dist
+            ly = y + offset * dy / dist
+        else:
+            lx, ly = x, y + 0.06
+        ax.text(lx, ly, name, fontsize=8, ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                          alpha=0.5, edgecolor='none'))
+
+    ax.axis('off')
+    ax.margins(0.08)
+
+    # Colourbar — scoped to node data range, 5 evenly spaced ticks
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = figure.colorbar(sm, ax=ax, shrink=0.6, pad=0.06)
+    cbar.set_label('Mean pDockQ', fontsize=12)
+    cbar.ax.tick_params(labelsize=10)
+    tick_vals = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    cbar.set_ticks(tick_vals)
+    cbar.set_ticklabels([f'{v:.1f}' for v in tick_vals])
+
+    # Node-size legend — show min and max with explicit labels
+    ref_sizes = [min_c, max_c]
+    ref_labels = [f'{min_c:,} (smallest)', f'{max_c:,} (largest)']
+    legend_elements = []
+    for s, lbl in zip(ref_sizes, ref_labels):
+        display_size = 300 + 2700 * (s - min_c) / max(1, max_c - min_c)
+        legend_elements.append(Line2D([0], [0], marker='o', color='w',
+                                      markerfacecolor='#bdc3c7',
+                                      markeredgecolor='black', markeredgewidth=0.5,
+                                      markersize=max(4, np.sqrt(display_size) / 3),
+                                      label=lbl))
+    ax.legend(handles=legend_elements, loc='lower left', fontsize=10,
+              title='Pathway size (complexes)', title_fontsize=11,
+              framealpha=1.0, borderpad=1.2, labelspacing=1.5, handletextpad=1.0,
+              bbox_to_anchor=(-0.05, -0.05))
+
+    figure.suptitle("Reactome Pathway Network Coloured by pDockQ",
+                    fontsize=FONT_TITLE + 1, fontweight='bold')
+    _save_figure(figure, '17_Pathway_Network.png')
+
+
+# Fig 18 removed — CSV lacks interface residue positions; variant_details
+# only records positions where variants exist, making PTM-interface
+# cross-referencing scientifically invalid (near-zero matches).
 
 
 #-----------------------------------------------Main Execution--------------------------------------------------------------------
@@ -2290,27 +2591,27 @@ def main() -> None:
         plot_fig13_variant_burden(df, density_mode=args.density)
         figures_generated += 1
 
-    # Phase E: Disease & Pathway figures (Figs 14-16)
+    # Phase E: Pathway coherence (Fig 14)
     if col_flags.get('has_pathway_data', False):
-        print("Fig 14 - Pathway Quality Heatmap")
-        plot_fig14_pathway_quality_heatmap(df)
+        print("Fig 14 - Pathway Functional Coherence")
+        plot_fig14_pathway_coherence(df)
         figures_generated += 1
 
+    # Phase E: Disease enrichment (Fig 15)
     if col_flags.get('has_disease_data', False):
-        print("Fig 15 - Disease Burden vs Structural Quality")
-        plot_fig15_disease_burden_network(df, density_mode=args.density)
+        print("Fig 15 - Disease Enrichment by Tier")
+        plot_fig15_disease_enrichment(df)
         figures_generated += 1
 
-        if 'is_drug_target_a' in df.columns:
-            print("Fig 16 - Drug Target Quality Comparison")
-            plot_fig16_drug_target_quality(df)
-            figures_generated += 1
+    # Fig 16 removed (null result p=0.270)
 
-    # Phase E: Network visualisation (Fig 17) — requires NetworkX
-    if col_flags.get('has_disease_data', False) or col_flags.get('has_pathway_data', False):
-        print("Fig 17 - Interaction Network (pDockQ)")
-        plot_fig17_interaction_network(df)
+    # Phase E: Pathway-level network (Fig 17)
+    if col_flags.get('has_pathway_data', False):
+        print("Fig 17 - Pathway-Level Network")
+        plot_fig17_pathway_network(df)
         figures_generated += 1
+
+    # Fig 18 removed (data integrity problem — see code comment)
 
     # On-demand: Per-complex PAE heatmaps
     if models_dir:
