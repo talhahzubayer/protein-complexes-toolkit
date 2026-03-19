@@ -37,7 +37,7 @@ from visualise_results import (
     plot_fig13_variant_burden,
     plot_fig14_pathway_coherence,
     plot_fig15_disease_enrichment,
-    plot_fig17_pathway_network,
+    plot_fig16_pathway_network,
     _get_paradox_mask,
     _parse_variant_details,
     _aggregate_all_variants,
@@ -576,18 +576,18 @@ class TestPhaseEFigureGeneration:
         assert not hasattr(visualise_results, 'plot_fig16_drug_target_quality'), \
             "plot_fig16_drug_target_quality should have been removed"
 
-    def test_fig17_pathway_network(self, phase_e_df, phase_e_figures_dir):
+    def test_fig16_pathway_network(self, phase_e_df, phase_e_figures_dir):
         # Use top-5 pathways with low edge threshold for synthetic 30-row data
-        plot_fig17_pathway_network(phase_e_df,
+        plot_fig16_pathway_network(phase_e_df,
                                    max_pathways=5,
                                    min_shared_complexes=1)
-        assert any(f.startswith("17_") for f in os.listdir(phase_e_figures_dir)), \
-            "Fig 17 output file not found"
+        assert any(f.startswith("16_") for f in os.listdir(phase_e_figures_dir)), \
+            "Fig 16 output file not found"
 
-    def test_fig17_no_17b_disease_network(self, phase_e_figures_dir):
-        """Verify 17b disease network is no longer generated."""
-        assert not any(f.startswith("17b_") for f in os.listdir(phase_e_figures_dir)), \
-            "17b_Disease_Network.png should not exist"
+    def test_fig16_no_16b_disease_network(self, phase_e_figures_dir):
+        """Verify 16b disease network is no longer generated."""
+        assert not any(f.startswith("16b_") for f in os.listdir(phase_e_figures_dir)), \
+            "16b_Disease_Network.png should not exist"
 
     def test_fig18_removed(self):
         """Verify Fig 18 function no longer exists."""

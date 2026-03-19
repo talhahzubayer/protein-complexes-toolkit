@@ -12,10 +12,10 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 48-column base CSV output (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`) with automated quality flags, paradox detection, and optional enrichment
+- 25-column base CSV output (up to 119 with all features: `--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
-- Generate up to 13 figures with adaptive rendering for datasets from hundreds to millions of complexes
+- Generate up to 16 figures with adaptive rendering for datasets from hundreds to millions of complexes
 - Optional KDE density contour overlays and per-complex PAE heatmaps
 - PPI database ingestion: parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
@@ -27,7 +27,9 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Genetic variant mapping: UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis
 - EVE stability scoring: evolutionary variant effect predictions mapped to pipeline variants via UniProt ID mapping, with per-chain EVE score summaries and pathogenicity classification
 - Offline AlphaMissense + monomeric FoldX scoring: pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) loaded from local files for instant variant scoring with no API dependency
-- 739-test suite (717 passing + 1 skipped + 21 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- UniProt disease annotations: offline XML parsing of disease associations, PTM sites, GO terms, and drug target status with API fallback for missing proteins
+- Reactome pathway mapping: per-pathway PPI enrichment via STRING API, NetworkX network analysis, and 3 pathway/disease visualisation figures (Figs 14-16)
+- 936-test suite (918 passing + 1 skipped + 17 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -47,10 +49,12 @@ protein-complexes-toolkit/
 ├── variant_mapper.py        # Genetic variant mapping and structural context classification
 ├── stability_scorer.py      # EVE stability scoring and variant effect predictions
 ├── protvar_client.py        # Offline AlphaMissense + monomeric FoldX scorer (local data files)
+├── disease_annotations.py   # UniProt disease/PTM/GO/drug-target annotation
+├── pathway_network.py       # Reactome pathway mapping, PPI enrichment, NetworkX networks
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (706 tests + 21 future placeholders)
+├── tests/                   # Test suite (919 tests + 17 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -67,33 +71,16 @@ protein-complexes-toolkit/
 │   ├── test_variant_mapper.py
 │   ├── test_stability_scorer.py
 │   ├── test_protvar_client.py
+│   ├── test_disease_annotations.py
+│   ├── test_pathway_network.py
 │   └── offline_test_data/
 │       └── databases/                            # Small database excerpts for offline testing
-│           ├── string_api_responses/             # Pre-captured API responses (7 JSON files)
-│           ├── protvar_responses/                # Pre-captured ProtVar API responses (6 JSON files, historical)
-│           ├── test_afdb_foldx_export.csv        # AFDB FoldX export excerpt (P61981 + P24534)
-│           ├── test_alphamissense.tsv            # AlphaMissense excerpt (P61981 + P24534)
-│           ├── test_aliases.txt                  # STRING aliases excerpt
-│           ├── test_biogrid.tab3.txt             # BioGRID excerpt
-│           ├── test_humap.pairsWprob             # HuMAP excerpt
-│           ├── test_humap_malformed.pairsWprob   # Malformed HuMAP for edge-case tests
-│           ├── test_huri.tsv                     # HuRI excerpt
-│           ├── test_string_clusters.txt          # STRING clusters excerpt
-│           ├── test_string_links.txt             # STRING links excerpt
-│           ├── test_uniprot_variants.txt         # UniProt variants excerpt (20 rows)
-│           ├── test_clinvar_variants.txt         # ClinVar excerpt (6 rows)
-│           ├── test_exac_constraint.txt          # ExAC constraint excerpt (5 rows)
-│           ├── test_eve_scores.csv               # EVE scores excerpt (80 rows from 1433G_HUMAN)
-│           └── test_idmapping.dat                # UniProt ID mapping excerpt (8 rows)
 ├── data/                                         # External databases (not included in repo)
 │    ├── ppi/                                     # PPI databases (see "Setting Up Data")
 │    ├── clusters/                                # STRING sequence clusters (see "Setting Up Data")
 │    ├── variants/                                # Variant databases (see "Setting Up Data")
 │    ├── stability/                               # Stability prediction data (see "Setting Up Data")
-│    │    ├── HUMAN_9606_idmapping.dat            # UniProt ID mapping (accession -> entry name)
-│    │    ├── EVE_all_data/                       # EVE variant effect scores (3,211 CSVs)
-│    │    ├── AlphaMissense_aa_substitutions.tsv  # AlphaMissense pathogenicity (216M variants)
-│    │    └── afdb_foldx_export_20250210.csv      # AFDB FoldX DDG + pLDDT (209M substitutions)
+│    ├── pathways/                                # Disease & pathway databases (see "Setting Up Data")
 │    └── string_api_cache/                        # STRING API response cache (auto-generated)
 └── Test_Data/							          # Not included in repo (see "Setting Up Test Data")
 ```
@@ -146,6 +133,18 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                              (offline AlphaMissense +
                                               monomeric FoldX scoring
                                               from local data files)
+                                                           │
+                                                           ▼ (optional --disease)
+                                             disease_annotations.py
+                                             (UniProt disease/PTM/GO/
+                                              drug-target annotation,
+                                              offline XML + API fallback)
+                                                           │
+                                                           ▼ (optional --pathways)
+                                               pathway_network.py
+                                             (Reactome pathway mapping,
+                                              per-pathway PPI enrichment,
+                                              NetworkX network analysis)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -173,9 +172,9 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 48-column base CSV (60 with `--enrich`, 67 with `--clustering`, 79 with `--variants`, 87 with `--stability`, 95 with `--protvar`) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional offline AlphaMissense + monomeric FoldX scoring adds pathogenicity scores, DDG values, and pathogenic variant counts via `--protvar` (requires `--variants`). STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 25-column base CSV (up to 119 with all features) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional offline AlphaMissense + monomeric FoldX scoring adds pathogenicity scores, DDG values, and pathogenic variant counts via `--protvar` (requires `--variants`). Optional disease annotation adds UniProt disease/PTM/GO/drug-target data via `--disease` (requires `--enrich`). Optional pathway mapping adds Reactome pathways, per-pathway PPI enrichment, and NetworkX network stats via `--pathways` (requires `--enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
-**visualise_results.py**: Generates up to 13 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present in the input CSV.
+**visualise_results.py**: Generates up to 16 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present. Figures 14-16 are generated automatically when disease and pathway columns are present.
 
 **database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`. `validate_with_api()` spot-checks loaded IDs against the STRING API (disable with `--no-api`).
 
@@ -190,6 +189,10 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 **stability_scorer.py**: Integrates EVE (Evolutionary model of Variant Effect) pathogenicity predictions with the variant mapping pipeline. Loads per-protein EVE score CSVs keyed by UniProt entry name (e.g. `1433G_HUMAN.csv`) using a `HUMAN_9606_idmapping.dat` mapping file to convert from pipeline accessions (e.g. `P61981`). Lazy-loads only EVE CSVs for proteins in the current run. `annotate_results_with_stability()` adds 8 CSV columns: per-chain mean EVE scores, pathogenic counts, coverage fractions, and pipe-separated stability detail strings. Isoform accessions are automatically stripped to canonical before EVE lookup. Standalone CLI supports `summary` (coverage stats) and `lookup` (per-protein/position score query) subcommands.
 
 **protvar_client.py**: Offline pathogenicity and stability scoring using two pre-computed data files: AlphaMissense pathogenicity scores (`AlphaMissense_aa_substitutions.tsv`, 216M variants from DeepMind) and AFDB monomeric FoldX DDG values (`afdb_foldx_export_20250210.csv`, 209M substitutions from EBI). Both files are streamed with accession/position filtering for memory efficiency. No API dependency — all scoring is local. `annotate_results_with_protvar()` adds 8 CSV columns: per-chain AlphaMissense mean scores, monomeric FoldX mean DDG, AlphaMissense pathogenic variant counts, and pipe-separated detail strings. Isoform accessions are automatically stripped to canonical. Standalone CLI supports `summary` (data statistics) and `lookup` (per-protein/position score query) subcommands.
+
+**disease_annotations.py**: UniProt disease, PTM, GO term, and drug target annotation. Offline-first: streaming `iterparse` of local `uniprot_sprot_human.xml` (20,431 reviewed human entries). API fallback via `fetch_uniprot_annotation_api()` for proteins missing from local XML. Extracts disease associations (with OMIM cross-references), PTM sites (phosphorylation, ubiquitination, glycosylation, lipidation), Gene Ontology terms (biological process + molecular function), and drug target status via Pharmaceutical keyword. `annotate_results_with_disease()` adds 14 CSV columns. Detail fields truncated at `DETAILS_DISPLAY_LIMIT=50` items. Standalone CLI supports `summary` and `lookup` subcommands.
+
+**pathway_network.py**: Reactome pathway mapping with per-pathway PPI enrichment and NetworkX network analysis. Offline-first: parses `UniProt2Reactome_All_Levels.txt` for pathway mappings and `ReactomePathwaysRelation.txt` for hierarchy. Per-pathway PPI enrichment via `invert_reactome_index()` + `run_per_pathway_ppi_enrichment()` using the STRING API (skipped with `--no-api`). Builds NetworkX interaction graphs with configurable pDockQ threshold (`NETWORK_PDOCKQ_THRESHOLD=0.23`). `annotate_results_with_pathways()` adds 10 CSV columns. Optional NetworkX dependency (`_HAS_NETWORKX` guard). Standalone CLI supports `summary`, `network`, and `enrichment` subcommands.
 
 **variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
@@ -216,7 +219,7 @@ The `data/` directory is **not included** in this repository due to the large si
 
 1. Create the directory structure:
 ```bash
-mkdir -p data/ppi data/clusters data/variants data/stability
+mkdir -p data/ppi data/clusters data/variants data/stability data/pathways
 ```
 
 2. Download the following files into `data/ppi/`:
@@ -261,7 +264,17 @@ mkdir -p data/ppi data/clusters data/variants data/stability
 
 > **Note:** These 2 files (~14 GB total) provide offline AlphaMissense pathogenicity scores and monomeric FoldX stability predictions. They replace the previous ProtVar API dependency, eliminating the need for internet access during `--protvar` scoring.
 
-7. Verify the directory contents:
+7. Download disease and pathway annotation databases into `data/pathways/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `uniprot_sprot_human.xml` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/knowledgebase/taxonomic_divisions/](https://ftp.uniprot.org/pub/databases/uniprot/knowledgebase/taxonomic_divisions/) - download `uniprot_sprot_human.xml.gz`, decompress |
+| `UniProt2Reactome_All_Levels.txt` | Reactome | [reactome.org/download/current/](https://reactome.org/download/current/) - download `UniProt2Reactome_All_Levels.txt` |
+| `ReactomePathwaysRelation.txt` | Reactome | [reactome.org/download/current/](https://reactome.org/download/current/) - download `ReactomePathwaysRelation.txt` |
+
+> **Note:** The UniProt XML file (~1.02 GB) contains all reviewed human protein entries with disease, PTM, GO, and drug target annotations. The Reactome files provide pathway-to-protein mappings (~110 MB) and pathway hierarchy (~611 KB) for network analysis.
+
+8. Verify the directory contents:
 ```
 data/
 ├── ppi/
@@ -284,6 +297,10 @@ data/
     │   └── ...
     ├── AlphaMissense_aa_substitutions.tsv     # AlphaMissense pathogenicity (~6.3 GB)
     └── afdb_foldx_export_20250210.csv         # AFDB FoldX DDG + pLDDT (~7.7 GB)
+├── pathways/
+│   ├── uniprot_sprot_human.xml                 # UniProt reviewed human entries (~1.02 GB)
+│   ├── UniProt2Reactome_All_Levels.txt         # UniProt-Reactome mappings (~110 MB)
+│   └── ReactomePathwaysRelation.txt            # Reactome pathway hierarchy (~611 KB)
 ```
 
 
@@ -474,11 +491,43 @@ python protvar_client.py lookup --protein P61981 --position 4
 python protvar_client.py summary
 ```
 
+### Disease Annotations
+
+```bash
+# With disease annotation (requires --enrich)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --disease
+
+# With custom disease data directory
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --disease data/pathways/
+
+# Standalone: disease annotation summary
+python disease_annotations.py summary --disease-dir data/pathways/
+
+# Standalone: look up annotations for a protein
+python disease_annotations.py lookup --disease-dir data/pathways/ --protein P04637
+```
+
+### Pathway Network Analysis
+
+```bash
+# With pathway mapping (requires --enrich)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --pathways
+
+# With pathways in offline mode (skip STRING API enrichment)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --pathways --no-api
+
+# Standalone: pathway summary statistics
+python pathway_network.py summary --csv results.csv
+
+# Standalone: build and plot pathway networks
+python pathway_network.py network --csv results.csv --output-dir Output
+```
+
 ### Full Pipeline
 
 ```bash
 # Full pipeline with all features
-python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar --disease --pathways
 ```
 
 ### Database Ingestion & ID Mapping
@@ -565,6 +614,12 @@ python -m pytest tests/ -m "stability" -v
 # ProtVar API tests (mocked, no network)
 python -m pytest tests/ -m "protvar" -v
 
+# Disease annotation tests
+python -m pytest tests/ -m "disease" -v
+
+# Pathway network tests
+python -m pytest tests/ -m "pathways" -v
+
 # View future feature placeholders
 python -m pytest tests/ -m "future" -v -o "addopts="
 ```
@@ -592,7 +647,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (48 base columns, 60 with enrichment, 67 with clustering, 79 with variants, 87 with stability, 95 with protvar)
+### CSV (25 base columns, up to 119 with all features)
 
 The main output CSV groups columns into:
 
@@ -611,6 +666,8 @@ The main output CSV groups columns into:
 | **Variants** (with `--variants`) | n_variants_a/b, n_interface_variants_a/b, n_pathogenic_interface_variants, interface_variant_enrichment, variant_details_a/b, gene_constraint_pli_a/b, gene_constraint_mis_z_a/b |
 | **Stability** (with `--stability`) | eve_score_mean_a/b, eve_n_pathogenic_a/b, eve_coverage_a/b, stability_details_a/b |
 | **ProtVar** (with `--protvar`) | protvar_am_mean_a/b, protvar_foldx_mean_a/b, protvar_am_n_pathogenic_a/b, protvar_details_a/b |
+| **Disease** (with `--disease`) | n_diseases_a/b, disease_details_a/b, is_drug_target_a/b, n_ptm_sites_a/b, ptm_details_a/b, go_biological_process_a/b, go_molecular_function_a/b |
+| **Pathways** (with `--pathways`) | reactome_pathways_a/b, n_reactome_pathways_a/b, n_shared_pathways, pathway_quality_context, ppi_enrichment_pvalue, ppi_enrichment_ratio, network_degree_a/b |
 
 ### JSONL Interface Export
 
@@ -635,8 +692,11 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 11 | Classified Variant Sankey | Alluvial flow: clinical significance -> structural context (Unknown excluded). Where do clinically significant variants land structurally? |
 | 12 | Enrichment Distribution | Histogram + KDE of interface variant enrichment by quality tier with Wilcoxon signed-rank test vs 1.0 (neutral). Are predicted interfaces under evolutionary constraint? |
 | 13 | Variant Density vs Quality | Interface variant density (per residue) vs composite score scatter with Spearman + partial correlation (size-controlled). Does the confidence metric predict variant biology? |
+| 14 | Pathway Coherence | Pathway complexity histogram + enrichment scatter with per-pathway PPI statistics |
+| 15 | Disease Enrichment | Disease prevalence by quality tier (grouped bars + chi-square) + top 10 diseases stacked bars |
+| 16 | Pathway Network | NetworkX spring layout of top Reactome pathways, coloured by % High-tier complexes |
 
-Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`.
+Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`.
 
 
 ## Roadmap
@@ -651,16 +711,16 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
 - **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, toolkit integration with `--stability` flag
 - **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns; toolkit integration with `--protvar` flag
+- **Disease & Pathway Integration (Phase E):** UniProt disease/PTM/GO/drug-target annotation (offline XML + API fallback), Reactome pathway mapping with per-pathway PPI enrichment, NetworkX network analysis, 3 visualisation figures (Figs 14-16), toolkit integration with `--disease` and `--pathways` flags, 24 new CSV columns
 
 ### Planned
-- **Disease & Pathway Integration:** Map complexes to KEGG/Reactome pathways, build interaction networks
 - **PyMOL Visualisation:** Generate `.pml` scripts for batch structure rendering with interface highlighting
 - **Million-Complex Production Run:** Full pipeline validation on large-scale AlphaFold-Multimer dataset
 
 
 ## Testing
 
-The test suite contains **739 tests** across 16 modules (718 real + 21 future placeholders):
+The test suite contains **936 tests** across 18 modules (919 active + 17 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -668,7 +728,7 @@ The test suite contains **739 tests** across 16 modules (718 real + 21 future pl
 | test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
 | test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
 | test_toolkit.py | 54 | File discovery, quality classification, CSV, enrichment, sequences |
-| test_visualise_results.py | 36 | Figure generation, variant detail parsing, Figs 11-13, data loading, CLI |
+| test_visualise_results.py | 54 | Figure generation (Figs 1-16 incl. Phase E), variant/disease detail parsing, data loading, CLI |
 | test_integration.py | 8 | Cross-module pipeline, data flow |
 | test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
 | test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
@@ -678,11 +738,13 @@ The test suite contains **739 tests** across 16 modules (718 real + 21 future pl
 | test_variant_mapper.py | 103 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context (cross-chain distance), enrichment, CLI, toolkit integration |
 | test_stability_scorer.py | 59 | EVE score loading, entry-name mapping, index building, annotation, formatting, parsing, CSV columns, CLI, regression |
 | test_protvar_client.py | 88 | Offline AlphaMissense TSV loading, AFDB FoldX CSV loading, AM variant parsing, combined index building, score lookup, chain scoring, detail formatting, annotation, CSV columns, CLI, regression |
-| test_future_aims.py | 14 + 21 | 14 real tests (7 database + 7 variant/stability) + 21 future placeholders |
+| test_disease_annotations.py | 96 | UniProt disease/PTM/GO parsing, API fallback, formatting, annotation, CLI, regression |
+| test_pathway_network.py | 83 | Reactome loading, pathway quality, NetworkX, annotation, per-pathway PPI enrichment, CLI |
+| test_future_aims.py | 18 + 17 | 18 real tests (7 database + 6 variant + 1 EVE + 1 ProtVar + 3 pathway) + 17 future placeholders |
 
-**Results:** 717 passing, 1 skipped (Fig 10 — all test complexes are dimers), 21 future placeholders (deselected by default)
+**Results:** 918 passing, 1 skipped (Fig 10 — all test complexes are dimers), 17 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `alphamissense` (AlphaMissense scoring), `disease` (UniProt disease annotation), `pathways` (pathway mapping and network), `phase_e` (Phase E figure tests), `future` (unimplemented features)
 
 
 ## Acknowledgements
