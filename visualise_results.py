@@ -208,6 +208,8 @@ def detect_columns(df: pd.DataFrame) -> dict:
         'has_variant_data': 'n_variants_a' in columns and 'variant_details_a' in columns,
         'has_disease_data': 'n_diseases_a' in columns,
         'has_pathway_data': 'reactome_pathways_a' in columns,
+        'has_stability_data': 'eve_score_mean_a' in columns and 'protvar_am_mean_a' in columns,
+        'has_clustering_data': 'sequence_cluster_count' in columns and 'shared_cluster_count' in columns,
     }
 
 #------------------------Data Loading-----------------------------------
@@ -2213,16 +2215,14 @@ def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
                     disease_protein_counts[name].add(accession)
 
     if disease_tier_counts:
-        # Select top 10 by unique protein count, sort by % High descending
-        sorted_diseases = sorted(disease_tier_counts.keys(),
-                                 key=lambda d: len(disease_protein_counts.get(d, set())),
-                                 reverse=True)[:10]
-
-        def _frac_high(d):
-            total = sum(disease_tier_counts[d].values())
-            return disease_tier_counts[d].get('High', 0) / total if total > 0 else 0
-
-        sorted_diseases.sort(key=_frac_high, reverse=True)
+        # Select top 10 diseases: primary = unique protein count (desc),
+        # tiebreaker = total annotations (desc)
+        sorted_diseases = sorted(
+            disease_tier_counts.keys(),
+            key=lambda d: (len(disease_protein_counts.get(d, set())),
+                           sum(disease_tier_counts[d].values())),
+            reverse=True
+        )[:10]
 
         y_pos = np.arange(len(sorted_diseases))
         left = np.zeros(len(sorted_diseases))
@@ -2636,6 +2636,343 @@ def plot_fig16_pathway_network(df: pd.DataFrame,
 # cross-referencing scientifically invalid (near-zero matches).
 
 
+def plot_fig17_stability_crossvalidation(df: pd.DataFrame) -> None:
+    """Fig 17: Stability Predictor Cross-Validation (3-panel).
+
+    Panel A — EVE vs AlphaMissense concordance scatter (pooled both chains).
+    Panel B — AlphaMissense vs monomeric FoldX DDG scatter (chain A).
+    Panel C — Coverage landscape grouped bar chart by quality tier.
+
+    Requires stability + ProtVar columns:
+        eve_score_mean_a/b, protvar_am_mean_a/b, protvar_foldx_mean_a/b,
+        eve_coverage_a/b, quality_tier_v2.
+    """
+    required = ['eve_score_mean_a', 'protvar_am_mean_a', 'quality_tier_v2']
+    if not all(c in df.columns for c in required):
+        print("  Skipping Fig 17 — missing stability/ProtVar columns")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
+
+    # ── Panel A: EVE vs AlphaMissense (pooled both chains) ──────────
+    eve_vals, am_vals, tier_vals_a = [], [], []
+    for _, row in df.iterrows():
+        tier = row.get(tier_col, '')
+        if tier not in TIER_ORDER:
+            continue
+        for suffix in ('a', 'b'):
+            eve = row.get(f'eve_score_mean_{suffix}', np.nan)
+            am = row.get(f'protvar_am_mean_{suffix}', np.nan)
+            if pd.notna(eve) and pd.notna(am) and eve > 0 and am > 0:
+                eve_vals.append(eve)
+                am_vals.append(am)
+                tier_vals_a.append(tier)
+
+    if len(eve_vals) >= 10:
+        eve_arr = np.array(eve_vals)
+        am_arr = np.array(am_vals)
+        colors_a = [TIER_COLORS.get(t, '#95a5a6') for t in tier_vals_a]
+        s, alpha = _adaptive_scatter_params(len(eve_arr))
+        ax_a.scatter(eve_arr, am_arr, c=colors_a, s=s, alpha=alpha, edgecolors='none')
+
+        try:
+            from scipy.stats import spearmanr
+            rho, p = spearmanr(eve_arr, am_arr)
+            p_str = f'p < 0.001' if p < 0.001 else f'p = {p:.3f}'
+            ax_a.text(0.05, 0.95, f'\u03c1 = {rho:.2f}, {p_str}\nn = {len(eve_arr):,}',
+                      transform=ax_a.transAxes, va='top', fontsize=FONT_TICK,
+                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                edgecolor='grey', alpha=0.9))
+        except ImportError:
+            pass
+
+        # Tier legend
+        for t in TIER_ORDER:
+            ax_a.scatter([], [], c=TIER_COLORS[t], s=20, label=t)
+        ax_a.legend(fontsize=FONT_TICK - 1, loc='lower right', framealpha=0.9)
+    else:
+        ax_a.text(0.5, 0.5, 'Insufficient overlap\n(< 10 pairs)',
+                  transform=ax_a.transAxes, ha='center', va='center', fontsize=10)
+
+    ax_a.set_xlabel('EVE Mean Score (higher = more pathogenic)', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylabel('AlphaMissense Mean Score (higher = more pathogenic)', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_title('A: EVE vs AlphaMissense', fontsize=FONT_TITLE, fontweight='bold')
+    ax_a.tick_params(labelsize=FONT_TICK)
+    _despine(ax_a)
+
+    # ── Panel B: AlphaMissense vs FoldX (chain A only) ──────────────
+    am_b, foldx_b, tier_vals_b = [], [], []
+    for _, row in df.iterrows():
+        tier = row.get(tier_col, '')
+        if tier not in TIER_ORDER:
+            continue
+        am = row.get('protvar_am_mean_a', np.nan)
+        fx = row.get('protvar_foldx_mean_a', np.nan)
+        if pd.notna(am) and pd.notna(fx) and am > 0 and fx > 0:
+            am_b.append(am)
+            foldx_b.append(fx)
+            tier_vals_b.append(tier)
+
+    if len(am_b) >= 10:
+        am_b_arr = np.array(am_b)
+        fx_arr = np.array(foldx_b)
+        colors_b = [TIER_COLORS.get(t, '#95a5a6') for t in tier_vals_b]
+        s, alpha = _adaptive_scatter_params(len(am_b_arr))
+        ax_b.scatter(am_b_arr, fx_arr, c=colors_b, s=s, alpha=alpha, edgecolors='none')
+
+        try:
+            from scipy.stats import spearmanr
+            rho, p = spearmanr(am_b_arr, fx_arr)
+            p_str = f'p < 0.001' if p < 0.001 else f'p = {p:.3f}'
+            ax_b.text(0.05, 0.95, f'\u03c1 = {rho:.2f}, {p_str}\nn = {len(am_b_arr):,}',
+                      transform=ax_b.transAxes, va='top', fontsize=FONT_TICK,
+                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                edgecolor='grey', alpha=0.9))
+        except ImportError:
+            pass
+    else:
+        ax_b.text(0.5, 0.5, 'Insufficient overlap\n(< 10 pairs)',
+                  transform=ax_b.transAxes, ha='center', va='center', fontsize=10)
+
+    ax_b.set_xlabel('AlphaMissense Mean Score', fontsize=FONT_AXIS_LABEL)
+    ax_b.set_ylabel('Monomeric FoldX \u0394\u0394G Mean (kcal/mol, higher = destabilising)', fontsize=FONT_AXIS_LABEL)
+    ax_b.set_title('B: AlphaMissense vs FoldX', fontsize=FONT_TITLE, fontweight='bold')
+    ax_b.tick_params(labelsize=FONT_TICK)
+    _despine(ax_b)
+
+    # ── Panel C: Coverage Landscape (grouped bar) ───────────────────
+    predictor_names = ['EVE', 'AlphaMissense', 'FoldX']
+    predictor_colors = ['#3498db', '#e67e22', '#2ecc71']
+    bar_width = 0.25
+    x_positions = np.arange(len(TIER_ORDER))
+
+    overall_coverage = {p: {'covered': 0, 'total': 0} for p in predictor_names}
+
+    for i, pred in enumerate(predictor_names):
+        coverages = []
+        for tier in TIER_ORDER:
+            tier_df = df[df[tier_col] == tier]
+            n_tier = len(tier_df)
+            if n_tier == 0:
+                coverages.append(0)
+                continue
+
+            if pred == 'EVE':
+                cov_a = tier_df.get('eve_coverage_a', pd.Series(dtype=float))
+                cov_b = tier_df.get('eve_coverage_b', pd.Series(dtype=float))
+                covered = ((cov_a.fillna(0) > 0) | (cov_b.fillna(0) > 0)).sum()
+            elif pred == 'AlphaMissense':
+                am_a = tier_df.get('protvar_am_mean_a', pd.Series(dtype=float))
+                am_b = tier_df.get('protvar_am_mean_b', pd.Series(dtype=float))
+                covered = (am_a.notna() | am_b.notna()).sum()
+            else:  # FoldX
+                fx_a = tier_df.get('protvar_foldx_mean_a', pd.Series(dtype=float))
+                fx_b = tier_df.get('protvar_foldx_mean_b', pd.Series(dtype=float))
+                covered = (fx_a.notna() | fx_b.notna()).sum()
+
+            overall_coverage[pred]['covered'] += int(covered)
+            overall_coverage[pred]['total'] += n_tier
+            coverages.append(100.0 * covered / n_tier)
+
+        bars = ax_c.bar(x_positions + i * bar_width, coverages, bar_width,
+                        color=predictor_colors[i], label=pred, edgecolor='white',
+                        linewidth=0.5, alpha=0.85)
+
+        # Annotate each bar with percentage
+        for bar_obj, cov in zip(bars, coverages):
+            if cov > 0:
+                ax_c.text(bar_obj.get_x() + bar_obj.get_width() / 2, cov + 1.5,
+                          f'{cov:.0f}%', ha='center', va='bottom', fontsize=7)
+
+    ax_c.set_xticks(x_positions + bar_width)
+    ax_c.set_xticklabels(TIER_ORDER, fontsize=FONT_AXIS_LABEL)
+    ax_c.set_ylabel('Coverage (%)', fontsize=FONT_AXIS_LABEL)
+    ax_c.set_ylim(0, 110)
+    ax_c.set_title('C: Coverage by Quality Tier', fontsize=FONT_TITLE, fontweight='bold')
+    ax_c.tick_params(labelsize=FONT_TICK)
+    ax_c.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
+
+    # Overall coverage annotation
+    overall_parts = []
+    for pred in predictor_names:
+        oc = overall_coverage[pred]
+        pct = 100.0 * oc['covered'] / oc['total'] if oc['total'] > 0 else 0
+        overall_parts.append(f'{pred}: {pct:.0f}%')
+    ax_c.text(0.5, -0.12, 'Overall: ' + '  |  '.join(overall_parts),
+              transform=ax_c.transAxes, ha='center', fontsize=FONT_TICK - 1,
+              style='italic', color='#555555')
+
+    _despine(ax_c)
+
+    figure.suptitle("Stability Predictor Cross-Validation",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '17_Stability_CrossValidation.png')
+
+
+def plot_fig18_clustering_validation(df: pd.DataFrame) -> None:
+    """Fig 18: Sequence Clustering Validation (2-panel).
+
+    Panel A — Homodimer ground truth scatter (shared vs total cluster count).
+    Panel B — Shared cluster ratio by quality tier (heterodimers only).
+
+    Requires clustering columns:
+        sequence_cluster_count, shared_cluster_count, complex_type, quality_tier_v2.
+    """
+    required = ['sequence_cluster_count', 'shared_cluster_count', 'complex_type']
+    if not all(c in df.columns for c in required):
+        print("  Skipping Fig 18 — missing clustering columns")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13, 5.5),
+                                         gridspec_kw={'width_ratios': [3, 2]})
+
+    # ── Panel A: Homodimer Ground Truth Scatter ─────────────────────
+    valid = df['sequence_cluster_count'].notna() & (df['sequence_cluster_count'] > 0)
+    valid &= df['shared_cluster_count'].notna()
+    plot_df = df[valid].copy()
+
+    seq_counts = plot_df['sequence_cluster_count'].values
+    shared_counts = plot_df['shared_cluster_count'].values
+    complex_types = plot_df['complex_type'].astype(str).str.lower().values
+
+    is_homo = complex_types == 'homodimer'
+    is_hetero = ~is_homo
+
+    # Heterodimers first (underneath)
+    if is_hetero.any():
+        ax_a.scatter(seq_counts[is_hetero], shared_counts[is_hetero],
+                     s=8, alpha=0.3, color='#95a5a6', label='Heterodimer',
+                     edgecolors='none', zorder=1)
+    # Homodimers on top
+    if is_homo.any():
+        ax_a.scatter(seq_counts[is_homo], shared_counts[is_homo],
+                     s=25, alpha=0.8, color='#e74c3c', label='Homodimer',
+                     edgecolors='black', linewidth=0.3, zorder=2)
+
+    # y = x diagonal
+    max_val = max(seq_counts.max(), shared_counts.max()) if len(seq_counts) > 0 else 10
+    ax_a.plot([0, max_val * 1.05], [0, max_val * 1.05], 'k--', alpha=0.6,
+              linewidth=1.5, zorder=0, label='y = x')
+
+    # Homodimer ground truth annotation
+    n_homo = is_homo.sum()
+    if n_homo > 0:
+        homo_seq = seq_counts[is_homo]
+        homo_shared = shared_counts[is_homo]
+        n_perfect = int(np.sum(homo_shared == homo_seq))
+        pct = 100.0 * n_perfect / n_homo if n_homo > 0 else 0
+        ax_a.text(0.05, 0.95,
+                  f'Homodimers: {n_perfect}/{n_homo} on y=x ({pct:.0f}%)',
+                  transform=ax_a.transAxes, va='top', fontsize=FONT_TICK,
+                  bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                            edgecolor='grey', alpha=0.9))
+
+    # Annotate zero-shared-cluster band
+    n_zero_shared = int((shared_counts == 0).sum())
+    if n_zero_shared > 0:
+        pct_zero = 100.0 * n_zero_shared / len(shared_counts)
+        ax_a.text(25, 2, f'No shared clusters: {n_zero_shared} ({pct_zero:.1f}%)',
+                  ha='left', va='bottom',
+                  fontsize=FONT_TICK - 1, color='#555555', style='italic')
+
+    ax_a.set_xlabel('Sequence Cluster Count', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylabel('Shared Cluster Count', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_title('A: Homodimer Ground Truth', fontsize=FONT_TITLE, fontweight='bold')
+    ax_a.tick_params(labelsize=FONT_TICK)
+    ax_a.legend(fontsize=FONT_TICK - 1, loc='lower right', framealpha=0.9)
+    _despine(ax_a)
+
+    # ── Panel B: Shared Cluster Ratio by Quality Tier ───────────────
+    hetero_df = plot_df[plot_df['complex_type'].astype(str).str.lower() == 'heterodimer'].copy()
+    hetero_df = hetero_df[hetero_df['sequence_cluster_count'] > 0]
+    hetero_df['cluster_ratio'] = (hetero_df['shared_cluster_count'] /
+                                   hetero_df['sequence_cluster_count'])
+
+    tier_data = {}
+    for tier in TIER_ORDER:
+        vals = hetero_df.loc[hetero_df[tier_col] == tier, 'cluster_ratio'].dropna().values
+        if len(vals) > 0:
+            tier_data[tier] = vals
+
+    if len(tier_data) >= 2:
+        positions = []
+        tier_labels = []
+        data_list = []
+        for i, tier in enumerate(TIER_ORDER):
+            if tier in tier_data:
+                positions.append(i)
+                data_list.append(tier_data[tier])
+                tier_labels.append(f'{tier}\n(n={len(tier_data[tier]):,})')
+
+        parts = ax_b.violinplot(data_list, positions=positions,
+                                showmeans=False, showmedians=True)
+
+        # Colour violin bodies
+        for idx, pc in enumerate(parts['bodies']):
+            tier_name = TIER_ORDER[positions[idx]] if positions[idx] < len(TIER_ORDER) else 'Medium'
+            pc.set_facecolor(TIER_COLORS.get(tier_name, '#95a5a6'))
+            pc.set_alpha(0.3)
+
+        # Strip overlay with jitter
+        rng = np.random.default_rng(42)
+        for idx, pos in enumerate(positions):
+            vals = data_list[idx]
+            jitter = rng.uniform(-0.08, 0.08, size=len(vals))
+            tier_name = TIER_ORDER[pos] if pos < len(TIER_ORDER) else 'Medium'
+            ax_b.scatter(np.full(len(vals), pos) + jitter, vals,
+                         s=3, alpha=0.25, color=TIER_COLORS.get(tier_name, '#95a5a6'),
+                         edgecolors='none', zorder=0)
+
+        ax_b.set_xticks(positions)
+        ax_b.set_xticklabels(tier_labels, fontsize=FONT_AXIS_LABEL)
+
+        # Kruskal-Wallis (all tiers) + Mann-Whitney (High vs Low)
+        try:
+            from scipy.stats import kruskal, mannwhitneyu
+            all_groups = [tier_data[t] for t in TIER_ORDER if t in tier_data]
+            if len(all_groups) >= 2:
+                h_stat, kw_p = kruskal(*all_groups)
+                kw_p_str = f'p = {kw_p:.1e}' if kw_p < 0.001 else f'p = {kw_p:.3f}'
+                stat_lines = [f'Kruskal-Wallis H = {h_stat:.1f}, {kw_p_str}']
+
+                if 'High' in tier_data and 'Low' in tier_data:
+                    _, mw_p = mannwhitneyu(tier_data['High'], tier_data['Low'],
+                                           alternative='two-sided')
+                    med_h = np.median(tier_data['High'])
+                    med_l = np.median(tier_data['Low'])
+                    mw_p_str = f'p = {mw_p:.1e}' if mw_p < 0.001 else f'p = {mw_p:.3f}'
+                    stat_lines.append(f'High vs Low: {mw_p_str}')
+                    stat_lines.append(f'High median: {med_h:.3f}')
+                    stat_lines.append(f'Low median: {med_l:.3f}')
+
+                stat_lines.append('Solid line = median')
+                ax_b.text(0.95, 0.95, '\n'.join(stat_lines),
+                          transform=ax_b.transAxes, va='top', ha='right',
+                          fontsize=FONT_TICK - 1,
+                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                    edgecolor='grey', alpha=0.9))
+        except ImportError:
+            pass
+    else:
+        ax_b.text(0.5, 0.5, 'Insufficient tier data',
+                  transform=ax_b.transAxes, ha='center', va='center', fontsize=10)
+
+    ax_b.set_ylabel('Fraction of Clusters Shared', fontsize=FONT_AXIS_LABEL)
+    ax_b.set_title('B: Cluster Ratio by Quality Tier', fontsize=FONT_TITLE, fontweight='bold')
+    ax_b.tick_params(labelsize=FONT_TICK)
+    _despine(ax_b)
+
+    figure.suptitle("Sequence Clustering Validation",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '18_Clustering_Validation.png')
+
+
 #-----------------------------------------------Main Execution--------------------------------------------------------------------
 
 def parse_arguments() -> argparse.Namespace:
@@ -2742,6 +3079,8 @@ def main() -> None:
     print(f"  Variant data:      {'Yes' if col_flags['has_variant_data'] else 'No'}")
     print(f"  Disease data:      {'Yes' if col_flags.get('has_disease_data', False) else 'No'}")
     print(f"  Pathway data:      {'Yes' if col_flags.get('has_pathway_data', False) else 'No'}")
+    print(f"  Stability data:    {'Yes' if col_flags.get('has_stability_data', False) else 'No'}")
+    print(f"  Clustering data:   {'Yes' if col_flags.get('has_clustering_data', False) else 'No'}")
 
     # Chain count summary
     if col_flags['has_chain_info']:
@@ -2847,7 +3186,17 @@ def main() -> None:
         plot_fig16_pathway_network(df)
         figures_generated += 1
 
-    # Fig 18 removed (data integrity problem — see code comment)
+    # Phase D: Stability cross-validation (Fig 17)
+    if col_flags.get('has_stability_data', False):
+        print("Fig 17 - Stability Predictor Cross-Validation")
+        plot_fig17_stability_crossvalidation(df)
+        figures_generated += 1
+
+    # Phase B: Clustering validation (Fig 18)
+    if col_flags.get('has_clustering_data', False) and 'complex_type' in df.columns:
+        print("Fig 18 - Sequence Clustering Validation")
+        plot_fig18_clustering_validation(df)
+        figures_generated += 1
 
     # On-demand: Per-complex PAE heatmaps
     if models_dir:

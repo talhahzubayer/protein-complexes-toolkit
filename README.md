@@ -15,7 +15,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - 25-column base CSV output (up to 119 with all features: `--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
-- Generate up to 16 figures with adaptive rendering for datasets from hundreds to millions of complexes
+- Generate up to 18 figures with adaptive rendering for datasets from hundreds to millions of complexes
 - Optional KDE density contour overlays and per-complex PAE heatmaps
 - PPI database ingestion: parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - Protein ID cross-referencing: isoform-aware mapping between ENSP, ENSG, UniProt, and gene symbols using STRING aliases
@@ -174,7 +174,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 25-column base CSV (up to 119 with all features) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional offline AlphaMissense + monomeric FoldX scoring adds pathogenicity scores, DDG values, and pathogenic variant counts via `--protvar` (requires `--variants`). Optional disease annotation adds UniProt disease/PTM/GO/drug-target data via `--disease` (requires `--enrich`). Optional pathway mapping adds Reactome pathways, per-pathway PPI enrichment, and NetworkX network stats via `--pathways` (requires `--enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
-**visualise_results.py**: Generates up to 16 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present. Figures 14-16 are generated automatically when disease and pathway columns are present.
+**visualise_results.py**: Generates up to 18 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present. Figures 14-16 are generated automatically when disease and pathway columns are present. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`.
 
 **database_loaders.py**: Parsers for 4 protein-protein interaction databases. `load_string()` strips `9606.ENSP` prefixes and normalises combined scores from 0 - 1000 to 0.0 - 1.0. `load_biogrid()` filters to human (taxonomy 9606) physical interactions with Swiss-Prot/TrEMBL fallback extraction. `load_huri()` parses binary Y2H interactions with ENSG identifiers. `load_humap()` reads pairwise probability-scored interactions with optional UniProt ID validation. All parsers return standardised DataFrames with columns: `protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`. `validate_with_api()` spot-checks loaded IDs against the STRING API (disable with `--no-api`).
 
@@ -695,8 +695,10 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 14 | Pathway Coherence | Pathway complexity histogram + enrichment scatter with per-pathway PPI statistics |
 | 15 | Disease Enrichment | Disease prevalence by quality tier (grouped bars + chi-square) + top 10 diseases stacked bars |
 | 16 | Pathway Network | NetworkX spring layout of top Reactome pathways, coloured by % High-tier complexes |
+| 17 | Stability Cross-Validation | EVE vs AlphaMissense concordance, AlphaMissense vs FoldX DDG, coverage landscape by tier |
+| 18 | Clustering Validation | Homodimer ground truth scatter (shared = total clusters), cluster ratio by quality tier |
 
-Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`.
+Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`.
 
 
 ## Roadmap
@@ -707,10 +709,10 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
 - **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
-- **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
+- **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, clustering validation figure (Fig 18), toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
 - **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
-- **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, toolkit integration with `--stability` flag
-- **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns; toolkit integration with `--protvar` flag
+- **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, stability cross-validation figure (Fig 17 Panel A+C), toolkit integration with `--stability` flag
+- **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns, stability cross-validation figure (Fig 17 Panel B+C); toolkit integration with `--protvar` flag
 - **Disease & Pathway Integration (Phase E):** UniProt disease/PTM/GO/drug-target annotation (offline XML + API fallback), Reactome pathway mapping with per-pathway PPI enrichment, NetworkX network analysis, 3 visualisation figures (Figs 14-16), toolkit integration with `--disease` and `--pathways` flags, 24 new CSV columns
 
 ### Planned
@@ -720,7 +722,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **936 tests** across 18 modules (919 active + 17 future placeholders):
+The test suite contains **942 tests** across 18 modules (925 active + 17 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -728,7 +730,7 @@ The test suite contains **936 tests** across 18 modules (919 active + 17 future 
 | test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
 | test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
 | test_toolkit.py | 54 | File discovery, quality classification, CSV, enrichment, sequences |
-| test_visualise_results.py | 54 | Figure generation (Figs 1-16 incl. Phase E), variant/disease detail parsing, data loading, CLI |
+| test_visualise_results.py | 60 | Figure generation (Figs 1-18 incl. Phase E, stability, clustering), variant/disease detail parsing, data loading, CLI |
 | test_integration.py | 8 | Cross-module pipeline, data flow |
 | test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
 | test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |

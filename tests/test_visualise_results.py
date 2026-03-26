@@ -38,6 +38,8 @@ from visualise_results import (
     plot_fig14_pathway_coherence,
     plot_fig15_disease_enrichment,
     plot_fig16_pathway_network,
+    plot_fig17_stability_crossvalidation,
+    plot_fig18_clustering_validation,
     _get_paradox_mask,
     _parse_variant_details,
     _aggregate_all_variants,
@@ -589,8 +591,8 @@ class TestPhaseEFigureGeneration:
         assert not any(f.startswith("16b_") for f in os.listdir(phase_e_figures_dir)), \
             "16b_Disease_Network.png should not exist"
 
-    def test_fig18_removed(self):
-        """Verify Fig 18 function no longer exists."""
+    def test_fig18_ptm_removed(self):
+        """Verify old PTM Fig 18 function no longer exists."""
         assert not hasattr(visualise_results, 'plot_fig18_ptm_interface_landscape'), \
             "plot_fig18_ptm_interface_landscape should have been removed"
 
@@ -603,3 +605,120 @@ class TestPhaseEFigureGeneration:
         """Fig 15 should gracefully skip when disease columns are missing."""
         df = pd.DataFrame({'iptm': [0.5], 'pdockq': [0.3]})
         plot_fig15_disease_enrichment(df)
+
+
+class TestStabilityFigure:
+    """Tests for Fig 17: Stability Predictor Cross-Validation."""
+
+    @pytest.fixture(scope="class")
+    def stability_figures_dir(self, test_output_dir):
+        fig_dir = test_output_dir / "stability_figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        visualise_results.OUTPUT_DIR = str(fig_dir)
+        return fig_dir
+
+    @pytest.fixture(scope="class")
+    def stability_df(self):
+        """30-row synthetic DataFrame with stability + ProtVar columns."""
+        rng = np.random.RandomState(42)
+        tiers = ['High'] * 10 + ['Medium'] * 10 + ['Low'] * 10
+        rows = []
+        for i, tier in enumerate(tiers):
+            eve_a = rng.uniform(0.1, 0.9) if rng.random() > 0.7 else np.nan
+            eve_b = rng.uniform(0.1, 0.9) if rng.random() > 0.7 else np.nan
+            am_a = rng.uniform(0.1, 0.9) if rng.random() > 0.2 else np.nan
+            am_b = rng.uniform(0.1, 0.9) if rng.random() > 0.2 else np.nan
+            fx_a = rng.uniform(0.1, 5.0) if rng.random() > 0.4 else np.nan
+            fx_b = rng.uniform(0.1, 5.0) if rng.random() > 0.4 else np.nan
+            rows.append({
+                'quality_tier_v2': tier,
+                'pdockq': rng.uniform(0.1, 0.8),
+                'eve_score_mean_a': eve_a,
+                'eve_score_mean_b': eve_b,
+                'eve_coverage_a': 0.5 if pd.notna(eve_a) else 0.0,
+                'eve_coverage_b': 0.5 if pd.notna(eve_b) else 0.0,
+                'protvar_am_mean_a': am_a,
+                'protvar_am_mean_b': am_b,
+                'protvar_foldx_mean_a': fx_a,
+                'protvar_foldx_mean_b': fx_b,
+            })
+        return pd.DataFrame(rows)
+
+    def test_fig17_generates(self, stability_df, stability_figures_dir):
+        plot_fig17_stability_crossvalidation(stability_df)
+        assert any(f.startswith("17_") for f in os.listdir(stability_figures_dir)), \
+            "Fig 17 output file not found"
+
+    def test_fig17_skips_missing_columns(self, stability_figures_dir):
+        """Fig 17 should gracefully skip when stability columns are missing."""
+        df = pd.DataFrame({'iptm': [0.5], 'pdockq': [0.3]})
+        plot_fig17_stability_crossvalidation(df)
+
+    def test_fig17_handles_all_nan_eve(self, stability_figures_dir):
+        """Fig 17 Panel A skips gracefully when all EVE values are NaN."""
+        rng = np.random.RandomState(99)
+        rows = []
+        for tier in ['High'] * 10 + ['Medium'] * 10 + ['Low'] * 10:
+            rows.append({
+                'quality_tier_v2': tier,
+                'pdockq': rng.uniform(0.1, 0.8),
+                'eve_score_mean_a': np.nan,
+                'eve_score_mean_b': np.nan,
+                'eve_coverage_a': 0.0,
+                'eve_coverage_b': 0.0,
+                'protvar_am_mean_a': rng.uniform(0.1, 0.9),
+                'protvar_am_mean_b': rng.uniform(0.1, 0.9),
+                'protvar_foldx_mean_a': rng.uniform(0.1, 5.0),
+                'protvar_foldx_mean_b': rng.uniform(0.1, 5.0),
+            })
+        df = pd.DataFrame(rows)
+        # Should not crash — Panel A shows "Insufficient overlap"
+        plot_fig17_stability_crossvalidation(df)
+
+
+class TestClusteringFigure:
+    """Tests for Fig 18: Sequence Clustering Validation."""
+
+    @pytest.fixture(scope="class")
+    def clustering_figures_dir(self, test_output_dir):
+        fig_dir = test_output_dir / "clustering_figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        visualise_results.OUTPUT_DIR = str(fig_dir)
+        return fig_dir
+
+    @pytest.fixture(scope="class")
+    def clustering_df(self):
+        """30-row synthetic DataFrame with clustering columns."""
+        rng = np.random.RandomState(42)
+        tiers = ['High'] * 10 + ['Medium'] * 10 + ['Low'] * 10
+        rows = []
+        for i, tier in enumerate(tiers):
+            is_homo = i < 5  # 5 homodimers
+            seq_count = rng.randint(5, 100)
+            if is_homo:
+                shared_count = seq_count  # Perfect y=x for homodimers
+            else:
+                shared_count = rng.randint(0, seq_count + 1)
+            rows.append({
+                'quality_tier_v2': tier,
+                'complex_type': 'homodimer' if is_homo else 'heterodimer',
+                'sequence_cluster_count': seq_count,
+                'shared_cluster_count': shared_count,
+                'pdockq': rng.uniform(0.1, 0.8),
+            })
+        return pd.DataFrame(rows)
+
+    def test_fig18_generates(self, clustering_df, clustering_figures_dir):
+        plot_fig18_clustering_validation(clustering_df)
+        assert any(f.startswith("18_") for f in os.listdir(clustering_figures_dir)), \
+            "Fig 18 output file not found"
+
+    def test_fig18_skips_missing_columns(self, clustering_figures_dir):
+        """Fig 18 should gracefully skip when clustering columns are missing."""
+        df = pd.DataFrame({'iptm': [0.5], 'pdockq': [0.3]})
+        plot_fig18_clustering_validation(df)
+
+    def test_fig18_homodimer_ground_truth(self, clustering_df):
+        """All homodimers in fixture should have shared == sequence."""
+        homo = clustering_df[clustering_df['complex_type'] == 'homodimer']
+        assert (homo['shared_cluster_count'] == homo['sequence_cluster_count']).all()
