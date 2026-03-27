@@ -29,7 +29,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Offline AlphaMissense + monomeric FoldX scoring: pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) loaded from local files for instant variant scoring with no API dependency
 - UniProt disease annotations: offline XML parsing of disease associations, PTM sites, GO terms, and drug target status with API fallback for missing proteins
 - Reactome pathway mapping: per-pathway PPI enrichment via STRING API, NetworkX network analysis, and 3 pathway/disease visualisation figures (Figs 14-16)
-- 936-test suite (918 passing + 1 skipped + 17 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- 942-test suite (924 passing + 1 skipped + 17 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -744,7 +744,7 @@ The test suite contains **942 tests** across 18 modules (925 active + 17 future 
 | test_pathway_network.py | 83 | Reactome loading, pathway quality, NetworkX, annotation, per-pathway PPI enrichment, CLI |
 | test_future_aims.py | 18 + 17 | 18 real tests (7 database + 6 variant + 1 EVE + 1 ProtVar + 3 pathway) + 17 future placeholders |
 
-**Results:** 918 passing, 1 skipped (Fig 10 — all test complexes are dimers), 17 future placeholders (deselected by default)
+**Results:** 924 passing, 1 skipped (Fig 10 — all test complexes are dimers), 17 future placeholders (deselected by default)
 
 **Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `alphamissense` (AlphaMissense scoring), `disease` (UniProt disease annotation), `pathways` (pathway mapping and network), `phase_e` (Phase E figure tests), `future` (unimplemented features)
 
