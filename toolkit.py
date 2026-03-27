@@ -1297,6 +1297,20 @@ Examples:
                              "optionally run STRING API enrichment. Requires --enrich. "
                              "Uses data/pathways/ for local Reactome files. "
                              "STRING API enrichment skipped with --no-api.")
+    parser.add_argument("--pymol", action="store_true",
+                        help="Generate PyMOL .pml scripts for High-tier complexes. "
+                             "Requires --interface --pae. Scripts written to "
+                             "{dir}/pymol_scripts/ by default.")
+    parser.add_argument("--pymol-output", metavar="DIR", default=None,
+                        help="Custom output directory for PyMOL scripts. "
+                             "Default: ./pymol_scripts/")
+    parser.add_argument("--pymol-render", action="store_true",
+                        help="Include ray-tracing + PNG rendering commands in "
+                             "generated .pml scripts (for pymol -c batch mode).")
+    parser.add_argument("--pymol-min-tier", default="High",
+                        choices=["High", "Medium", "Low"],
+                        help="Minimum quality tier for PyMOL script generation. "
+                             "Default: High.")
     return parser
 
 
@@ -1381,6 +1395,12 @@ def main() -> None:
             print("Error: --pathways requires --enrich", file=sys.stderr)
             sys.exit(1)
     args._pathways_enabled = getattr(args, 'pathways', False)
+
+    if args.pymol:
+        if not (args.interface and args.pae):
+            print("Error: --pymol requires --interface --pae", file=sys.stderr)
+            sys.exit(1)
+    args._pymol_enabled = getattr(args, 'pymol', False)
 
     if args.resume:
         args.checkpoint = True
@@ -1919,6 +1939,22 @@ def main() -> None:
     if args.export_interfaces:
         exported_count = write_interface_exports(results, args.export_interfaces)
         print(f"Interface export: {args.export_interfaces} ({exported_count} complexes)")
+
+    # Generate PyMOL scripts if requested
+    if args._pymol_enabled:
+        import time as _time
+        from pymol_scripts import generate_pymol_scripts_for_results
+        _pymol_start = _time.time()
+        pymol_dir = args.pymol_output or os.path.join(os.getcwd(), "pymol_scripts")
+        n_pymol = generate_pymol_scripts_for_results(
+            results, pdb_dir=args.dir, output_dir=pymol_dir,
+            min_tier=args.pymol_min_tier,
+            include_variants=getattr(args, '_variants_enabled', False),
+            render_png=args.pymol_render, verbose=True,
+        )
+        _pymol_elapsed = _time.time() - _pymol_start
+        print(f"PyMOL scripts: {n_pymol} .pml files in {pymol_dir} "
+              f"({_pymol_elapsed:.1f}s)")
 
     print(f"{'=' * 60}")
 

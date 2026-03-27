@@ -267,17 +267,19 @@ class TestVisualisationRobustness:
 
 # ── PyMOL Script Generation ──────────────────────────────────────
 
-@pytest.mark.future
+@pytest.mark.pymol
 class TestPyMOLScripts:
-    """Tests for PyMOL .pml script generation."""
+    """Cross-references to PyMOL script generation tests in test_pymol_scripts.py.
 
-    def test_pymol_script_generated(self):
-        """PyMOL script generated for a High-tier complex."""
-        pytest.skip("Not yet implemented - pymol_scripts.py not built")
-
-    def test_pymol_script_valid_syntax(self):
-        """Generated .pml file has valid PyMOL commands."""
-        pytest.skip("Not yet implemented")
+    These placeholders originally lived here as @pytest.mark.future stubs.
+    Full test suite (~60 tests) now in tests/test_pymol_scripts.py covering:
+    - Constants, PML header, chain/pLDDT colouring
+    - Interface highlighting, variant highlighting
+    - Script assembly, variant detail parsing
+    - Script generation with real PDBs, py3Dmol fallback
+    - CLI subcommands, regression tests
+    """
+    pass
 
 
 # ── Pathway & Network Integration ────────────────────────────────

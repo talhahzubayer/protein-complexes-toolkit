@@ -29,7 +29,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Offline AlphaMissense + monomeric FoldX scoring: pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) loaded from local files for instant variant scoring with no API dependency
 - UniProt disease annotations: offline XML parsing of disease associations, PTM sites, GO terms, and drug target status with API fallback for missing proteins
 - Reactome pathway mapping: per-pathway PPI enrichment via STRING API, NetworkX network analysis, and 3 pathway/disease visualisation figures (Figs 14-16)
-- 942-test suite (924 passing + 1 skipped + 17 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- PyMOL script generation: layered `.pml` command files with chain colouring, pLDDT confidence bands, interface residue highlighting, and variant position colouring by structural context; `py3Dmol` fallback for in-notebook rendering
+- 1002-test suite (984 passing + 1 skipped + 15 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -51,10 +52,11 @@ protein-complexes-toolkit/
 ├── protvar_client.py        # Offline AlphaMissense + monomeric FoldX scorer (local data files)
 ├── disease_annotations.py   # UniProt disease/PTM/GO/drug-target annotation
 ├── pathway_network.py       # Reactome pathway mapping, PPI enrichment, NetworkX networks
+├── pymol_scripts.py         # PyMOL .pml script generation and py3Dmol fallback
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (919 tests + 17 future placeholders)
+├── tests/                   # Test suite (985 tests + 15 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -73,6 +75,7 @@ protein-complexes-toolkit/
 │   ├── test_protvar_client.py
 │   ├── test_disease_annotations.py
 │   ├── test_pathway_network.py
+│   ├── test_pymol_scripts.py
 │   └── offline_test_data/
 │       └── databases/                            # Small database excerpts for offline testing
 ├── data/                                         # External databases (not included in repo)
@@ -145,6 +148,12 @@ read_af2_nojax.py ──▶ pdockq.py ──▶ interface_analysis.py ──▶ 
                                              (Reactome pathway mapping,
                                               per-pathway PPI enrichment,
                                               NetworkX network analysis)
+                                                           │
+                                                           ▼ (optional --pymol)
+                                                pymol_scripts.py
+                                             (PyMOL .pml script generation,
+                                              chain/pLDDT/interface/variant
+                                              colouring, py3Dmol fallback)
 ```
 
 ### Database Ingestion & ID Mapping Pipeline
@@ -289,18 +298,18 @@ data/
 │   ├── homo_sapiens_variation.txt             (~2.2 GB)
 │   ├── variant_summary.txt                    (~1.1 GB)
 │   └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
-└── stability/
-    ├── HUMAN_9606_idmapping.dat               # UniProt ID mapping (~145 MB)
-    ├── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
-    │   ├── 1433G_HUMAN.csv
-    │   ├── 1433Z_HUMAN.csv
-    │   └── ...
-    ├── AlphaMissense_aa_substitutions.tsv     # AlphaMissense pathogenicity (~6.3 GB)
-    └── afdb_foldx_export_20250210.csv         # AFDB FoldX DDG + pLDDT (~7.7 GB)
-├── pathways/
-│   ├── uniprot_sprot_human.xml                 # UniProt reviewed human entries (~1.02 GB)
-│   ├── UniProt2Reactome_All_Levels.txt         # UniProt-Reactome mappings (~110 MB)
-│   └── ReactomePathwaysRelation.txt            # Reactome pathway hierarchy (~611 KB)
+├── stability/
+│   ├── HUMAN_9606_idmapping.dat               # UniProt ID mapping (~145 MB)
+│   ├── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
+│   │   ├── 1433G_HUMAN.csv
+│   │   ├── 1433Z_HUMAN.csv
+│   │   └── ...
+│   ├── AlphaMissense_aa_substitutions.tsv     # AlphaMissense pathogenicity (~6.3 GB)
+│   └── afdb_foldx_export_20250210.csv         # AFDB FoldX DDG + pLDDT (~7.7 GB)
+└─── pathways/
+    ├── uniprot_sprot_human.xml                 # UniProt reviewed human entries (~1.02 GB)
+    ├── UniProt2Reactome_All_Levels.txt         # UniProt-Reactome mappings (~110 MB)
+    └── ReactomePathwaysRelation.txt            # Reactome pathway hierarchy (~611 KB)
 ```
 
 
@@ -527,7 +536,7 @@ python pathway_network.py network --csv results.csv --output-dir Output
 
 ```bash
 # Full pipeline with all features
-python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar --disease --pathways
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --enrich data/ppi/9606.protein.aliases.v12.0.txt --databases data/ppi/ --clustering --variants --stability --protvar --disease --pathways --pymol
 ```
 
 ### Database Ingestion & ID Mapping
@@ -714,15 +723,15 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, stability cross-validation figure (Fig 17 Panel A+C), toolkit integration with `--stability` flag
 - **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns, stability cross-validation figure (Fig 17 Panel B+C); toolkit integration with `--protvar` flag
 - **Disease & Pathway Integration (Phase E):** UniProt disease/PTM/GO/drug-target annotation (offline XML + API fallback), Reactome pathway mapping with per-pathway PPI enrichment, NetworkX network analysis, 3 visualisation figures (Figs 14-16), toolkit integration with `--disease` and `--pathways` flags, 24 new CSV columns
+- **PyMOL Visualisation (Phase F):** Layered `.pml` script generation with chain colouring, pLDDT confidence bands (canonical AF2 4-band scheme), interface residue highlighting (sticks), variant position colouring by structural context (spheres), `py3Dmol` in-notebook fallback, tqdm progress bar, standalone CLI (`generate` + `batch` subcommands), toolkit integration with `--pymol` flag
 
 ### Planned
-- **PyMOL Visualisation:** Generate `.pml` scripts for batch structure rendering with interface highlighting
 - **Million-Complex Production Run:** Full pipeline validation on large-scale AlphaFold-Multimer dataset
 
 
 ## Testing
 
-The test suite contains **942 tests** across 18 modules (925 active + 17 future placeholders):
+The test suite contains **1002 tests** across 19 modules (985 active + 15 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -742,11 +751,12 @@ The test suite contains **942 tests** across 18 modules (925 active + 17 future 
 | test_protvar_client.py | 88 | Offline AlphaMissense TSV loading, AFDB FoldX CSV loading, AM variant parsing, combined index building, score lookup, chain scoring, detail formatting, annotation, CSV columns, CLI, regression |
 | test_disease_annotations.py | 96 | UniProt disease/PTM/GO parsing, API fallback, formatting, annotation, CLI, regression |
 | test_pathway_network.py | 83 | Reactome loading, pathway quality, NetworkX, annotation, per-pathway PPI enrichment, CLI |
-| test_future_aims.py | 18 + 17 | 18 real tests (7 database + 6 variant + 1 EVE + 1 ProtVar + 3 pathway) + 17 future placeholders |
+| test_pymol_scripts.py | 60 | PyMOL .pml generation, PML syntax, chain/pLDDT/interface/variant colouring, py3Dmol fallback, CLI, regression |
+| test_future_aims.py | 18 + 15 | 18 real tests (7 database + 6 variant + 1 EVE + 1 ProtVar + 3 pathway) + 15 future placeholders |
 
-**Results:** 924 passing, 1 skipped (Fig 10 — all test complexes are dimers), 17 future placeholders (deselected by default)
+**Results:** 984 passing, 1 skipped (Fig 10 — all test complexes are dimers), 15 future placeholders (deselected by default)
 
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `alphamissense` (AlphaMissense scoring), `disease` (UniProt disease annotation), `pathways` (pathway mapping and network), `phase_e` (Phase E figure tests), `future` (unimplemented features)
+**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `alphamissense` (AlphaMissense scoring), `disease` (UniProt disease annotation), `pathways` (pathway mapping and network), `phase_e` (Phase E figure tests), `pymol` (PyMOL script generation), `future` (unimplemented features)
 
 
 ## Acknowledgements
