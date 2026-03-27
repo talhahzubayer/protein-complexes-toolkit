@@ -203,6 +203,8 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **pathway_network.py**: Reactome pathway mapping with per-pathway PPI enrichment and NetworkX network analysis. Offline-first: parses `UniProt2Reactome_All_Levels.txt` for pathway mappings and `ReactomePathwaysRelation.txt` for hierarchy. Per-pathway PPI enrichment via `invert_reactome_index()` + `run_per_pathway_ppi_enrichment()` using the STRING API (skipped with `--no-api`). Builds NetworkX interaction graphs with configurable pDockQ threshold (`NETWORK_PDOCKQ_THRESHOLD=0.23`). `annotate_results_with_pathways()` adds 10 CSV columns. Optional NetworkX dependency (`_HAS_NETWORKX` guard). Standalone CLI supports `summary`, `network`, and `enrichment` subcommands.
 
+**pymol_scripts.py**: Generates PyMOL `.pml` command files for structural visualisation of protein complexes. Produces layered scripts with 5 visualisation sections: PDB loading with cartoon representation, chain colouring (10-chain palette), pLDDT confidence colouring (canonical AlphaFold2 4-band scheme: blue >90, cyan 70-90, yellow 50-70, orange <50), interface residue highlighting as sticks (hotpink), and variant position highlighting as spheres coloured by structural context (red=interface_core, orange=interface_rim, yellow=surface, gray=buried). `_build_pdb_lookup()` scans the PDB directory using `toolkit.parse_complex_name()` for AlphaFold2 suffix-aware file discovery. `generate_pymol_scripts_for_results()` is the main entry point from `toolkit.py`, filtering by `quality_tier_v2` with tqdm progress bar. `generate_py3dmol_view()` provides an in-notebook fallback for Jupyter rendering (`_HAS_PY3DMOL` guard). Standalone CLI supports `generate` (single PDB → .pml) and `batch` (CSV + PDB dir → .pml for qualifying complexes) subcommands. Toolkit integration via `--pymol` (requires `--interface --pae`), `--pymol-output`, `--pymol-render`, and `--pymol-min-tier` flags. No CSV columns added — script generation is a side-effect output.
+
 **variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
 
@@ -530,6 +532,29 @@ python pathway_network.py summary --csv results.csv
 
 # Standalone: build and plot pathway networks
 python pathway_network.py network --csv results.csv --output-dir Output
+```
+
+### PyMOL Script Generation
+
+```bash
+# With PyMOL script generation (requires --interface --pae)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --pymol
+
+# With custom output directory and rendering commands enabled
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --pymol --pymol-output Output/pymol_scripts/ --pymol-render
+
+# Generate for Medium+ tier (default: High only)
+python toolkit.py --dir /path/to/models --output results.csv --interface --pae --pymol --pymol-min-tier Medium
+
+# Standalone: generate script for a single PDB
+python pymol_scripts.py generate --pdb /path/to/complex.pdb
+
+# Standalone: batch generate from existing CSV
+python pymol_scripts.py batch --csv results.csv --pdb-dir /path/to/models
+
+# Run generated scripts in PyMOL
+pymol pymol_scripts/A0A0B4J2C3_P24534.pml          # Interactive
+pymol -c pymol_scripts/A0A0B4J2C3_P24534.pml       # Headless (requires --pymol-render)
 ```
 
 ### Full Pipeline
