@@ -67,7 +67,7 @@ STRING_API_BACKOFF_FACTOR = 2.0     # Exponential backoff multiplier
 STRING_API_TIMEOUT = 30             # Seconds per HTTP request
 
 # Enrichment batch limit (STRING API constraint)
-STRING_API_MAX_ENRICHMENT_BATCH = 2000  # Max proteins per enrichment call
+STRING_API_MAX_ENRICHMENT_BATCH = 500   # Max proteins per enrichment call
 
 # Default cache directory (auto-caching enabled by default)
 STRING_API_DEFAULT_CACHE_DIR = Path(__file__).parent / "data" / "string_api_cache"

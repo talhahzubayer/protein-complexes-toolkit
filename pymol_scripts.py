@@ -82,6 +82,10 @@ VARIANT_CONTEXT_COLOURS = {
 # Default fallback colour for unknown variant context
 VARIANT_DEFAULT_COLOUR = 'white'
 
+# Sphere scale for pathogenic vs non-pathogenic variants
+VARIANT_SPHERE_SCALE_PATHOGENIC = 0.6
+VARIANT_SPHERE_SCALE_DEFAULT = 0.3
+
 # Rendering defaults
 DEFAULT_RAY_WIDTH = 2400
 DEFAULT_RAY_HEIGHT = 1800
@@ -100,6 +104,45 @@ try:
     _HAS_PY3DMOL = True
 except ImportError:
     _HAS_PY3DMOL = False
+
+
+# Mapping from PyMOL colour names to CSS hex for py3Dmol compatibility
+PYMOL_TO_HEX = {
+    'marine': '#0000CD',
+    'salmon': '#FA8072',
+    'forest': '#228B22',
+    'wheat': '#F5DEB3',
+    'slate': '#708090',
+    'lightorange': '#FFB347',
+    'palegreen': '#98FB98',
+    'lightpink': '#FFB6C1',
+    'palecyan': '#AFEEEE',
+    'lightteal': '#20B2AA',
+    'hotpink': '#FF69B4',
+    'red': '#FF0000',
+    'orange': '#FFA500',
+    'yellow': '#FFFF00',
+    'gray70': '#B3B3B3',
+    'white': '#FFFFFF',
+}
+
+# Regex for parsing protvar detail strings
+# Format: REF{POS}ALT:am={SCORE}:{CLASS}:foldx={DDG}
+_PROTVAR_DETAIL_RE = re.compile(
+    r'^([A-Z*?])(\d+)([A-Z*?]):am=([^:]*):([^:]*):foldx=(.+)$'
+)
+
+# AlphaMissense classification colours (hex for PyMOL CGO compatibility)
+PROTVAR_AM_COLOURS = {
+    'pathogenic': '0xFF0000',   # red
+    'ambiguous':  '0xFFA500',   # orange
+    'benign':     '0x0000FF',   # blue
+}
+PROTVAR_AM_SCALES = {
+    'pathogenic': 0.8,
+    'ambiguous':  0.5,
+    'benign':     0.2,
+}
 
 
 # ── PML Command Generators ──────────────────────────────────────────
@@ -130,23 +173,143 @@ def generate_pml_header(pdb_path: str, complex_name: str) -> str:
     )
 
 
-def generate_chain_colouring(chain_a: str, chain_b: str) -> str:
+def generate_metadata_comments(metadata: dict) -> str:
+    """Generate a metadata comment block for the script header.
+
+    Args:
+        metadata: Dict with optional keys: quality_tier_v2, composite_score,
+            iptm, pdockq, n_pathogenic_interface_variants, is_drug_target_a,
+            is_drug_target_b, gene_symbol_a, gene_symbol_b.
+
+    Returns:
+        Multi-line comment string, or empty string if metadata is empty/None.
+    """
+    if not metadata:
+        return ''
+
+    lines = ["\n# === Metadata ==="]
+
+    # Quality line
+    parts = []
+    if metadata.get('quality_tier_v2'):
+        parts.append(f"Quality: {metadata['quality_tier_v2']}")
+    if metadata.get('composite_score') not in (None, '', '-'):
+        parts.append(f"Composite: {metadata['composite_score']}")
+    if metadata.get('iptm') not in (None, '', '-'):
+        parts.append(f"ipTM: {metadata['iptm']}")
+    if metadata.get('pdockq') not in (None, '', '-'):
+        parts.append(f"pDockQ: {metadata['pdockq']}")
+    if parts:
+        lines.append(f"# {' | '.join(parts)}")
+
+    # Drug target
+    dt_a = metadata.get('is_drug_target_a', '')
+    dt_b = metadata.get('is_drug_target_b', '')
+    if dt_a or dt_b:
+        lines.append(f"# Drug target: A={'Yes' if dt_a else 'No'}, "
+                      f"B={'Yes' if dt_b else 'No'}")
+
+    # Pathogenic interface variants
+    n_path = metadata.get('n_pathogenic_interface_variants', '')
+    if n_path not in (None, '', '-', '0', 0):
+        lines.append(f"# Pathogenic interface variants: {n_path}")
+
+    return '\n'.join(lines) + '\n'
+
+
+def generate_annotation_comments(
+    gene_a: str = '',
+    gene_b: str = '',
+    disease_details_a: str = '',
+    disease_details_b: str = '',
+    is_drug_target_a: str = '',
+    is_drug_target_b: str = '',
+    reactome_pathways_a: str = '',
+    reactome_pathways_b: str = '',
+) -> str:
+    """Generate biological context annotations as comments and labels.
+
+    Args:
+        gene_a: Gene symbol for chain A.
+        gene_b: Gene symbol for chain B.
+        disease_details_a: Pipe-separated disease strings for chain A.
+        disease_details_b: Pipe-separated disease strings for chain B.
+        is_drug_target_a: Drug target flag for chain A.
+        is_drug_target_b: Drug target flag for chain B.
+        reactome_pathways_a: Pipe-separated pathway strings for chain A.
+        reactome_pathways_b: Pipe-separated pathway strings for chain B.
+
+    Returns:
+        Multi-line string with comments and PyMOL label commands.
+        Empty string if no annotation data is available.
+    """
+    has_data = any([gene_a, gene_b, disease_details_a, disease_details_b,
+                    is_drug_target_a, is_drug_target_b,
+                    reactome_pathways_a, reactome_pathways_b])
+    if not has_data:
+        return ''
+
+    lines = ["\n# === Biological Context ==="]
+
+    if gene_a or gene_b:
+        lines.append(f"# Gene A: {gene_a or '-'} | Gene B: {gene_b or '-'}")
+
+    # Diseases (first 5 per chain)
+    for label, details in [('A', disease_details_a), ('B', disease_details_b)]:
+        if details and details != '-':
+            diseases = [d.strip() for d in details.split('|') if d.strip() and not d.startswith('...')]
+            if diseases:
+                shown = diseases[:5]
+                suffix = f' (+{len(diseases) - 5} more)' if len(diseases) > 5 else ''
+                lines.append(f"# Diseases ({label}): {'; '.join(shown)}{suffix}")
+
+    # Drug target
+    if is_drug_target_a or is_drug_target_b:
+        lines.append(f"# Drug target: A={'Yes' if is_drug_target_a else 'No'}, "
+                      f"B={'Yes' if is_drug_target_b else 'No'}")
+
+    # Pathways (first 5 per chain)
+    for label, pathways in [('A', reactome_pathways_a), ('B', reactome_pathways_b)]:
+        if pathways and pathways != '-':
+            pw_list = [p.strip() for p in pathways.split('|') if p.strip() and not p.startswith('...')]
+            if pw_list:
+                shown = pw_list[:5]
+                suffix = f' (+{len(pw_list) - 5} more)' if len(pw_list) > 5 else ''
+                lines.append(f"# Pathways ({label}): {'; '.join(shown)}{suffix}")
+
+    # Gene symbol labels on the structure
+    if gene_a:
+        lines.append(f'label chain A and name CA and resi 1, "{gene_a}"')
+    if gene_b:
+        lines.append(f'label chain B and name CA and resi 1, "{gene_b}"')
+
+    return '\n'.join(lines) + '\n'
+
+
+def generate_chain_colouring(chain_a: str, chain_b: str, *, homodimer: bool = False) -> str:
     """Generate chain colouring commands.
 
     Args:
         chain_a: First chain identifier.
         chain_b: Second chain identifier.
+        homodimer: If True, both chains use the same colour with chain B
+            at 30% transparency to distinguish subunits.
 
     Returns:
         Multi-line string with chain colour commands.
     """
     colour_a = CHAIN_COLOURS.get(chain_a, 'marine')
-    colour_b = CHAIN_COLOURS.get(chain_b, 'salmon')
-    return (
-        f"\n# -- Chain colouring --\n"
-        f"color {colour_a}, chain {chain_a}\n"
-        f"color {colour_b}, chain {chain_b}\n"
-    )
+    colour_b = colour_a if homodimer else CHAIN_COLOURS.get(chain_b, 'salmon')
+    lines = [
+        f"\n# -- Chain colouring --",
+        f"color {colour_a}, chain {chain_a}",
+        f"color {colour_b}, chain {chain_b}",
+    ]
+    if homodimer:
+        lines.append(f"set cartoon_transparency, 0.3, chain {chain_b}")
+        lines.append(f"# Homodimer: chain {chain_b} shown at 30% transparency")
+    lines.append("scene chain_view, store")
+    return '\n'.join(lines) + '\n'
 
 
 def generate_plddt_colouring() -> str:
@@ -163,6 +326,7 @@ def generate_plddt_colouring() -> str:
         lines.append(f"select {label}, {condition}")
         lines.append(f"color {hex_colour}, {label}")
     lines.append("deselect")
+    lines.append("scene plddt_view, store")
     return '\n'.join(lines) + '\n'
 
 
@@ -214,6 +378,14 @@ def generate_interface_highlighting(
     return '\n'.join(lines) + '\n'
 
 
+def _is_pathogenic(clinical: str) -> bool:
+    """Check whether a clinical significance string indicates pathogenicity."""
+    if not clinical:
+        return False
+    cl = clinical.lower()
+    return 'pathogenic' in cl and 'benign' not in cl
+
+
 def generate_variant_highlighting(
     chain_a: str,
     chain_b: str,
@@ -222,13 +394,17 @@ def generate_variant_highlighting(
 ) -> str:
     """Generate variant position highlighting commands.
 
-    Shows variant positions as spheres coloured by structural context.
+    Shows variant positions as spheres coloured by structural context, with
+    pathogenic variants rendered at a larger sphere scale than benign/VUS.
+
+    Selection naming convention: ``var_{context}[_path]_{chain}`` — kept
+    under 40 characters (PyMOL practical limit ~63).
 
     Args:
         chain_a: First chain identifier.
         chain_b: Second chain identifier.
         variant_records_a: Parsed variant dicts for chain A
-            (keys: position, context). None to skip.
+            (keys: position, context, clinical). None to skip.
         variant_records_b: Parsed variant dicts for chain B. None to skip.
 
     Returns:
@@ -246,11 +422,12 @@ def generate_variant_highlighting(
     if not all_variants:
         return ''
 
-    # Group variants by (chain, context) for efficient selection
-    groups: dict[tuple[str, str], list[int]] = {}
+    # Group variants by (chain, context, is_pathogenic) for efficient selection
+    groups: dict[tuple[str, str, bool], list[int]] = {}
     for chain, var in all_variants:
         ctx = var.get('context', 'unknown')
-        key = (chain, ctx)
+        pathogenic = _is_pathogenic(var.get('clinical', ''))
+        key = (chain, ctx, pathogenic)
         if key not in groups:
             groups[key] = []
         pos = var.get('position')
@@ -263,24 +440,119 @@ def generate_variant_highlighting(
     lines = ["\n# -- Variant positions --"]
     sel_names = []
 
-    for (chain, ctx), positions in sorted(groups.items()):
+    for (chain, ctx, pathogenic), positions in sorted(groups.items()):
         if not positions:
             continue
-        # Create a unique selection name
         safe_ctx = ctx.replace(' ', '_')
-        sel_name = f"var_{safe_ctx}_{chain}"
+        path_tag = '_path' if pathogenic else ''
+        sel_name = f"var_{safe_ctx}{path_tag}_{chain}"
         resi_str = '+'.join(str(r) for r in sorted(set(positions)))
         colour = VARIANT_CONTEXT_COLOURS.get(ctx, VARIANT_DEFAULT_COLOUR)
+        scale = VARIANT_SPHERE_SCALE_PATHOGENIC if pathogenic else VARIANT_SPHERE_SCALE_DEFAULT
 
         lines.append(f"select {sel_name}, chain {chain} and resi {resi_str}")
         lines.append(f"show spheres, {sel_name}")
         lines.append(f"color {colour}, {sel_name}")
+        lines.append(f"set sphere_scale, {scale}, {sel_name}")
         sel_names.append(sel_name)
 
     if sel_names:
         lines.append("deselect")
 
     return '\n'.join(lines) + '\n'
+
+
+def generate_protvar_highlighting(
+    chain_a: str,
+    chain_b: str,
+    protvar_records_a: Optional[list[dict]] = None,
+    protvar_records_b: Optional[list[dict]] = None,
+) -> str:
+    """Generate ProtVar/AlphaMissense highlighting commands.
+
+    Visualises ProtVar predictions with sphere size scaled by AlphaMissense
+    classification and colour encoding AM pathogenicity class.
+
+    Args:
+        chain_a: First chain identifier.
+        chain_b: Second chain identifier.
+        protvar_records_a: Parsed protvar dicts for chain A
+            (keys: position, am_class, am_score, foldx_ddg). None to skip.
+        protvar_records_b: Parsed protvar dicts for chain B. None to skip.
+
+    Returns:
+        Multi-line string with selection and colour commands.
+        Empty string if no records provided.
+    """
+    all_records = []
+    if protvar_records_a:
+        for v in protvar_records_a:
+            all_records.append((chain_a, v))
+    if protvar_records_b:
+        for v in protvar_records_b:
+            all_records.append((chain_b, v))
+
+    if not all_records:
+        return ''
+
+    # Group by (chain, am_class)
+    groups: dict[tuple[str, str], list[int]] = {}
+    for chain, rec in all_records:
+        am_class = rec.get('am_class', 'ambiguous')
+        key = (chain, am_class)
+        if key not in groups:
+            groups[key] = []
+        pos = rec.get('position')
+        if pos is not None:
+            groups[key].append(int(pos))
+
+    if not groups:
+        return ''
+
+    lines = ["\n# -- ProtVar / AlphaMissense predictions --"]
+    sel_names = []
+
+    for (chain, am_class), positions in sorted(groups.items()):
+        if not positions:
+            continue
+        safe_class = am_class.replace(' ', '_')
+        sel_name = f"pv_{safe_class}_{chain}"
+        resi_str = '+'.join(str(r) for r in sorted(set(positions)))
+        colour = PROTVAR_AM_COLOURS.get(am_class, '0xFFA500')
+        scale = PROTVAR_AM_SCALES.get(am_class, 0.5)
+
+        lines.append(f"select {sel_name}, chain {chain} and resi {resi_str}")
+        lines.append(f"show spheres, {sel_name}")
+        lines.append(f"color {colour}, {sel_name}")
+        lines.append(f"set sphere_scale, {scale}, {sel_name}")
+        sel_names.append(sel_name)
+
+    if sel_names:
+        lines.append("deselect")
+
+    return '\n'.join(lines) + '\n'
+
+
+def generate_surface_representation(
+    chain_a: str,
+    chain_b: str,
+    transparency: float = 0.7,
+) -> str:
+    """Generate a semi-transparent surface overlay.
+
+    Args:
+        chain_a: First chain identifier.
+        chain_b: Second chain identifier.
+        transparency: Surface transparency (0.0 opaque, 1.0 invisible).
+
+    Returns:
+        Multi-line string with surface and transparency commands.
+    """
+    return (
+        f"\n# -- Surface representation --\n"
+        f"show surface, chain {chain_a} or chain {chain_b}\n"
+        f"set transparency, {transparency}\n"
+    )
 
 
 def generate_rendering_commands(
@@ -299,6 +571,7 @@ def generate_rendering_commands(
     """
     lines = [
         "\n# -- Camera and rendering --",
+        "scene full_view, store",
         "orient",
         "zoom complete=1",
         "set ray_opaque_background, 1",
@@ -312,6 +585,9 @@ def generate_rendering_commands(
         lines.append(f"{prefix}png {png_path}, dpi={DEFAULT_DPI}")
     else:
         lines.append(f"{prefix}png output.png, dpi={DEFAULT_DPI}")
+
+    if render:
+        lines.append("quit")
 
     return '\n'.join(lines) + '\n'
 
@@ -327,13 +603,20 @@ def build_pymol_script(
     interface_resi_b: list[int],
     variant_records_a: Optional[list[dict]] = None,
     variant_records_b: Optional[list[dict]] = None,
+    protvar_records_a: Optional[list[dict]] = None,
+    protvar_records_b: Optional[list[dict]] = None,
     render_png: bool = False,
     output_png_path: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    annotation: Optional[dict] = None,
+    homodimer: bool = False,
+    show_surface: bool = False,
 ) -> str:
     """Assemble a complete PyMOL .pml script from individual layers.
 
-    Combines header, chain colouring, pLDDT colouring, interface highlighting,
-    optional variant highlighting, and rendering commands into a single script.
+    Section order: header, metadata, annotation, chain colouring (scene),
+    pLDDT colouring (scene), interface highlighting, [surface], variant
+    highlighting, protvar highlighting, rendering (scene full_view).
 
     Args:
         pdb_path: Path to the PDB file.
@@ -344,22 +627,36 @@ def build_pymol_script(
         interface_resi_b: PDB residue numbers at interface on chain B.
         variant_records_a: Parsed variant dicts for chain A. None to skip.
         variant_records_b: Parsed variant dicts for chain B. None to skip.
+        protvar_records_a: Parsed protvar dicts for chain A. None to skip.
+        protvar_records_b: Parsed protvar dicts for chain B. None to skip.
         render_png: If True, uncomment ray/png commands for batch rendering.
         output_png_path: Custom PNG output path. None uses default.
+        metadata: Dict with quality/score info for comment header.
+        annotation: Dict with disease/pathway/gene info for comments.
+        homodimer: If True, use same colour for both chains.
+        show_surface: If True, add semi-transparent surface overlay.
 
     Returns:
         Complete .pml script as a string.
     """
     sections = [
         generate_pml_header(pdb_path, complex_name),
-        generate_chain_colouring(chain_a, chain_b),
+        generate_metadata_comments(metadata),
+        generate_annotation_comments(**annotation) if annotation else '',
+        generate_chain_colouring(chain_a, chain_b, homodimer=homodimer),
         generate_plddt_colouring(),
         generate_interface_highlighting(chain_a, chain_b,
                                         interface_resi_a, interface_resi_b),
+    ]
+    if show_surface:
+        sections.append(generate_surface_representation(chain_a, chain_b))
+    sections.extend([
         generate_variant_highlighting(chain_a, chain_b,
                                       variant_records_a, variant_records_b),
+        generate_protvar_highlighting(chain_a, chain_b,
+                                      protvar_records_a, protvar_records_b),
         generate_rendering_commands(output_png_path, render=render_png),
-    ]
+    ])
     return ''.join(sections)
 
 
@@ -397,6 +694,57 @@ def parse_variant_details_for_pymol(details_str: str) -> list[dict]:
                 'alt': match.group(3),
                 'context': match.group(4),
                 'clinical': match.group(5),
+            })
+
+    return records
+
+
+def parse_protvar_details_for_pymol(details_str: str) -> list[dict]:
+    """Parse a pipe-separated ProtVar details string into dicts for PyMOL.
+
+    Extracts position and AlphaMissense/FoldX data from the format produced by
+    protvar_client.format_protvar_details():
+        REF{POS}ALT:am={SCORE}:{CLASS}:foldx={DDG}
+
+    Args:
+        details_str: Pipe-separated protvar string, e.g.
+            'D5N:am=0.10:benign:foldx=0.81|K23P:am=0.89:pathogenic:foldx=-2.45'.
+
+    Returns:
+        List of dicts with keys: ref, position (int), alt, am_score (float|None),
+        am_class (str), foldx_ddg (float|None).
+        Malformed entries are silently skipped.
+    """
+    if not details_str or details_str == '-':
+        return []
+
+    records = []
+    for part in details_str.split('|'):
+        part = part.strip()
+        if not part or part.startswith('...'):
+            continue
+
+        match = _PROTVAR_DETAIL_RE.match(part)
+        if match:
+            # Parse scores, treating '-' as None
+            am_raw = match.group(4)
+            foldx_raw = match.group(6)
+            try:
+                am_score = float(am_raw) if am_raw and am_raw != '-' else None
+            except ValueError:
+                am_score = None
+            try:
+                foldx_ddg = float(foldx_raw) if foldx_raw and foldx_raw != '-' else None
+            except ValueError:
+                foldx_ddg = None
+
+            records.append({
+                'ref': match.group(1),
+                'position': int(match.group(2)),
+                'alt': match.group(3),
+                'am_score': am_score,
+                'am_class': match.group(5),
+                'foldx_ddg': foldx_ddg,
             })
 
     return records
@@ -470,9 +818,12 @@ def _build_pdb_lookup(pdb_dir: Path) -> dict[str, Path]:
 
     lookup: dict[str, Path] = {}
     for f in pdb_dir.iterdir():
-        if f.is_file() and f.suffix == '.pdb':
+        if f.is_file() and f.suffix.lower() in ('.pdb', '.ent'):
             clean_name, _, _, _ = parse_complex_name(f.name)
             lookup[clean_name] = f
+    if not lookup:
+        import warnings
+        warnings.warn(f"No PDB/ENT files found in {pdb_dir}")
     return lookup
 
 
@@ -528,7 +879,7 @@ def generate_pymol_scripts_for_results(
     qualifying = [
         row for row in results
         if _TIER_ORDER.get(
-            row.get('quality_tier_v2', row.get('quality_tier', 'Low')), 0
+            row.get('quality_tier_v2') or row.get('quality_tier') or 'Low', 0
         ) >= min_tier_val
     ]
 
@@ -562,17 +913,34 @@ def generate_pymol_scripts_for_results(
                 pbar.update(1)
             continue
 
-        # Extract interface data
-        try:
-            iface = extract_interface_data(pdb_path)
-        except Exception as exc:
-            if verbose and not use_bar:
-                print(f"  [PyMOL] Error extracting interface for "
-                      f"{complex_name}: {exc}", file=sys.stderr)
-            n_skipped += 1
-            if use_bar:
-                pbar.update(1)
-            continue
+        # Use pre-computed interface residues if available (from toolkit pipeline or CSV)
+        iface_str_a = row.get('interface_residues_a', '')
+        iface_str_b = row.get('interface_residues_b', '')
+        best_pair = row.get('best_chain_pair', '')
+
+        if (iface_str_a or iface_str_b) and best_pair:
+            if '_' in best_pair:
+                _ch_a, _ch_b = best_pair.split('_', 1)
+            else:
+                _ch_a, _ch_b = 'A', 'B'
+            iface = {
+                'chain_a': _ch_a,
+                'chain_b': _ch_b,
+                'interface_resi_a': [int(x) for x in iface_str_a.split('|') if x],
+                'interface_resi_b': [int(x) for x in iface_str_b.split('|') if x],
+            }
+        else:
+            # Fallback: re-read PDB (standalone CLI or legacy CSV without interface_residues)
+            try:
+                iface = extract_interface_data(pdb_path)
+            except Exception as exc:
+                if verbose and not use_bar:
+                    print(f"  [PyMOL] Error extracting interface for "
+                          f"{complex_name}: {exc}", file=sys.stderr)
+                n_skipped += 1
+                if use_bar:
+                    pbar.update(1)
+                continue
 
         # Parse variant details if available
         var_a = None
@@ -584,6 +952,44 @@ def generate_pymol_scripts_for_results(
                 var_a = parse_variant_details_for_pymol(details_a)
             if details_b:
                 var_b = parse_variant_details_for_pymol(details_b)
+
+        # Parse protvar details if available
+        pv_a = None
+        pv_b = None
+        if include_variants:
+            pv_details_a = row.get('protvar_details_a', '')
+            pv_details_b = row.get('protvar_details_b', '')
+            if pv_details_a:
+                pv_a = parse_protvar_details_for_pymol(pv_details_a)
+            if pv_details_b:
+                pv_b = parse_protvar_details_for_pymol(pv_details_b)
+
+        # Build metadata dict from row
+        metadata = {
+            'quality_tier_v2': row.get('quality_tier_v2', ''),
+            'composite_score': row.get('interface_confidence_score', ''),
+            'iptm': row.get('iptm', ''),
+            'pdockq': row.get('pdockq', ''),
+            'n_pathogenic_interface_variants': row.get('n_pathogenic_interface_variants', ''),
+            'is_drug_target_a': row.get('is_drug_target_a', ''),
+            'is_drug_target_b': row.get('is_drug_target_b', ''),
+        }
+
+        # Build annotation dict from row
+        annotation = {
+            'gene_a': row.get('gene_symbol_a', ''),
+            'gene_b': row.get('gene_symbol_b', ''),
+            'disease_details_a': row.get('disease_details_a', ''),
+            'disease_details_b': row.get('disease_details_b', ''),
+            'is_drug_target_a': row.get('is_drug_target_a', ''),
+            'is_drug_target_b': row.get('is_drug_target_b', ''),
+            'reactome_pathways_a': row.get('reactome_pathways_a', ''),
+            'reactome_pathways_b': row.get('reactome_pathways_b', ''),
+        }
+
+        # Detect homodimer
+        is_homodimer = (row.get('protein_a', '') == row.get('protein_b', '')
+                        and row.get('protein_a', '') != '')
 
         # Build PNG output path if rendering
         png_path = None
@@ -600,8 +1006,13 @@ def generate_pymol_scripts_for_results(
             interface_resi_b=iface['interface_resi_b'],
             variant_records_a=var_a,
             variant_records_b=var_b,
+            protvar_records_a=pv_a,
+            protvar_records_b=pv_b,
             render_png=render_png,
             output_png_path=png_path,
+            metadata=metadata,
+            annotation=annotation,
+            homodimer=is_homodimer,
         )
 
         # Write .pml file
@@ -670,22 +1081,23 @@ def generate_py3dmol_view(
     view = py3Dmol.view(width=width, height=height)
     view.addModel(pdb_string, 'pdb')
 
-    # Chain colouring (cartoon)
-    colour_a = CHAIN_COLOURS.get(chain_a, 'marine')
-    colour_b = CHAIN_COLOURS.get(chain_b, 'salmon')
+    # Chain colouring (cartoon) — use hex for py3Dmol compatibility
+    colour_a = PYMOL_TO_HEX.get(CHAIN_COLOURS.get(chain_a, 'marine'), '#0000CD')
+    colour_b = PYMOL_TO_HEX.get(CHAIN_COLOURS.get(chain_b, 'salmon'), '#FA8072')
     view.setStyle({'chain': chain_a}, {'cartoon': {'color': colour_a}})
     view.setStyle({'chain': chain_b}, {'cartoon': {'color': colour_b}})
 
     # Interface highlighting (sticks)
+    iface_hex = PYMOL_TO_HEX.get(INTERFACE_COLOUR, '#FF69B4')
     if interface_resi_a:
         view.addStyle(
             {'chain': chain_a, 'resi': interface_resi_a},
-            {'stick': {'color': INTERFACE_COLOUR}},
+            {'stick': {'color': iface_hex}},
         )
     if interface_resi_b:
         view.addStyle(
             {'chain': chain_b, 'resi': interface_resi_b},
-            {'stick': {'color': INTERFACE_COLOUR}},
+            {'stick': {'color': iface_hex}},
         )
 
     # Variant highlighting (spheres by context)
@@ -696,11 +1108,12 @@ def generate_py3dmol_view(
         for var in records:
             pos = var.get('position')
             ctx = var.get('context', 'unknown')
-            colour = VARIANT_CONTEXT_COLOURS.get(ctx, VARIANT_DEFAULT_COLOUR)
+            pymol_colour = VARIANT_CONTEXT_COLOURS.get(ctx, VARIANT_DEFAULT_COLOUR)
+            hex_colour = PYMOL_TO_HEX.get(pymol_colour, pymol_colour)
             if pos is not None:
                 view.addStyle(
                     {'chain': chain, 'resi': int(pos)},
-                    {'sphere': {'color': colour, 'radius': 0.8}},
+                    {'sphere': {'color': hex_colour, 'radius': 0.8}},
                 )
 
     view.zoomTo()

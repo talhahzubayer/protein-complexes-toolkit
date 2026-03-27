@@ -264,15 +264,27 @@ def run_string_enrichment(
         print(f"  Running STRING enrichment for {len(gene_symbols)} proteins "
               f"(batch size: {batch_size})...", file=sys.stderr)
 
+    n_batches = (len(gene_symbols) + batch_size - 1) // batch_size
+    n_failed = 0
     for i in range(0, len(gene_symbols), batch_size):
         batch = gene_symbols[i:i + batch_size]
+        batch_num = i // batch_size + 1
         try:
             result = query_enrichment(batch, cache_dir=cache_dir)
             all_results.append(result)
-        except Exception as e:
             if verbose:
-                print(f"  STRING enrichment batch {i // batch_size + 1} failed: {e}",
+                print(f"    Batch {batch_num}/{n_batches} ({len(batch)} proteins)...",
                       file=sys.stderr)
+        except Exception as e:
+            n_failed += 1
+            if verbose:
+                print(f"    Batch {batch_num}/{n_batches} failed: {e}",
+                      file=sys.stderr)
+
+    if verbose and (all_results or n_failed):
+        total_terms = sum(len(r) for r in all_results)
+        print(f"  STRING enrichment complete: {len(all_results)} batches succeeded, "
+              f"{n_failed} failed, {total_terms} raw terms", file=sys.stderr)
 
     if not all_results:
         return None

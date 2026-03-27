@@ -616,3 +616,435 @@ class TestRegressionComplex1:
         content = (tmp_path / f"{REF_COMPLEX_1}.pml").read_text()
         assert 'plddt_vhigh' in content
         assert 'plddt_vlow' in content
+
+
+# ── Section 13: New Feature Tests ─────────────────────────────────
+
+@pytest.mark.pymol
+class TestSceneManagement:
+    """Tests for PyMOL scene storage commands (Fix #1)."""
+
+    def test_chain_colouring_stores_scene(self):
+        """Chain colouring section stores a chain_view scene."""
+        from pymol_scripts import generate_chain_colouring
+        result = generate_chain_colouring('A', 'B')
+        assert 'scene chain_view, store' in result
+
+    def test_plddt_colouring_stores_scene(self):
+        """pLDDT colouring section stores a plddt_view scene."""
+        from pymol_scripts import generate_plddt_colouring
+        result = generate_plddt_colouring()
+        assert 'scene plddt_view, store' in result
+
+    def test_rendering_stores_full_view_scene(self):
+        """Rendering section stores a full_view scene."""
+        from pymol_scripts import generate_rendering_commands
+        result = generate_rendering_commands()
+        assert 'scene full_view, store' in result
+
+    def test_scene_order_in_complete_script(self):
+        """Scenes appear in correct order: chain_view, plddt_view, full_view."""
+        from pymol_scripts import build_pymol_script
+        script = build_pymol_script('/p.pdb', 'test', 'A', 'B', [10], [20])
+        pos_chain = script.index('scene chain_view')
+        pos_plddt = script.index('scene plddt_view')
+        pos_full = script.index('scene full_view')
+        assert pos_chain < pos_plddt < pos_full
+
+
+@pytest.mark.pymol
+class TestPathogenicityAwareSpheres:
+    """Tests for pathogenic variant sphere scaling (Fixes #4 + #7)."""
+
+    def test_pathogenic_variants_larger_spheres(self):
+        """Pathogenic variants get larger sphere_scale than benign."""
+        from pymol_scripts import generate_variant_highlighting
+        from pymol_scripts import VARIANT_SPHERE_SCALE_PATHOGENIC, VARIANT_SPHERE_SCALE_DEFAULT
+        variants = [
+            {'position': 10, 'context': 'interface_core', 'clinical': 'pathogenic'},
+            {'position': 20, 'context': 'interface_core', 'clinical': 'benign'},
+        ]
+        result = generate_variant_highlighting('A', 'B', variants, None)
+        assert f'sphere_scale, {VARIANT_SPHERE_SCALE_PATHOGENIC}' in result
+        assert f'sphere_scale, {VARIANT_SPHERE_SCALE_DEFAULT}' in result
+
+    def test_pathogenic_selection_name(self):
+        """Pathogenic variants get '_path' suffix in selection name."""
+        from pymol_scripts import generate_variant_highlighting
+        variants = [{'position': 10, 'context': 'interface_core', 'clinical': 'pathogenic'}]
+        result = generate_variant_highlighting('A', 'B', variants, None)
+        assert 'var_interface_core_path_A' in result
+
+    def test_non_pathogenic_selection_name(self):
+        """Non-pathogenic variants have no '_path' suffix."""
+        from pymol_scripts import generate_variant_highlighting
+        variants = [{'position': 10, 'context': 'interface_core', 'clinical': 'benign'}]
+        result = generate_variant_highlighting('A', 'B', variants, None)
+        assert 'var_interface_core_A' in result
+        assert 'var_interface_core_path_A' not in result
+
+    def test_sphere_scale_always_present(self):
+        """Every variant group gets a sphere_scale command."""
+        from pymol_scripts import generate_variant_highlighting
+        variants = [{'position': 10, 'context': 'buried_core', 'clinical': ''}]
+        result = generate_variant_highlighting('A', 'B', variants, None)
+        assert 'sphere_scale' in result
+
+    def test_likely_pathogenic_treated_as_pathogenic(self):
+        """'Likely pathogenic' is treated as pathogenic."""
+        from pymol_scripts import generate_variant_highlighting
+        variants = [{'position': 10, 'context': 'interface_rim', 'clinical': 'Likely pathogenic'}]
+        result = generate_variant_highlighting('A', 'B', variants, None)
+        assert 'var_interface_rim_path_A' in result
+
+
+@pytest.mark.pymol
+class TestMetadataComments:
+    """Tests for generate_metadata_comments() (Fix #6)."""
+
+    def test_metadata_comments_present(self):
+        """Metadata dict produces comment block."""
+        from pymol_scripts import generate_metadata_comments
+        meta = {'quality_tier_v2': 'High', 'iptm': '0.6112', 'pdockq': '0.3301'}
+        result = generate_metadata_comments(meta)
+        assert '# === Metadata ===' in result
+        assert 'Quality: High' in result
+        assert 'ipTM: 0.6112' in result
+
+    def test_metadata_comments_absent(self):
+        """None metadata produces empty string."""
+        from pymol_scripts import generate_metadata_comments
+        assert generate_metadata_comments(None) == ''
+        assert generate_metadata_comments({}) == ''
+
+    def test_metadata_in_complete_script(self):
+        """Metadata section appears in complete script."""
+        from pymol_scripts import build_pymol_script
+        meta = {'quality_tier_v2': 'High'}
+        script = build_pymol_script('/p.pdb', 'test', 'A', 'B', [10], [20],
+                                     metadata=meta)
+        assert 'Metadata' in script
+
+    def test_drug_target_in_metadata(self):
+        """Drug target info appears when provided."""
+        from pymol_scripts import generate_metadata_comments
+        meta = {'is_drug_target_a': 'True', 'is_drug_target_b': ''}
+        result = generate_metadata_comments(meta)
+        assert 'Drug target: A=Yes, B=No' in result
+
+
+@pytest.mark.pymol
+class TestAnnotationComments:
+    """Tests for generate_annotation_comments() (Fix #14)."""
+
+    def test_annotation_with_diseases(self):
+        """Disease details appear as comments."""
+        from pymol_scripts import generate_annotation_comments
+        result = generate_annotation_comments(
+            gene_a='BRCA1', gene_b='TP53',
+            disease_details_a='OMIM:123456:Breast cancer')
+        assert '# === Biological Context ===' in result
+        assert 'BRCA1' in result
+        assert 'Breast cancer' in result
+
+    def test_annotation_empty(self):
+        """No data produces empty string."""
+        from pymol_scripts import generate_annotation_comments
+        assert generate_annotation_comments() == ''
+
+    def test_gene_labels(self):
+        """Gene symbols produce PyMOL label commands."""
+        from pymol_scripts import generate_annotation_comments
+        result = generate_annotation_comments(gene_a='EEF1B2', gene_b='YWHAG')
+        assert 'label chain A' in result
+        assert '"EEF1B2"' in result
+        assert 'label chain B' in result
+        assert '"YWHAG"' in result
+
+    def test_pathway_truncation(self):
+        """More than 5 pathways show truncation note."""
+        from pymol_scripts import generate_annotation_comments
+        pathways = '|'.join(f'R-HSA-{i}:Pathway{i}' for i in range(8))
+        result = generate_annotation_comments(reactome_pathways_a=pathways)
+        assert '+3 more' in result
+
+
+@pytest.mark.pymol
+class TestQuitCommand:
+    """Tests for quit command in batch rendering (Fix #11)."""
+
+    def test_quit_when_render_true(self):
+        """quit command present when render=True."""
+        from pymol_scripts import generate_rendering_commands
+        result = generate_rendering_commands(render=True)
+        assert '\nquit\n' in result
+
+    def test_no_quit_when_render_false(self):
+        """quit command absent when render=False."""
+        from pymol_scripts import generate_rendering_commands
+        result = generate_rendering_commands(render=False)
+        assert 'quit' not in result
+
+
+@pytest.mark.pymol
+class TestPy3DmolHexColours:
+    """Tests for PyMOL-to-hex colour mapping (Fix #13)."""
+
+    def test_pymol_to_hex_covers_chain_colours(self):
+        """PYMOL_TO_HEX contains entries for all CHAIN_COLOURS values."""
+        from pymol_scripts import PYMOL_TO_HEX, CHAIN_COLOURS
+        for colour in CHAIN_COLOURS.values():
+            assert colour in PYMOL_TO_HEX, f"Missing hex mapping for '{colour}'"
+
+    def test_pymol_to_hex_covers_variant_colours(self):
+        """PYMOL_TO_HEX contains entries for all VARIANT_CONTEXT_COLOURS values."""
+        from pymol_scripts import PYMOL_TO_HEX, VARIANT_CONTEXT_COLOURS, VARIANT_DEFAULT_COLOUR
+        for colour in VARIANT_CONTEXT_COLOURS.values():
+            assert colour in PYMOL_TO_HEX, f"Missing hex mapping for '{colour}'"
+        assert VARIANT_DEFAULT_COLOUR in PYMOL_TO_HEX
+
+    def test_pymol_to_hex_covers_interface_colour(self):
+        """PYMOL_TO_HEX contains entry for INTERFACE_COLOUR."""
+        from pymol_scripts import PYMOL_TO_HEX, INTERFACE_COLOUR
+        assert INTERFACE_COLOUR in PYMOL_TO_HEX
+
+
+@pytest.mark.pymol
+class TestHomodimerHandling:
+    """Tests for homodimer same-colour handling (Fix #15)."""
+
+    def test_homodimer_same_colour(self):
+        """Both chains get the same colour when homodimer=True."""
+        from pymol_scripts import generate_chain_colouring, CHAIN_COLOURS
+        result = generate_chain_colouring('A', 'B', homodimer=True)
+        colour_a = CHAIN_COLOURS['A']
+        # Both color commands should use the same colour
+        lines = [l for l in result.split('\n') if l.startswith('color ')]
+        assert len(lines) == 2
+        assert all(colour_a in l for l in lines)
+
+    def test_homodimer_transparency(self):
+        """Chain B gets cartoon_transparency when homodimer=True."""
+        from pymol_scripts import generate_chain_colouring
+        result = generate_chain_colouring('A', 'B', homodimer=True)
+        assert 'cartoon_transparency' in result
+
+    def test_heterodimer_different_colours(self):
+        """Chains get different colours when homodimer=False."""
+        from pymol_scripts import generate_chain_colouring, CHAIN_COLOURS
+        result = generate_chain_colouring('A', 'B', homodimer=False)
+        assert CHAIN_COLOURS['A'] in result
+        assert CHAIN_COLOURS['B'] in result
+        assert 'cartoon_transparency' not in result
+
+
+@pytest.mark.pymol
+class TestProtvarDetailParsing:
+    """Tests for parse_protvar_details_for_pymol() (Fix #3)."""
+
+    def test_parses_standard_format(self):
+        """Parses standard protvar detail format."""
+        from pymol_scripts import parse_protvar_details_for_pymol
+        records = parse_protvar_details_for_pymol(
+            'D5N:am=0.10:benign:foldx=0.81|K23P:am=0.89:pathogenic:foldx=-2.45')
+        assert len(records) == 2
+        assert records[0]['position'] == 5
+        assert records[0]['am_score'] == pytest.approx(0.10)
+        assert records[0]['am_class'] == 'benign'
+        assert records[0]['foldx_ddg'] == pytest.approx(0.81)
+        assert records[1]['am_class'] == 'pathogenic'
+        assert records[1]['foldx_ddg'] == pytest.approx(-2.45)
+
+    def test_empty_returns_empty(self):
+        """Empty string returns empty list."""
+        from pymol_scripts import parse_protvar_details_for_pymol
+        assert parse_protvar_details_for_pymol('') == []
+        assert parse_protvar_details_for_pymol('-') == []
+
+    def test_dash_scores(self):
+        """Missing scores (dash) parsed as None."""
+        from pymol_scripts import parse_protvar_details_for_pymol
+        records = parse_protvar_details_for_pymol('M1A:am=-:ambiguous:foldx=-')
+        assert len(records) == 1
+        assert records[0]['am_score'] is None
+        assert records[0]['foldx_ddg'] is None
+
+    def test_skips_truncation(self):
+        """Skips truncation markers."""
+        from pymol_scripts import parse_protvar_details_for_pymol
+        records = parse_protvar_details_for_pymol(
+            'D5N:am=0.10:benign:foldx=0.81|...(+5 more)')
+        assert len(records) == 1
+
+
+@pytest.mark.pymol
+class TestProtvarHighlighting:
+    """Tests for generate_protvar_highlighting() (Fix #3)."""
+
+    def test_groups_by_am_class(self):
+        """Records are grouped by AlphaMissense class."""
+        from pymol_scripts import generate_protvar_highlighting
+        records = [
+            {'position': 10, 'am_class': 'pathogenic', 'am_score': 0.9, 'foldx_ddg': 1.5},
+            {'position': 20, 'am_class': 'benign', 'am_score': 0.1, 'foldx_ddg': 0.2},
+        ]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert 'pv_pathogenic_A' in result
+        assert 'pv_benign_A' in result
+
+    def test_empty_returns_empty(self):
+        """None/empty records produce empty string."""
+        from pymol_scripts import generate_protvar_highlighting
+        assert generate_protvar_highlighting('A', 'B', None, None) == ''
+        assert generate_protvar_highlighting('A', 'B', [], []) == ''
+
+    def test_sphere_scale_varies_by_class(self):
+        """Different AM classes get different sphere scales."""
+        from pymol_scripts import generate_protvar_highlighting, PROTVAR_AM_SCALES
+        records = [
+            {'position': 10, 'am_class': 'pathogenic'},
+            {'position': 20, 'am_class': 'benign'},
+        ]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert f"sphere_scale, {PROTVAR_AM_SCALES['pathogenic']}" in result
+        assert f"sphere_scale, {PROTVAR_AM_SCALES['benign']}" in result
+
+    def test_section_header(self):
+        """ProtVar section has its own header comment."""
+        from pymol_scripts import generate_protvar_highlighting
+        records = [{'position': 10, 'am_class': 'pathogenic'}]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert 'ProtVar' in result
+
+
+@pytest.mark.pymol
+class TestSurfaceRepresentation:
+    """Tests for generate_surface_representation() (Fix #8)."""
+
+    def test_surface_present_when_enabled(self):
+        """Surface commands generated."""
+        from pymol_scripts import generate_surface_representation
+        result = generate_surface_representation('A', 'B')
+        assert 'show surface' in result
+        assert 'transparency' in result
+
+    def test_default_transparency(self):
+        """Default transparency is 0.7."""
+        from pymol_scripts import generate_surface_representation
+        result = generate_surface_representation('A', 'B')
+        assert '0.7' in result
+
+    def test_no_surface_by_default(self):
+        """build_pymol_script does not include surface by default."""
+        from pymol_scripts import build_pymol_script
+        script = build_pymol_script('/p.pdb', 'test', 'A', 'B', [10], [20])
+        assert 'show surface' not in script
+
+    def test_surface_in_script_when_enabled(self):
+        """build_pymol_script includes surface when show_surface=True."""
+        from pymol_scripts import build_pymol_script
+        script = build_pymol_script('/p.pdb', 'test', 'A', 'B', [10], [20],
+                                     show_surface=True)
+        assert 'show surface' in script
+
+
+@pytest.mark.pymol
+class TestPdbLookupExtensions:
+    """Tests for _build_pdb_lookup .ent support and empty warning (Fix #9)."""
+
+    def test_ent_extension_found(self, tmp_path):
+        """Files with .ent extension are included in lookup."""
+        from pymol_scripts import _build_pdb_lookup
+        # Create a fake .ent file — parse_complex_name needs a plausible name
+        (tmp_path / 'A0A0B4J2C3_P24534.ent').write_text('ATOM test')
+        lookup = _build_pdb_lookup(tmp_path)
+        assert len(lookup) >= 1
+
+    def test_empty_directory_warns(self, tmp_path):
+        """Empty directory emits a UserWarning."""
+        import warnings
+        from pymol_scripts import _build_pdb_lookup
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _build_pdb_lookup(tmp_path)
+            assert len(w) == 1
+            assert 'No PDB/ENT files found' in str(w[0].message)
+
+
+@pytest.mark.pymol
+class TestQualityTierFiltering:
+    """Tests for quality_tier_v2 empty-string handling (Fix #10)."""
+
+    def test_empty_tier_v2_falls_through(self, tmp_path):
+        """Empty quality_tier_v2 falls through to quality_tier."""
+        from pymol_scripts import _TIER_ORDER
+        # Simulate the filtering logic
+        row = {'quality_tier_v2': '', 'quality_tier': 'High'}
+        tier = row.get('quality_tier_v2') or row.get('quality_tier') or 'Low'
+        assert _TIER_ORDER.get(tier, 0) == 3  # High = 3
+
+
+@pytest.mark.pymol
+class TestPrecomputedInterfaceResidues:
+    """Tests for pre-computed interface residue path (Fix #2)."""
+
+    @pytest.mark.slow
+    def test_uses_precomputed_residues(self, ref_pdb_1, tmp_path):
+        """Pre-computed interface_residues_a/b skips extract_interface_data()."""
+        from pymol_scripts import generate_pymol_scripts_for_results
+        results = [{
+            'complex_name': REF_COMPLEX_1,
+            'quality_tier_v2': 'High',
+            'best_chain_pair': 'A_B',
+            'interface_residues_a': '10|20|30',
+            'interface_residues_b': '40|50|60',
+        }]
+        n = generate_pymol_scripts_for_results(
+            results, pdb_dir=str(ref_pdb_1.parent), output_dir=str(tmp_path))
+        assert n == 1
+        content = (tmp_path / f"{REF_COMPLEX_1}.pml").read_text()
+        # Verify the pre-computed residues appear (not the 82 from PDB)
+        assert '10+20+30' in content
+        assert '40+50+60' in content
+
+    @pytest.mark.slow
+    def test_falls_back_to_pdb(self, ref_pdb_1, tmp_path):
+        """Without pre-computed residues, falls back to PDB extraction."""
+        from pymol_scripts import generate_pymol_scripts_for_results
+        results = [{
+            'complex_name': REF_COMPLEX_1,
+            'quality_tier_v2': 'High',
+        }]
+        n = generate_pymol_scripts_for_results(
+            results, pdb_dir=str(ref_pdb_1.parent), output_dir=str(tmp_path))
+        assert n == 1
+        content = (tmp_path / f"{REF_COMPLEX_1}.pml").read_text()
+        # Verify full interface residues from PDB are present
+        import re
+        match_a = re.search(r'select interface_a, chain A and resi (.+)', content)
+        assert match_a
+        resi_a = match_a.group(1).split('+')
+        assert len(resi_a) == REF_INTERFACE_RESIDUES_A
+
+
+@pytest.mark.pymol
+class TestNewConstants:
+    """Tests for new constants introduced in Fixes #3, #4, #7, #13."""
+
+    def test_variant_sphere_scale_constants(self):
+        """VARIANT_SPHERE_SCALE constants are positive floats."""
+        from pymol_scripts import VARIANT_SPHERE_SCALE_PATHOGENIC, VARIANT_SPHERE_SCALE_DEFAULT
+        assert VARIANT_SPHERE_SCALE_PATHOGENIC > VARIANT_SPHERE_SCALE_DEFAULT > 0
+
+    def test_protvar_am_colours_complete(self):
+        """PROTVAR_AM_COLOURS has entries for pathogenic, ambiguous, benign."""
+        from pymol_scripts import PROTVAR_AM_COLOURS
+        assert 'pathogenic' in PROTVAR_AM_COLOURS
+        assert 'ambiguous' in PROTVAR_AM_COLOURS
+        assert 'benign' in PROTVAR_AM_COLOURS
+
+    def test_protvar_am_scales_complete(self):
+        """PROTVAR_AM_SCALES has entries for pathogenic, ambiguous, benign."""
+        from pymol_scripts import PROTVAR_AM_SCALES
+        assert 'pathogenic' in PROTVAR_AM_SCALES
+        assert PROTVAR_AM_SCALES['pathogenic'] > PROTVAR_AM_SCALES['benign']

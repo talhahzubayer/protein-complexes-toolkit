@@ -137,6 +137,7 @@ THREE_TO_ONE = {
 # Interface geometry columns added when --interface is used
 CSV_FIELDNAMES_INTERFACE = [
     'n_interface_contacts', 'n_interface_residues_a', 'n_interface_residues_b',
+    'interface_residues_a', 'interface_residues_b',
     'interface_fraction_a', 'interface_fraction_b', 'interface_symmetry',
     'contacts_per_interface_residue',
     'interface_plddt_a', 'interface_plddt_b', 'interface_plddt_combined',
@@ -422,7 +423,7 @@ def _compute_pdockq_and_chain_info(
             # Find the best interacting chain pair - also handles multi-chain 
             ch_a, ch_b, contact_result = find_best_chain_pair(chain_info, t=8)
             row['n_chains'] = len(chain_info.chain_ids)
-            row['best_chain_pair'] = f'{ch_a}-{ch_b}'
+            row['best_chain_pair'] = f'{ch_a}_{ch_b}'
             row['pdockq'] = round(contact_result.pdockq, 4)
             row['ppv'] = round(contact_result.ppv, 4)
             if len(chain_info.chain_ids) > 2 and verbose:
@@ -587,6 +588,23 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
             export_interfaces=export_interfaces or stash_variant_data,
             verbose=verbose,
         )
+
+        # Stash raw interface residue PDB numbers for PyMOL script generation
+        # (public keys — written to CSV so batch CLI can also skip re-reading PDBs)
+        if contact_result is not None and chain_info is not None:
+            _bp = row.get('best_chain_pair', '')
+            if _bp and '_' in _bp:
+                _ia, _ib = _bp.split('_', 1)
+            else:
+                _ia, _ib = 'A', 'B'
+            row['interface_residues_a'] = '|'.join(
+                str(chain_info.chain_res_numbers[_ia][i])
+                for i in sorted(contact_result.interface_residues_a)
+            )
+            row['interface_residues_b'] = '|'.join(
+                str(chain_info.chain_res_numbers[_ib][i])
+                for i in sorted(contact_result.interface_residues_b)
+            )
 
         # Stash structural data for variant mapping (private keys, stripped before CSV write)
         # SASA is computed here inside the worker to avoid pickling heavy ChainInfo_New
