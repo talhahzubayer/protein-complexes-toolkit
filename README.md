@@ -12,7 +12,7 @@ MSc Applied Bioinformatics Research Project - King's College London
 - JAX-free loading of AlphaFold2 result PKL files (no JAX installation required)
 - pDockQ scoring using the FoldDock sigmoid parameterisation
 - 2-phase interface analysis: structural geometry (Phase 1) and PAE-aware confident contacts (Phase 2)
-- 25-column base CSV output (up to 119 with all features: `--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`) with automated quality flags, paradox detection, and optional enrichment
+- 25-column base CSV output (up to 121 with all features: `--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`) with automated quality flags, paradox detection, and optional enrichment
 - JSONL interface export for downstream analysis
 - Batch processing with multiprocessing, checkpointing, and resume from interruption
 - Generate up to 18 figures with adaptive rendering for datasets from hundreds to millions of complexes
@@ -29,8 +29,8 @@ MSc Applied Bioinformatics Research Project - King's College London
 - Offline AlphaMissense + monomeric FoldX scoring: pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) loaded from local files for instant variant scoring with no API dependency
 - UniProt disease annotations: offline XML parsing of disease associations, PTM sites, GO terms, and drug target status with API fallback for missing proteins
 - Reactome pathway mapping: per-pathway PPI enrichment via STRING API, NetworkX network analysis, and 3 pathway/disease visualisation figures (Figs 14-16)
-- PyMOL script generation: layered `.pml` command files with chain colouring, pLDDT confidence bands, interface residue highlighting, and variant position colouring by structural context; `py3Dmol` fallback for in-notebook rendering
-- 1002-test suite (984 passing + 1 skipped + 15 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
+- PyMOL script generation: scene-managed `.pml` command files with chain colouring, pLDDT confidence bands, interface residue highlighting (sticks), pathogenicity-aware variant spheres coloured by structural context, ProtVar/AlphaMissense transparency overlay, metadata and biological annotation comments, homodimer handling, `.ent`/`.pdb` file discovery; `py3Dmol` fallback for in-notebook rendering
+- 1055-test suite (1039 passing + 1 skipped + 15 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -56,7 +56,7 @@ protein-complexes-toolkit/
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (985 tests + 15 future placeholders)
+├── tests/                   # Test suite (1040 tests + 15 future placeholders)
 │   ├── conftest.py          # Shared fixtures and path config
 │   ├── test_read_af2_nojax.py
 │   ├── test_pdockq.py
@@ -181,7 +181,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **interface_analysis.py**: 2-phase interface characterisation. Phase 1 (PDB only): contact count, interface fractions, symmetry, density, interface vs bulk pLDDT. Phase 2 (PDB + PKL): PAE mapping with multi-chain offsets, confident contact identification (PAE < 5 Angstrom and pLDDT >= 70), composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 25-column base CSV (up to 119 with all features) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional offline AlphaMissense + monomeric FoldX scoring adds pathogenicity scores, DDG values, and pathogenic variant counts via `--protvar` (requires `--variants`). Optional disease annotation adds UniProt disease/PTM/GO/drug-target data via `--disease` (requires `--enrich`). Optional pathway mapping adds Reactome pathways, per-pathway PPI enrichment, and NetworkX network stats via `--pathways` (requires `--enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
+**toolkit.py**: Batch orchestrator that processes directories of AlphaFold2 predictions using direct module imports. Supports multiprocessing via `ProcessPoolExecutor`, periodic checkpointing (every 50 complexes), and resume from interruption. Produces a 25-column base CSV (up to 121 with all features) and optional JSONL interface export. Implements 2 quality classification schemes. Optional enrichment adds gene symbols, protein names, database source tagging, amino acid sequences, and cross-database evidence types via `--enrich` and `--databases` flags. Optional clustering adds sequence cluster IDs, shared clusters, and homologous pairs via `--clustering` (requires `--enrich`). Optional variant mapping adds per-chain variant counts, interface variant enrichment, and constraint scores via `--variants` (requires `--interface --pae --enrich`). Optional stability scoring adds EVE evolutionary pathogenicity predictions via `--stability` (requires `--variants`). Optional offline AlphaMissense + monomeric FoldX scoring adds pathogenicity scores, DDG values, and pathogenic variant counts via `--protvar` (requires `--variants`). Optional disease annotation adds UniProt disease/PTM/GO/drug-target data via `--disease` (requires `--enrich`). Optional pathway mapping adds Reactome pathways, per-pathway PPI enrichment, and NetworkX network stats via `--pathways` (requires `--enrich`). STRING API validation is on by default during enrichment (disable with `--no-api`).
 
 **visualise_results.py**: Generates up to 18 figures plus supplementary plots and on-demand per-complex PAE heatmaps. Features adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures 11-13 are generated automatically when variant columns are present. Figures 14-16 are generated automatically when disease and pathway columns are present. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`.
 
@@ -197,13 +197,13 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 **stability_scorer.py**: Integrates EVE (Evolutionary model of Variant Effect) pathogenicity predictions with the variant mapping pipeline. Loads per-protein EVE score CSVs keyed by UniProt entry name (e.g. `1433G_HUMAN.csv`) using a `HUMAN_9606_idmapping.dat` mapping file to convert from pipeline accessions (e.g. `P61981`). Lazy-loads only EVE CSVs for proteins in the current run. `annotate_results_with_stability()` adds 8 CSV columns: per-chain mean EVE scores, pathogenic counts, coverage fractions, and pipe-separated stability detail strings. Isoform accessions are automatically stripped to canonical before EVE lookup. Standalone CLI supports `summary` (coverage stats) and `lookup` (per-protein/position score query) subcommands.
 
-**protvar_client.py**: Offline pathogenicity and stability scoring using two pre-computed data files: AlphaMissense pathogenicity scores (`AlphaMissense_aa_substitutions.tsv`, 216M variants from DeepMind) and AFDB monomeric FoldX DDG values (`afdb_foldx_export_20250210.csv`, 209M substitutions from EBI). Both files are streamed with accession/position filtering for memory efficiency. No API dependency — all scoring is local. `annotate_results_with_protvar()` adds 8 CSV columns: per-chain AlphaMissense mean scores, monomeric FoldX mean DDG, AlphaMissense pathogenic variant counts, and pipe-separated detail strings. Isoform accessions are automatically stripped to canonical. Standalone CLI supports `summary` (data statistics) and `lookup` (per-protein/position score query) subcommands.
+**protvar_client.py**: Offline pathogenicity and stability scoring using two pre-computed data files: AlphaMissense pathogenicity scores (`AlphaMissense_aa_substitutions.tsv`, 216M variants from DeepMind) and AFDB monomeric FoldX DDG values (`afdb_foldx_export_20250210.csv`, 209M substitutions from EBI). Both files are streamed with accession/position filtering for memory efficiency. No API dependency - all scoring is local. `annotate_results_with_protvar()` adds 8 CSV columns: per-chain AlphaMissense mean scores, monomeric FoldX mean DDG, AlphaMissense pathogenic variant counts, and pipe-separated detail strings. Isoform accessions are automatically stripped to canonical. Standalone CLI supports `summary` (data statistics) and `lookup` (per-protein/position score query) subcommands.
 
 **disease_annotations.py**: UniProt disease, PTM, GO term, and drug target annotation. Offline-first: streaming `iterparse` of local `uniprot_sprot_human.xml` (20,431 reviewed human entries). API fallback via `fetch_uniprot_annotation_api()` for proteins missing from local XML. Extracts disease associations (with OMIM cross-references), PTM sites (phosphorylation, ubiquitination, glycosylation, lipidation), Gene Ontology terms (biological process + molecular function), and drug target status via Pharmaceutical keyword. `annotate_results_with_disease()` adds 14 CSV columns. Detail fields truncated at `DETAILS_DISPLAY_LIMIT=50` items. Standalone CLI supports `summary` and `lookup` subcommands.
 
 **pathway_network.py**: Reactome pathway mapping with per-pathway PPI enrichment and NetworkX network analysis. Offline-first: parses `UniProt2Reactome_All_Levels.txt` for pathway mappings and `ReactomePathwaysRelation.txt` for hierarchy. Per-pathway PPI enrichment via `invert_reactome_index()` + `run_per_pathway_ppi_enrichment()` using the STRING API (skipped with `--no-api`). Builds NetworkX interaction graphs with configurable pDockQ threshold (`NETWORK_PDOCKQ_THRESHOLD=0.23`). `annotate_results_with_pathways()` adds 10 CSV columns. Optional NetworkX dependency (`_HAS_NETWORKX` guard). Standalone CLI supports `summary`, `network`, and `enrichment` subcommands.
 
-**pymol_scripts.py**: Generates PyMOL `.pml` command files for structural visualisation of protein complexes. Produces layered scripts with 5 visualisation sections: PDB loading with cartoon representation, chain colouring (10-chain palette), pLDDT confidence colouring (canonical AlphaFold2 4-band scheme: blue >90, cyan 70-90, yellow 50-70, orange <50), interface residue highlighting as sticks (hotpink), and variant position highlighting as spheres coloured by structural context (red=interface_core, orange=interface_rim, yellow=surface, gray=buried). `_build_pdb_lookup()` scans the PDB directory using `toolkit.parse_complex_name()` for AlphaFold2 suffix-aware file discovery. `generate_pymol_scripts_for_results()` is the main entry point from `toolkit.py`, filtering by `quality_tier_v2` with tqdm progress bar. `generate_py3dmol_view()` provides an in-notebook fallback for Jupyter rendering (`_HAS_PY3DMOL` guard). Standalone CLI supports `generate` (single PDB → .pml) and `batch` (CSV + PDB dir → .pml for qualifying complexes) subcommands. Toolkit integration via `--pymol` (requires `--interface --pae`), `--pymol-output`, `--pymol-render`, and `--pymol-min-tier` flags. No CSV columns added — script generation is a side-effect output.
+**pymol_scripts.py**: Generates PyMOL `.pml` command files for structural visualisation of protein complexes (~1,280 lines, 21 functions, 19 module-level constants). Produces scene-managed scripts with up to 10 visualisation layers: PDB loading with cartoon representation, metadata comments (quality tier, composite score, drug target status), biological annotation comments (diseases, pathways, gene labels - sanitised for PyMOL `;` command separator and `<=` tokeniser limitations), chain colouring (10-chain palette with homodimer support via transparency), pLDDT confidence colouring (canonical AF2 4-band scheme using strict `<`/`>` operators), interface residue highlighting as sticks (hotpink), optional semi-transparent surface overlay, pathogenicity-aware variant position highlighting as spheres coloured by structural context (red=interface_core, orange=interface_rim, yellow=surface, gray=buried; pathogenic variants rendered at 0.6 scale vs 0.3 default), and ProtVar/AlphaMissense transparency overlay (sphere_transparency encoding: pathogenic=0.0 opaque, ambiguous=0.4, benign=0.7 - preserves variant layer colours). Three PyMOL scenes (`chain_view`, `plddt_view`, `full_view`) stored for quick navigation. Pre-computed interface residue PDB numbers read from CSV (`interface_residues_a/b`) to avoid redundant PDB I/O. `_build_pdb_lookup()` scans the PDB directory using `toolkit.parse_complex_name()` for AlphaFold2 suffix-aware `.pdb`/`.ent` file discovery. `generate_pymol_scripts_for_results()` is the main entry point from `toolkit.py`, filtering by `quality_tier_v2` with tqdm progress bar. `generate_py3dmol_view()` provides an in-notebook fallback with `PYMOL_TO_HEX` colour mapping (16 entries). Standalone CLI supports `generate` (single PDB) and `batch` (CSV + PDB dir, `utf-8-sig` BOM handling) subcommands. Toolkit integration via `--pymol` (requires `--interface --pae`), `--pymol-output`, `--pymol-render`, and `--pymol-min-tier` flags.
 
 **variant_mapper.py**: Maps genetic variants from UniProt, ClinVar, and ExAC databases onto predicted protein complex interface residues. Loads variant databases via chunked streaming (UniProt 33M rows, ClinVar 8.9M rows) for memory efficiency. Computes per-residue solvent-accessible surface area (SASA) using biotite's Cython-accelerated engine as the primary backend (with BioPython ShrakeRupley as fallback) and classifies each variant into one of 4 structural contexts: `interface_core` (<4 Å cross-chain distance from partner chain interface residues), `interface_rim` (4-8 Å cross-chain distance), `surface_non_interface` (RSA ≥ 25%), or `buried_core` (RSA < 25%). `annotate_results_with_variants()` adds 12 CSV columns: per-chain variant counts, interface variant counts, pathogenic interface variant counts, enrichment fold-change, pipe-separated variant detail strings, and per-chain ExAC constraint scores (pLI, mis_z). Standalone CLI supports `summary`, `lookup`, and `map` subcommands. Requires biotite (primary) or BioPython (fallback) for SASA computation.
 
@@ -681,7 +681,7 @@ Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X
 
 ## Output
 
-### CSV (25 base columns, up to 119 with all features)
+### CSV (25 base columns, up to 121 with all features)
 
 The main output CSV groups columns into:
 
@@ -690,7 +690,7 @@ The main output CSV groups columns into:
 | **Identity** | complex_name, protein_a, protein_b, complex_type, n_chains, species, structure_source |
 | **Core Metrics** | ipTM, pTM, ranking_confidence, pDockQ, ppv |
 | **pLDDT Statistics** | plddt_mean, plddt_median, plddt_min, plddt_max, plddt_below50/70_fraction |
-| **Interface Geometry** | n_interface_contacts, interface_fraction_a/b, interface_symmetry, contacts_per_interface_residue |
+| **Interface Geometry** | n_interface_contacts, n_interface_residues_a/b, interface_residues_a/b, interface_fraction_a/b, interface_symmetry, contacts_per_interface_residue |
 | **Interface pLDDT** | interface_plddt_combined, bulk_plddt_combined, interface_vs_bulk_delta |
 | **PAE Features** | interface_pae_mean, n_confident_contacts, confident_contact_fraction, cross_chain_pae_mean |
 | **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2 |
@@ -739,7 +739,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ### Completed
 
-- **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 46-column CSV, 10-figure visualisation suite
+- **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 50-column CSV (with `--interface --pae`), 10-figure visualisation suite
 - **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
 - **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
 - **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
@@ -748,7 +748,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, stability cross-validation figure (Fig 17 Panel A+C), toolkit integration with `--stability` flag
 - **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns, stability cross-validation figure (Fig 17 Panel B+C); toolkit integration with `--protvar` flag
 - **Disease & Pathway Integration (Phase E):** UniProt disease/PTM/GO/drug-target annotation (offline XML + API fallback), Reactome pathway mapping with per-pathway PPI enrichment, NetworkX network analysis, 3 visualisation figures (Figs 14-16), toolkit integration with `--disease` and `--pathways` flags, 24 new CSV columns
-- **PyMOL Visualisation (Phase F):** Layered `.pml` script generation with chain colouring, pLDDT confidence bands (canonical AF2 4-band scheme), interface residue highlighting (sticks), variant position colouring by structural context (spheres), `py3Dmol` in-notebook fallback, tqdm progress bar, standalone CLI (`generate` + `batch` subcommands), toolkit integration with `--pymol` flag
+- **PyMOL Visualisation (Phase F):** Scene-managed `.pml` script generation (~1,280 lines, 21 functions) with chain colouring, pLDDT confidence bands (PyMOL-compatible strict `<`/`>` operators), interface residue highlighting (sticks), pathogenicity-aware variant spheres coloured by structural context, ProtVar/AlphaMissense transparency overlay, metadata and biological annotation comments (sanitised for PyMOL `;` and newline handling), homodimer support, `.ent`/`.pdb` file discovery, pre-computed interface residues, `py3Dmol` in-notebook fallback with `PYMOL_TO_HEX` colour mapping, tqdm progress bar, standalone CLI (`generate` + `batch` subcommands), toolkit integration with `--pymol` flag, 115 tests across 26 test classes
 
 ### Planned
 - **Million-Complex Production Run:** Full pipeline validation on large-scale AlphaFold-Multimer dataset
@@ -756,7 +756,7 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 
 ## Testing
 
-The test suite contains **1002 tests** across 19 modules (985 active + 15 future placeholders):
+The test suite contains **1055 tests** across 19 modules (1040 active + 15 future placeholders):
 
 | Module | Tests | Scope |
 |--------|-------|-------|
@@ -776,10 +776,10 @@ The test suite contains **1002 tests** across 19 modules (985 active + 15 future
 | test_protvar_client.py | 88 | Offline AlphaMissense TSV loading, AFDB FoldX CSV loading, AM variant parsing, combined index building, score lookup, chain scoring, detail formatting, annotation, CSV columns, CLI, regression |
 | test_disease_annotations.py | 96 | UniProt disease/PTM/GO parsing, API fallback, formatting, annotation, CLI, regression |
 | test_pathway_network.py | 83 | Reactome loading, pathway quality, NetworkX, annotation, per-pathway PPI enrichment, CLI |
-| test_pymol_scripts.py | 60 | PyMOL .pml generation, PML syntax, chain/pLDDT/interface/variant colouring, py3Dmol fallback, CLI, regression |
+| test_pymol_scripts.py | 115 | PyMOL .pml generation, scene management, pLDDT/chain/interface/variant/protvar colouring, pathogenicity-aware spheres, transparency overlay, metadata/annotation comments, surface, homodimer, .ent/.pdb lookup, py3Dmol hex fallback, CLI, regression |
 | test_future_aims.py | 18 + 15 | 18 real tests (7 database + 6 variant + 1 EVE + 1 ProtVar + 3 pathway) + 15 future placeholders |
 
-**Results:** 984 passing, 1 skipped (Fig 10 — all test complexes are dimers), 15 future placeholders (deselected by default)
+**Results:** 1039 passing, 1 skipped (Fig 10 - all test complexes are dimers), 15 future placeholders (deselected by default)
 
 **Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `alphamissense` (AlphaMissense scoring), `disease` (UniProt disease annotation), `pathways` (pathway mapping and network), `phase_e` (Phase E figure tests), `pymol` (PyMOL script generation), `future` (unimplemented features)
 
