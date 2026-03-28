@@ -63,9 +63,9 @@ CHAIN_COLOURS = {
 # Each entry: (label, b_factor_condition, hex_colour)
 PLDDT_COLOUR_BANDS = [
     ('plddt_vhigh', 'b > 90',             '0x0053D6'),   # Very high (blue)
-    ('plddt_high',  'b > 70 and b <= 90',  '0x65CBF3'),   # Confident (cyan)
-    ('plddt_low',   'b > 50 and b <= 70',  '0xFFDB13'),   # Low (yellow)
-    ('plddt_vlow',  'b <= 50',             '0xFF7D45'),   # Very low (orange)
+    ('plddt_high',  'b > 70 and b < 91',  '0x65CBF3'),   # Confident (cyan)
+    ('plddt_low',   'b > 50 and b < 71',  '0xFFDB13'),   # Low (yellow)
+    ('plddt_vlow',  'b < 51',             '0xFF7D45'),   # Very low (orange)
 ]
 
 # Interface residue colour
@@ -142,6 +142,21 @@ PROTVAR_AM_SCALES = {
     'pathogenic': 0.8,
     'ambiguous':  0.5,
     'benign':     0.2,
+}
+# Transparency encoding for ProtVar AM class overlay (0.0 = fully opaque, 1.0 = invisible)
+# Applied on top of variant structural context spheres to avoid overwriting colours
+PROTVAR_AM_TRANSPARENCY = {
+    'pathogenic': 0.0,
+    'ambiguous':  0.4,
+    'benign':     0.7,
+}
+
+# Severity priority for deduplicating multiple AM classes at the same position
+_AM_SEVERITY = {
+    'pathogenic': 3,
+    'ambiguous':  2,
+    'benign':     1,
+    'unknown':    0,
 }
 
 
@@ -257,11 +272,12 @@ def generate_annotation_comments(
     # Diseases (first 5 per chain)
     for label, details in [('A', disease_details_a), ('B', disease_details_b)]:
         if details and details != '-':
+            details = details.replace('\n', ' ').replace('\r', ' ')
             diseases = [d.strip() for d in details.split('|') if d.strip() and not d.startswith('...')]
             if diseases:
                 shown = diseases[:5]
                 suffix = f' (+{len(diseases) - 5} more)' if len(diseases) > 5 else ''
-                lines.append(f"# Diseases ({label}): {'; '.join(shown)}{suffix}")
+                lines.append(f"# Diseases ({label}): {' | '.join(shown)}{suffix}")
 
     # Drug target
     if is_drug_target_a or is_drug_target_b:
@@ -271,11 +287,12 @@ def generate_annotation_comments(
     # Pathways (first 5 per chain)
     for label, pathways in [('A', reactome_pathways_a), ('B', reactome_pathways_b)]:
         if pathways and pathways != '-':
+            pathways = pathways.replace('\n', ' ').replace('\r', ' ')
             pw_list = [p.strip() for p in pathways.split('|') if p.strip() and not p.startswith('...')]
             if pw_list:
                 shown = pw_list[:5]
                 suffix = f' (+{len(pw_list) - 5} more)' if len(pw_list) > 5 else ''
-                lines.append(f"# Pathways ({label}): {'; '.join(shown)}{suffix}")
+                lines.append(f"# Pathways ({label}): {' | '.join(shown)}{suffix}")
 
     # Gene symbol labels on the structure
     if gene_a:
@@ -470,8 +487,13 @@ def generate_protvar_highlighting(
 ) -> str:
     """Generate ProtVar/AlphaMissense highlighting commands.
 
-    Visualises ProtVar predictions with sphere size scaled by AlphaMissense
-    classification and colour encoding AM pathogenicity class.
+    Encodes AM pathogenicity class as sphere transparency on residues that
+    already have spheres from the variant highlighting layer.  This avoids
+    overwriting the structural-context colours set by
+    ``generate_variant_highlighting``.
+
+    Transparency mapping (PROTVAR_AM_TRANSPARENCY):
+      pathogenic → 0.0 (fully opaque), ambiguous → 0.4, benign → 0.7.
 
     Args:
         chain_a: First chain identifier.
@@ -481,7 +503,7 @@ def generate_protvar_highlighting(
         protvar_records_b: Parsed protvar dicts for chain B. None to skip.
 
     Returns:
-        Multi-line string with selection and colour commands.
+        Multi-line string with selection and transparency commands.
         Empty string if no records provided.
     """
     all_records = []
@@ -495,21 +517,30 @@ def generate_protvar_highlighting(
     if not all_records:
         return ''
 
-    # Group by (chain, am_class)
-    groups: dict[tuple[str, str], list[int]] = {}
+    # First pass: find most severe AM class per (chain, position)
+    # so each residue appears in exactly one AM selection (fixes C/D).
+    pos_best: dict[tuple[str, int], str] = {}
     for chain, rec in all_records:
-        am_class = rec.get('am_class', 'ambiguous')
-        key = (chain, am_class)
-        if key not in groups:
-            groups[key] = []
+        am_class = rec.get('am_class') or 'unknown'
+        if am_class == '-':
+            am_class = 'unknown'
         pos = rec.get('position')
-        if pos is not None:
-            groups[key].append(int(pos))
+        if pos is None:
+            continue
+        pos = int(pos)
+        key = (chain, pos)
+        if key not in pos_best or _AM_SEVERITY.get(am_class, 0) > _AM_SEVERITY.get(pos_best[key], 0):
+            pos_best[key] = am_class
+
+    # Second pass: group by (chain, am_class)
+    groups: dict[tuple[str, str], list[int]] = {}
+    for (chain, pos), am_class in pos_best.items():
+        groups.setdefault((chain, am_class), []).append(pos)
 
     if not groups:
         return ''
 
-    lines = ["\n# -- ProtVar / AlphaMissense predictions --"]
+    lines = ["\n# -- ProtVar / AlphaMissense predictions (transparency overlay) --"]
     sel_names = []
 
     for (chain, am_class), positions in sorted(groups.items()):
@@ -518,13 +549,10 @@ def generate_protvar_highlighting(
         safe_class = am_class.replace(' ', '_')
         sel_name = f"pv_{safe_class}_{chain}"
         resi_str = '+'.join(str(r) for r in sorted(set(positions)))
-        colour = PROTVAR_AM_COLOURS.get(am_class, '0xFFA500')
-        scale = PROTVAR_AM_SCALES.get(am_class, 0.5)
+        transparency = PROTVAR_AM_TRANSPARENCY.get(am_class, 0.4)
 
         lines.append(f"select {sel_name}, chain {chain} and resi {resi_str}")
-        lines.append(f"show spheres, {sel_name}")
-        lines.append(f"color {colour}, {sel_name}")
-        lines.append(f"set sphere_scale, {scale}, {sel_name}")
+        lines.append(f"set sphere_transparency, {transparency}, {sel_name}")
         sel_names.append(sel_name)
 
     if sel_names:
@@ -571,9 +599,9 @@ def generate_rendering_commands(
     """
     lines = [
         "\n# -- Camera and rendering --",
-        "scene full_view, store",
         "orient",
         "zoom complete=1",
+        "scene full_view, store",
         "set ray_opaque_background, 1",
     ]
 

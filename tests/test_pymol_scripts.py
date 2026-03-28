@@ -145,11 +145,18 @@ class TestPLDDTColouring:
         assert 'plddt_vlow' in result
 
     def test_uses_b_factor_selections(self):
-        """Selections use B-factor conditions."""
+        """Selections use B-factor conditions compatible with PyMOL."""
         from pymol_scripts import generate_plddt_colouring
         result = generate_plddt_colouring()
         assert 'b > 90' in result
-        assert 'b <= 50' in result
+        assert 'b < 51' in result
+
+    def test_no_lte_gte_operators(self):
+        """PyMOL does not support <= or >= — only < and > are used."""
+        from pymol_scripts import generate_plddt_colouring
+        result = generate_plddt_colouring()
+        assert '<=' not in result
+        assert '>=' not in result
 
     def test_uses_canonical_af2_colours(self):
         """Colours match the AlphaFold2 confidence scheme."""
@@ -637,10 +644,15 @@ class TestSceneManagement:
         assert 'scene plddt_view, store' in result
 
     def test_rendering_stores_full_view_scene(self):
-        """Rendering section stores a full_view scene."""
+        """Rendering section stores a full_view scene after orient and zoom."""
         from pymol_scripts import generate_rendering_commands
         result = generate_rendering_commands()
         assert 'scene full_view, store' in result
+        # Fix E: scene stored AFTER orient and zoom for correct camera
+        orient_pos = result.index('orient')
+        zoom_pos = result.index('zoom complete=1')
+        scene_pos = result.index('scene full_view, store')
+        assert orient_pos < zoom_pos < scene_pos
 
     def test_scene_order_in_complete_script(self):
         """Scenes appear in correct order: chain_view, plddt_view, full_view."""
@@ -768,6 +780,40 @@ class TestAnnotationComments:
         result = generate_annotation_comments(reactome_pathways_a=pathways)
         assert '+3 more' in result
 
+    def test_pathway_newline_sanitised(self):
+        """Embedded newlines in pathway strings do not produce bare PML lines."""
+        from pymol_scripts import generate_annotation_comments
+        pathways = 'R-HSA-71291:Metabolism of\namino acids|R-HSA-99999:Signal\r\ntransduction'
+        result = generate_annotation_comments(reactome_pathways_a=pathways)
+        for line in result.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                assert stripped.startswith('#') or stripped.startswith('label'), (
+                    f"Bare PML line found: {stripped!r}")
+
+    def test_disease_newline_sanitised(self):
+        """Embedded newlines in disease strings do not produce bare PML lines."""
+        from pymol_scripts import generate_annotation_comments
+        diseases = 'OMIM:123456:Breast\ncancer|OMIM:789:Some\r\ndisease'
+        result = generate_annotation_comments(disease_details_a=diseases)
+        for line in result.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                assert stripped.startswith('#') or stripped.startswith('label'), (
+                    f"Bare PML line found: {stripped!r}")
+
+    def test_no_semicolons_in_comments(self):
+        """Comment lines must not contain ';' — PyMOL treats it as command separator."""
+        from pymol_scripts import generate_annotation_comments
+        result = generate_annotation_comments(
+            gene_a='TP53', gene_b='BRCA1',
+            disease_details_a='OMIM:123:Cancer|OMIM:456:Syndrome',
+            reactome_pathways_a='R-HSA-1430728:Metabolism|R-HSA-71291:Amino acid metabolism',
+        )
+        for line in result.split('\n'):
+            if line.strip().startswith('#'):
+                assert ';' not in line, f"Semicolon in comment line: {line!r}"
+
 
 @pytest.mark.pymol
 class TestQuitCommand:
@@ -891,6 +937,8 @@ class TestProtvarHighlighting:
         result = generate_protvar_highlighting('A', 'B', records, None)
         assert 'pv_pathogenic_A' in result
         assert 'pv_benign_A' in result
+        # ProtVar uses transparency overlay, not colour or show spheres
+        assert 'color ' not in result
 
     def test_empty_returns_empty(self):
         """None/empty records produce empty string."""
@@ -898,16 +946,26 @@ class TestProtvarHighlighting:
         assert generate_protvar_highlighting('A', 'B', None, None) == ''
         assert generate_protvar_highlighting('A', 'B', [], []) == ''
 
-    def test_sphere_scale_varies_by_class(self):
-        """Different AM classes get different sphere scales."""
-        from pymol_scripts import generate_protvar_highlighting, PROTVAR_AM_SCALES
+    def test_sphere_transparency_varies_by_class(self):
+        """Different AM classes get different sphere transparency values."""
+        from pymol_scripts import generate_protvar_highlighting, PROTVAR_AM_TRANSPARENCY
         records = [
             {'position': 10, 'am_class': 'pathogenic'},
             {'position': 20, 'am_class': 'benign'},
         ]
         result = generate_protvar_highlighting('A', 'B', records, None)
-        assert f"sphere_scale, {PROTVAR_AM_SCALES['pathogenic']}" in result
-        assert f"sphere_scale, {PROTVAR_AM_SCALES['benign']}" in result
+        assert f"sphere_transparency, {PROTVAR_AM_TRANSPARENCY['pathogenic']}" in result
+        assert f"sphere_transparency, {PROTVAR_AM_TRANSPARENCY['benign']}" in result
+        # No colour or sphere_scale commands
+        assert 'color 0x' not in result
+        assert 'sphere_scale' not in result
+
+    def test_does_not_show_spheres(self):
+        """ProtVar layer does not call 'show spheres' — relies on variant layer."""
+        from pymol_scripts import generate_protvar_highlighting
+        records = [{'position': 10, 'am_class': 'pathogenic'}]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert 'show spheres' not in result
 
     def test_section_header(self):
         """ProtVar section has its own header comment."""
@@ -915,6 +973,55 @@ class TestProtvarHighlighting:
         records = [{'position': 10, 'am_class': 'pathogenic'}]
         result = generate_protvar_highlighting('A', 'B', records, None)
         assert 'ProtVar' in result
+
+    def test_dash_am_class_maps_to_unknown(self):
+        """AM class '-' is mapped to 'unknown', producing valid selection name."""
+        from pymol_scripts import generate_protvar_highlighting
+        records = [{'position': 10, 'am_class': '-', 'am_score': None}]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert 'pv_unknown_A' in result
+        assert 'pv_-_A' not in result
+
+    def test_none_am_class_maps_to_unknown(self):
+        """None/empty AM class is mapped to 'unknown'."""
+        from pymol_scripts import generate_protvar_highlighting
+        records_none = [{'position': 10, 'am_class': None}]
+        records_empty = [{'position': 20, 'am_class': ''}]
+        result_none = generate_protvar_highlighting('A', 'B', records_none, None)
+        result_empty = generate_protvar_highlighting('A', 'B', records_empty, None)
+        assert 'pv_unknown_A' in result_none
+        assert 'pv_unknown_A' in result_empty
+
+    def test_same_position_uses_most_severe_class(self):
+        """When same position has multiple AM classes, most severe wins."""
+        from pymol_scripts import generate_protvar_highlighting
+        records = [
+            {'position': 10, 'am_class': 'benign', 'am_score': 0.1},
+            {'position': 10, 'am_class': 'pathogenic', 'am_score': 0.9},
+        ]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert 'pv_pathogenic_A' in result
+        # Benign selection should not exist (no other benign-only positions)
+        assert 'pv_benign_A' not in result
+
+    def test_dedup_keeps_both_groups_when_positions_differ(self):
+        """Deduplication keeps multiple groups when positions differ."""
+        from pymol_scripts import generate_protvar_highlighting
+        records = [
+            {'position': 10, 'am_class': 'benign'},
+            {'position': 10, 'am_class': 'pathogenic'},  # overrides benign
+            {'position': 20, 'am_class': 'benign'},       # stays benign
+        ]
+        result = generate_protvar_highlighting('A', 'B', records, None)
+        assert 'pv_pathogenic_A' in result
+        assert 'pv_benign_A' in result
+        # Position 10 only in pathogenic, position 20 only in benign
+        lines = result.split('\n')
+        patho_sel = [l for l in lines if 'pv_pathogenic_A' in l and 'select' in l][0]
+        benign_sel = [l for l in lines if 'pv_benign_A' in l and 'select' in l][0]
+        assert '10' in patho_sel
+        assert '10' not in benign_sel
+        assert '20' in benign_sel
 
 
 @pytest.mark.pymol
@@ -1048,3 +1155,10 @@ class TestNewConstants:
         from pymol_scripts import PROTVAR_AM_SCALES
         assert 'pathogenic' in PROTVAR_AM_SCALES
         assert PROTVAR_AM_SCALES['pathogenic'] > PROTVAR_AM_SCALES['benign']
+
+    def test_am_severity_ordering(self):
+        """_AM_SEVERITY has correct priority: pathogenic > ambiguous > benign > unknown."""
+        from pymol_scripts import _AM_SEVERITY
+        assert _AM_SEVERITY['pathogenic'] > _AM_SEVERITY['ambiguous']
+        assert _AM_SEVERITY['ambiguous'] > _AM_SEVERITY['benign']
+        assert _AM_SEVERITY['benign'] > _AM_SEVERITY['unknown']
