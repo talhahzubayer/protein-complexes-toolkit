@@ -1,7 +1,0 @@
-[
-  {"proteinAcc": "P24534", "position": 81, "afId": "F1", "afPos": 81, "wildType": "P", "mutatedType": "A", "foldxDdg": 2.39718, "plddt": 66.71, "numFragments": 1, "groupBy": "P24534-81-A"},
-  {"proteinAcc": "P24534", "position": 81, "afId": "F1", "afPos": 81, "wildType": "P", "mutatedType": "D", "foldxDdg": 2.84641, "plddt": 66.71, "numFragments": 1, "groupBy": "P24534-81-D"},
-  {"proteinAcc": "P24534", "position": 81, "afId": "F1", "afPos": 81, "wildType": "P", "mutatedType": "L", "foldxDdg": 0.889652, "plddt": 66.71, "numFragments": 1, "groupBy": "P24534-81-L"},
-  {"proteinAcc": "P24534", "position": 81, "afId": "F1", "afPos": 81, "wildType": "P", "mutatedType": "M", "foldxDdg": 0.622459, "plddt": 66.71, "numFragments": 1, "groupBy": "P24534-81-M"},
-  {"proteinAcc": "P24534", "position": 81, "afId": "F1", "afPos": 81, "wildType": "P", "mutatedType": "R", "foldxDdg": 2.01866, "plddt": 66.71, "numFragments": 1, "groupBy": "P24534-81-R"}
-]
