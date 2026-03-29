@@ -6,10 +6,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Pytest
+# Pytest / test infrastructure
 .pytest_cache/
-tests/test_output/
-tests/__pycache__
+tests/
+pytest.ini
 
 # Generated pipeline output
 Output/
@@ -22,10 +22,10 @@ test.csv
 # Internal documentation
 Documentation/
 
-# Test data (large binary files - see README for setup)
+# Test data 
 Test_Data/
 
-# Data from external sources (large files - see README for setup)
+# Data from external sources
 data/
 
 # IDE / editor

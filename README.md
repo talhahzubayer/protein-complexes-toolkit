@@ -30,7 +30,6 @@ MSc Applied Bioinformatics Research Project - King's College London
 - UniProt disease annotations: offline XML parsing of disease associations, PTM sites, GO terms, and drug target status with API fallback for missing proteins
 - Reactome pathway mapping: per-pathway PPI enrichment via STRING API, NetworkX network analysis, and 3 pathway/disease visualisation figures (Figs 14-16)
 - PyMOL script generation: scene-managed `.pml` command files with chain colouring, pLDDT confidence bands, interface residue highlighting (sticks), pathogenicity-aware variant spheres coloured by structural context, ProtVar/AlphaMissense transparency overlay, metadata and biological annotation comments, homodimer handling, `.ent`/`.pdb` file discovery; `py3Dmol` fallback for in-notebook rendering
-- 1055-test suite (1039 passing + 1 skipped + 15 future placeholders) with real PDB/PKL data, offline database excerpts, and mocked API tests
 
 
 ## Repository Structure
@@ -53,40 +52,16 @@ protein-complexes-toolkit/
 ├── disease_annotations.py    # UniProt disease/PTM/GO/drug-target annotation
 ├── pathway_network.py        # Reactome pathway mapping, PPI enrichment, NetworkX networks
 ├── pymol_scripts.py          # PyMOL .pml script generation and py3Dmol fallback
-├── pytest.ini                # Pytest configuration
 ├── Toolkit_Commands_List.md  # Full CLI command reference (all flags, defaults, examples)
 ├── requirements.txt          # Python dependencies
 ├── .gitignore
-├── tests/                   # Test suite (1040 tests + 15 future placeholders)
-│   ├── conftest.py          # Shared fixtures and path config
-│   ├── test_read_af2_nojax.py
-│   ├── test_pdockq.py
-│   ├── test_interface_analysis.py
-│   ├── test_toolkit.py
-│   ├── test_visualise_results.py
-│   ├── test_integration.py
-│   ├── test_future_aims.py
-│   ├── test_database_loaders.py
-│   ├── test_id_mapper.py
-│   ├── test_multiprocessing.py
-│   ├── test_string_api.py
-│   ├── test_protein_clustering.py
-│   ├── test_variant_mapper.py
-│   ├── test_stability_scorer.py
-│   ├── test_protvar_client.py
-│   ├── test_disease_annotations.py
-│   ├── test_pathway_network.py
-│   ├── test_pymol_scripts.py
-│   └── offline_test_data/
-│       └── databases/                            # Small database excerpts for offline testing
-├── data/                                         # External databases (not included in repo)
-│    ├── ppi/                                     # PPI databases (see "Setting Up Data")
-│    ├── clusters/                                # STRING sequence clusters (see "Setting Up Data")
-│    ├── variants/                                # Variant databases (see "Setting Up Data")
-│    ├── stability/                               # Stability prediction data (see "Setting Up Data")
-│    ├── pathways/                                # Disease & pathway databases (see "Setting Up Data")
-│    └── string_api_cache/                        # STRING API response cache (auto-generated)
-└── Test_Data/							          # Not included in repo (see "Setting Up Test Data")
+├── data/                         # External databases (not included in repo)
+│    ├── ppi/                     # PPI databases (see "Setting Up Data")
+│    ├── clusters/                # STRING sequence clusters (see "Setting Up Data")
+│    ├── variants/                # Variant databases (see "Setting Up Data")
+│    ├── stability/               # Stability prediction data (see "Setting Up Data")
+│    ├── pathways/                # Disease & pathway databases (see "Setting Up Data")
+│    └── string_api_cache/        # STRING API response cache (auto-generated)
 ```
 
 
@@ -316,17 +291,25 @@ data/
 ```
 
 
-## Setting Up Test Data
+## Usage
 
-The `Test_Data/` directory is **not included** in this repository due to its large size. To run the test suite on your local machine, you need to:
+For the complete command reference - including all CLI flags, their defaults, flag dependencies, progressive flag-stacking examples and standalone module CLIs - see **[Toolkit_Commands_List.md](Toolkit_Commands_List.md)**.
 
-1. Create a `Test_Data/` folder at the project root:
 
-```bash
-mkdir Test_Data
+## Input Data Format
+
+The toolkit expects a directory containing paired AlphaFold2-Multimer output files:
+
+```
+Protein_Complexes/
+├── ProteinA_ProteinB.pdb                                          # Old naming
+├── ProteinA_ProteinB.results.pkl                                  # Old naming
+├── ProteinC_ProteinD_relaxed_model_1_multimer_v3_pred_0.pdb       # New naming
+├── ProteinC_ProteinD_result_model_1_multimer_v3_pred_0.pkl        # New naming
+└── ...
 ```
 
-2. Place your own AlphaFold2-Multimer prediction files inside it. Each complex requires a **paired PDB structure file and PKL result file**. The toolkit supports two naming conventions:
+Each complex requires a **paired PDB structure file and PKL result file**. The toolkit supports two naming conventions:
 
 **Old naming convention:**
 ```
@@ -340,43 +323,11 @@ A0A0A0MQZ0_P40933_relaxed_model_1_multimer_v3_pred_0.pdb
 A0A0A0MQZ0_P40933_result_model_1_multimer_v3_pred_0.pkl
 ```
 
-3. **Update `tests/conftest.py`:** Open `tests/conftest.py` and update the `PROJECT_ROOT` path on **line 19** to match the location of your local clone:
-
-```python
-# Line 19 - change this to your local project path
-PROJECT_ROOT = Path(r"C:\your\path\to\protein-complexes-toolkit")
-```
-
-4. Verify the tests work:
-
-```bash
-python -m pytest tests/ -m "not future" -v
-```
-
-
-## Usage
-
-For the complete command reference - including all CLI flags, their defaults, flag dependencies, progressive flag-stacking examples and standalone module CLIs - see **[Toolkit_Commands_List.md](Toolkit_Commands_List.md)**.
-
-
-## Input Data Format
-
-The toolkit expects a directory containing paired AlphaFold2-Multimer output files:
-
-```
-models/
-├── ProteinA_ProteinB.pdb                                          # Old naming
-├── ProteinA_ProteinB.results.pkl                                  # Old naming
-├── ProteinC_ProteinD_relaxed_model_1_multimer_v3_pred_0.pdb       # New naming
-├── ProteinC_ProteinD_result_model_1_multimer_v3_pred_0.pkl        # New naming
-└── ...
-```
-
-Each complex requires:
+Each file pair contains:
 - A **PDB file** containing the predicted structure with ATOM records
 - A **PKL file** containing the AlphaFold2 result dictionary (ipTM, pTM, pLDDT, PAE)
 
-Both old (`X_Y.pdb` / `X_Y.results.pkl`) and new (`X_Y_relaxed_model_*.pdb` / `X_Y_result_model_*.pkl`) naming conventions are supported. The toolkit also handles homodimer, isoform, and multi-chain naming patterns.
+The toolkit also handles homodimer, isoform, and multi-chain naming patterns.
 
 
 ## Output
@@ -448,40 +399,9 @@ Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interfac
 - **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, stability cross-validation figure (Fig 17 Panel A+C), toolkit integration with `--stability` flag
 - **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns, stability cross-validation figure (Fig 17 Panel B+C); toolkit integration with `--protvar` flag
 - **Disease & Pathway Integration (Phase E):** UniProt disease/PTM/GO/drug-target annotation (offline XML + API fallback), Reactome pathway mapping with per-pathway PPI enrichment, NetworkX network analysis, 3 visualisation figures (Figs 14-16), toolkit integration with `--disease` and `--pathways` flags, 24 new CSV columns
-- **PyMOL Visualisation (Phase F):** Scene-managed `.pml` script generation (~1,280 lines, 21 functions) with chain colouring, pLDDT confidence bands (PyMOL-compatible strict `<`/`>` operators), interface residue highlighting (sticks), pathogenicity-aware variant spheres coloured by structural context, ProtVar/AlphaMissense transparency overlay, metadata and biological annotation comments (sanitised for PyMOL `;` and newline handling), homodimer support, `.ent`/`.pdb` file discovery, pre-computed interface residues, `py3Dmol` in-notebook fallback with `PYMOL_TO_HEX` colour mapping, tqdm progress bar, standalone CLI (`generate` + `batch` subcommands), toolkit integration with `--pymol` flag, 115 tests across 26 test classes
-
+- **PyMOL Visualisation (Phase F):** Scene-managed `.pml` script generation (~1,280 lines, 21 functions) with chain colouring, pLDDT confidence bands (PyMOL-compatible strict `<`/`>` operators), interface residue highlighting (sticks), pathogenicity-aware variant spheres coloured by structural context, ProtVar/AlphaMissense transparency overlay, metadata and biological annotation comments (sanitised for PyMOL `;` and newline handling), homodimer support, `.ent`/`.pdb` file discovery, pre-computed interface residues, `py3Dmol` in-notebook fallback with `PYMOL_TO_HEX` colour mapping, tqdm progress bar, standalone CLI (`generate` + `batch` subcommands), toolkit integration with `--pymol` flag
 ### Planned
 - **Million-Complex Production Run:** Full pipeline validation on large-scale AlphaFold-Multimer dataset
-
-
-## Testing
-
-The test suite contains **1055 tests** across 19 modules (1040 active + 15 future placeholders):
-
-| Module | Tests | Scope |
-|--------|-------|-------|
-| test_read_af2_nojax.py | 26 | PKL loading, metric extraction |
-| test_pdockq.py | 39 | PDB parsing, pDockQ calculation, multi-chain |
-| test_interface_analysis.py | 39 | Interface geometry, pLDDT, PAE, composite |
-| test_toolkit.py | 54 | File discovery, quality classification, CSV, enrichment, sequences |
-| test_visualise_results.py | 60 | Figure generation (Figs 1-18 incl. Phase E, stability, clustering), variant/disease detail parsing, data loading, CLI |
-| test_integration.py | 8 | Cross-module pipeline, data flow |
-| test_database_loaders.py | 70 | STRING/BioGRID/HuRI/HuMAP parsing, edge cases, cross-DB overlap, base-level overlap |
-| test_id_mapper.py | 65 | ID validation, mapping, isoform handling, secondary accessions, lookup builder |
-| test_multiprocessing.py | 6 | Pickling, subprocess import, parallel parity |
-| test_string_api.py | 56 | STRING API client, caching, rate limiting, retry, API fallback integration, database validation |
-| test_protein_clustering.py | 55 | Protein clustering, homology detection, oversized cluster handling, CLI |
-| test_variant_mapper.py | 103 | HGVS parsing, variant loading, SASA, parallel SASA (incl. combined both-chains), structural context (cross-chain distance), enrichment, CLI, toolkit integration |
-| test_stability_scorer.py | 59 | EVE score loading, entry-name mapping, index building, annotation, formatting, parsing, CSV columns, CLI, regression |
-| test_protvar_client.py | 88 | Offline AlphaMissense TSV loading, AFDB FoldX CSV loading, AM variant parsing, combined index building, score lookup, chain scoring, detail formatting, annotation, CSV columns, CLI, regression |
-| test_disease_annotations.py | 96 | UniProt disease/PTM/GO parsing, API fallback, formatting, annotation, CLI, regression |
-| test_pathway_network.py | 83 | Reactome loading, pathway quality, NetworkX, annotation, per-pathway PPI enrichment, CLI |
-| test_pymol_scripts.py | 115 | PyMOL .pml generation, scene management, pLDDT/chain/interface/variant/protvar colouring, pathogenicity-aware spheres, transparency overlay, metadata/annotation comments, surface, homodimer, .ent/.pdb lookup, py3Dmol hex fallback, CLI, regression |
-| test_future_aims.py | 18 + 15 | 18 real tests (7 database + 6 variant + 1 EVE + 1 ProtVar + 3 pathway) + 15 future placeholders |
-
-**Results:** 1039 passing, 1 skipped (Fig 10 - all test complexes are dimers), 15 future placeholders (deselected by default)
-
-**Markers:** `slow` (file I/O), `regression` (exact numerical values), `integration` (cross-module), `cli` (command-line), `database` (PPI database loading and ID mapping), `multiprocessing` (parallel processing), `api` (STRING API, mocked), `clustering` (protein clustering and homology), `variants` (variant mapping and structural context), `stability` (EVE stability scoring), `protvar` (offline AlphaMissense + monomeric FoldX scoring), `alphamissense` (AlphaMissense scoring), `disease` (UniProt disease annotation), `pathways` (pathway mapping and network), `phase_e` (Phase E figure tests), `pymol` (PyMOL script generation), `future` (unimplemented features)
 
 
 ## Acknowledgements

@@ -562,9 +562,7 @@ python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --p
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --pymol --pymol-min-tier Medium
 
 # Full pipeline with all features including PyMOL
-python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae \
-  --enrich <ALIASES_FILE> --clustering --variants --stability --protvar \
-  --disease --pathways --pymol
+python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --enrich <ALIASES_FILE> --clustering --variants --stability --protvar --disease --pathways --pymol
 ```
 
 ### Running Generated Scripts in PyMOL
