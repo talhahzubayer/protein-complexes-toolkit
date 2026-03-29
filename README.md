@@ -372,24 +372,5 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 
 Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`.
 
-
-## Roadmap
-
-### Completed
-
-- **Aim 5 - Structure Prediction Quality Assessment:** JAX-free PKL extraction, pDockQ scoring, 2-phase interface analysis, 50-column CSV (with `--interface --pae`), 10-figure visualisation suite
-- **Aim 1 - Database Ingestion:** Parsers for STRING, BioGRID, HuRI, and HuMAP with standardised DataFrame output
-- **Aim 2 - ID Cross-Referencing:** Isoform-aware mapping pipeline using STRING aliases (ENSP/ENSG/UniProt/gene symbol) with dual-level cross-database overlap analysis, structured lookup table export, and toolkit CSV enrichment
-- **STRING API Integration:** Centralised API client (`string_api.py`) with automatic validation fallback across ID resolution, enrichment, and database loading - on by default with `--no-api` opt-out
-- **Aim 3 - Protein Clustering:** STRING sequence cluster parsing, UniProt-mapped indexing, homologous pair detection, optional API homology scores, clustering validation figure (Fig 18), toolkit integration with `--clustering` flag (Foldseek/hybrid modes deferred)
-- **Aim 4 - Variant Mapping:** UniProt/ClinVar/ExAC variant parsing, biotite/BioPython SASA-based 4-class structural context classification (interface core/rim via cross-chain distance, surface, buried core), per-complex variant burden and enrichment analysis, 3 variant visualisation figures (Figs 11-13), toolkit integration with `--variants` and `--no-clinvar` flags
-- **EVE Stability Scoring (D.2):** EVE evolutionary pathogenicity predictions with lazy-loaded per-protein score CSVs, accession-to-entry-name mapping via UniProt ID mapping file, 8 CSV columns, stability cross-validation figure (Fig 17 Panel A+C), toolkit integration with `--stability` flag
-- **Offline AlphaMissense + Monomeric FoldX Scoring (D.1):** Pre-computed AlphaMissense pathogenicity scores (216M variants) and AFDB FoldX DDG values (209M substitutions) from local data files; no API dependency; 8 CSV columns, stability cross-validation figure (Fig 17 Panel B+C); toolkit integration with `--protvar` flag
-- **Disease & Pathway Integration (Phase E):** UniProt disease/PTM/GO/drug-target annotation (offline XML + API fallback), Reactome pathway mapping with per-pathway PPI enrichment, NetworkX network analysis, 3 visualisation figures (Figs 14-16), toolkit integration with `--disease` and `--pathways` flags, 24 new CSV columns
-- **PyMOL Visualisation (Phase F):** Scene-managed `.pml` script generation (~1,280 lines, 21 functions) with chain colouring, pLDDT confidence bands (PyMOL-compatible strict `<`/`>` operators), interface residue highlighting (sticks), pathogenicity-aware variant spheres coloured by structural context, ProtVar/AlphaMissense transparency overlay, metadata and biological annotation comments (sanitised for PyMOL `;` and newline handling), homodimer support, `.ent`/`.pdb` file discovery, pre-computed interface residues, `py3Dmol` in-notebook fallback with `PYMOL_TO_HEX` colour mapping, tqdm progress bar, standalone CLI (`generate` + `batch` subcommands), toolkit integration with `--pymol` flag
-### Planned
-- **Million-Complex Production Run:** Full pipeline validation on large-scale AlphaFold-Multimer dataset
-
-
 ## Acknowledgements
 Developed by Talhah Zubayer under the supervision of David Burke as part of the MSc Applied Bioinformatics programme at King's College London.
