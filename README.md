@@ -138,7 +138,7 @@ The pipeline produces a 25-column base CSV, progressively expandable to 121 colu
 
 **toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, and resume from interruption. Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). Implements 2 quality classification schemes.
 
-**visualise_results.py** - Generates up to 18 figures with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`).
+**visualise_results.py** - Generates up to 19 figures with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`).
 
 #### Database & Enrichment
 
@@ -369,8 +369,9 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 16 | Pathway Network | NetworkX spring layout of top Reactome pathways, coloured by % High-tier complexes |
 | 17 | Stability Cross-Validation | EVE vs AlphaMissense concordance, AlphaMissense vs FoldX DDG, coverage landscape by tier |
 | 18 | Clustering Validation | Homodimer ground truth scatter (shared = total clusters), cluster ratio by quality tier |
+| 19 | Prediction Quality Paradox | 2x2 panel: pathogenic interface variants and PPI density strengthen with quality (top row) while gene constraint and disorder fraction decline (bottom row), revealing systematic AF2-Multimer prediction bias toward ordered protein pairs |
 
-Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`.
+Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`. Figure 19 requires variant + pathway columns from `--variants --pathways`.
 
 ## Acknowledgements
 Developed by Talhah Zubayer under the supervision of David Burke as part of the MSc Applied Bioinformatics programme at King's College London.
