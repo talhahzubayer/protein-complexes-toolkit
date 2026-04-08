@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-AlphaFold2 Analysis Visualisation Tool — generates up to 16 figures + 1b
-supplementary from the CSV produced by toolkit.py.  Figures are auto-detected
-from the columns present in the CSV, so only the relevant subset is generated
-for any given pipeline run.
+AlphaFold2 Analysis Visualisation Tool - generates up to 16 figures + 1b supplementary from the CSV produced by toolkit.py.  
+Figures are auto-detected from the columns present in the CSV, so only the relevant subset is generated for any given pipeline run.
 
-Figures are grouped by MSc Research Project Plan item
-(see Documentation/MSc Research Project Plan.pdf):
+Figures are grouped by the Aim items listed on the MSc Research Project Plan document
 
-Item 5 — Structure prediction (Figs 1-9, always/interface/chain-count):
+Item 5 - Structure prediction (Figs 1-9, always/interface/chain-count):
   1.  ipTM vs pDockQ by Quality Tier (or disorder-coloured fallback)
   2.  Global PAE Health Check histogram
   3.  Interface PAE by Quality Tier  (boxplots + strip)
@@ -19,14 +16,14 @@ Item 5 — Structure prediction (Figs 1-9, always/interface/chain-count):
   8.  Metric Disagreement  (scatter with disagreement band)
   9.  Chain-Count Quality Profile  (violin + scatter by chain count)
 
-Item 3 — Identify similar proteins/pairs (Fig 10, require --clustering):
+Item 3 - Identify similar proteins/pairs (Fig 10, require --clustering):
  10.  Sequence Clustering Validation  (cluster sharing by architecture + tier)
 
-Item 4 — Mapping genome variation (Figs 11-12, require --variants):
+Item 4 - Mapping genome variation (Figs 11-12, require --variants):
  11.  Classified Variant Sankey  (significance -> structural context)
  12.  Interface Variant Density vs Quality  (density scatter + Spearman)
 
-Item 6 — Map stability scores (Fig 13, require --stability + --protvar):
+Item 6 - Map stability scores (Fig 13, require --stability + --protvar):
  13.  Stability Predictor Cross-Validation  (EVE vs ProtVar concordance)
 
 Disease & pathway analysis (Figs 14-15):
@@ -34,40 +31,31 @@ Disease & pathway analysis (Figs 14-15):
  15.  Pathway-Level Network  (require --pathways, NetworkX)
 
 Synthesis (Fig 16, require --variants + --pathways):
- 16.  Prediction Quality Paradox  (2x2 panel: pathogenic interface variants
-      and PPI density strengthen with quality while gene constraint and
-      disorder fraction reveal systematic AF2-Multimer prediction bias)
+ 16.  Prediction Quality Paradox  (2x2 panel: pathogenic interface variants and PPI density strengthen with quality while gene constraint, and disorder fraction reveal systematic AF2-Multimer prediction bias)
 
 Supplementary:
  1b.  Disorder-coloured quality scatter (requires --disorder-scatter flag)
 
 Rendering approach:
     All scatter figures use matplotlib scatter() at every dataset scale.
-    Point size and alpha adapt automatically based on dataset size so that
-    small datasets (~500) show large readable dots and million-scale datasets
-    approach a pixel-dot density look.
-    Status messages with timing are printed around blocking render calls so the
-    user knows the script is not stuck, even for multi-minute renders at very
-    large scale.
-    The --density flag adds KDE density contour overlays with percentile labels
-    to scatter figures where density context aids interpretation.
+    Point size and alpha adapt automatically based on dataset size so that small datasets (~500) show large readable dots and million-scale datasets approach a pixel-dot density look.
+    Status messages with timing are printed around blocking render calls so the user knows the script is not stuck, even for multi-minute renders at very large scale.
+    The --density flag adds KDE density contour overlays with percentile labels to scatter figures where density context aids interpretation.
 
 Per-complex PAE heatmaps are available on demand via --pae-heatmaps.
-When a matching PDB file is found, chain boundaries are drawn and the best
-interacting chain pair is highlighted.
+When a matching PDB file is found, chain boundaries are drawn and the best interacting chain pair is highlighted.
 
 Dependencies:
     read_af2_nojax.py   -> JAX mocking and PKL loading (same directory).
     pdockq.py           -> Chain info / offsets for PAE heatmaps (optional).
-    pandas, matplotlib, numpy, scipy (stats + KDE), seaborn (optional),
-    networkx (optional, for Fig 15).
+    pandas, matplotlib, numpy, scipy (stats + KDE), seaborn (optional), networkx (optional, for Fig 15).
 
 Usage:
-    python visualise_results.py results.csv                               # auto-detect
-    python visualise_results.py results.csv --output-dir ./figures         # custom output
-    python visualise_results.py results.csv --density                      # KDE contours
-    python visualise_results.py results.csv --disorder-scatter             # also Fig 1b
-    python visualise_results.py results.csv --pae-heatmaps /path/to/models # PAE heatmaps
+    python visualise_results.py results.csv                                    # auto-detect
+    python visualise_results.py results.csv --output-dir ./figures             # custom output
+    python visualise_results.py results.csv --density                          # KDE contours
+    python visualise_results.py results.csv --disorder-scatter                 # also Fig 1b
+    python visualise_results.py results.csv --pae-heatmaps /path/to/models     # PAE heatmaps
     python visualise_results.py results.csv --pae-heatmaps /models --limit 50
 """
 
@@ -982,7 +970,7 @@ def _print_paradox_table(all_rows):
     """Pretty-print the prediction quality paradox statistics table to console."""
     hdr = f"{'Panel':<6} {'Metric':<30} {'Subset':<12} {'Test':<18} {'Statistic':>12} {'p-value':>12} {'Low':>10} {'Medium':>10} {'High':>10} {'Effect':>12} {'n(L)':>6} {'n(M)':>6} {'n(H)':>6}"
     print("\n" + "=" * len(hdr))
-    print("  Prediction Quality Paradox — Statistical Summary")
+    print("  Prediction Quality Paradox - Statistical Summary")
     print("=" * len(hdr))
     print(hdr)
     print("-" * len(hdr))
@@ -1005,7 +993,7 @@ def _print_paradox_table(all_rows):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# FIGURE FUNCTIONS — strict numerical order (1, 1b, 2-16)
+# FIGURE FUNCTIONS - strict numerical order (1, 1b, 2-16)
 # ══════════════════════════════════════════════════════════════════════
 # -- Item 5: Structure prediction (Figs 1-9) --------------------------------
 
@@ -1731,17 +1719,17 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False) 
 
 
 def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
-    """Fig 10: Item 3 — Identify similar proteins/pairs.
+    """Fig 10: Item 3 - Identify similar proteins/pairs.
 
-    Panel A — Homodimer ground truth scatter (shared vs total cluster count).
-    Panel B — Shared cluster ratio by quality tier (heterodimers only).
+    Panel A - Homodimer ground truth scatter (shared vs total cluster count).
+    Panel B - Shared cluster ratio by quality tier (heterodimers only).
 
     Requires clustering columns:
         sequence_cluster_count, shared_cluster_count, complex_type, quality_tier_v2.
     """
     required = ['sequence_cluster_count', 'shared_cluster_count', 'complex_type']
     if not all(c in df.columns for c in required):
-        print("  Skipping Fig 10 — missing clustering columns")
+        print("  Skipping Fig 10 - missing clustering columns")
         return
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
@@ -2032,7 +2020,7 @@ def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
 
 
 def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 12: Item 4 — Mapping genome variation.
+    """Fig 12: Item 4 - Mapping genome variation.
 
     Scatter plot of interface variant density (variants per interface residue)
     against composite score, coloured by quality tier. Spearman and partial
@@ -2169,11 +2157,11 @@ def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> 
 
 
 def plot_fig13_stability_crossvalidation(df: pd.DataFrame) -> None:
-    """Fig 13: Item 6 — Map stability scores.
+    """Fig 13: Item 6 - Map stability scores.
 
-    Panel A — EVE vs AlphaMissense concordance scatter (pooled both chains).
-    Panel B — AlphaMissense vs monomeric FoldX DDG scatter (chain A).
-    Panel C — Coverage landscape grouped bar chart by quality tier.
+    Panel A - EVE vs AlphaMissense concordance scatter (pooled both chains).
+    Panel B - AlphaMissense vs monomeric FoldX DDG scatter (chain A).
+    Panel C - Coverage landscape grouped bar chart by quality tier.
 
     Requires stability + ProtVar columns:
         eve_score_mean_a/b, protvar_am_mean_a/b, protvar_foldx_mean_a/b,
@@ -2181,7 +2169,7 @@ def plot_fig13_stability_crossvalidation(df: pd.DataFrame) -> None:
     """
     required = ['eve_score_mean_a', 'protvar_am_mean_a', 'quality_tier_v2']
     if not all(c in df.columns for c in required):
-        print("  Skipping Fig 13 — missing stability/ProtVar columns")
+        print("  Skipping Fig 13 - missing stability/ProtVar columns")
         return
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
@@ -2357,12 +2345,12 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
     Requires 'n_diseases_a' column.
     """
     if 'n_diseases_a' not in df.columns:
-        print("  Skipping Fig 14 — no disease data available")
+        print("  Skipping Fig 14 - no disease data available")
         return
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
     if tier_col not in df.columns:
-        print("  Skipping Fig 14 — no quality tier column")
+        print("  Skipping Fig 14 - no quality tier column")
         return
 
     total_diseases = df['n_diseases_a'].fillna(0).astype(int)
@@ -2420,7 +2408,7 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
                   fontsize=9, bbox=dict(boxstyle='round,pad=0.3',
                                         facecolor='white', edgecolor='grey', alpha=0.8))
 
-    # Drug target disease prevalence — text annotation box with Fisher test
+    # Drug target disease prevalence - text annotation box with Fisher test
     baseline_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
     if 'is_drug_target_a' in df.columns:
         drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
@@ -2517,7 +2505,7 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
             label_text = f'{total} ({n_prots} proteins)'
             label_x = left[i] + max(left) * 0.02
             if label_x + len(label_text) * 0.35 > xlim_upper:
-                # Bar too close to boundary — place label inside in white
+                # Bar too close to boundary - place label inside in white
                 ax_b.text(left[i] - max(left) * 0.02, i, label_text,
                           va='center', ha='right', fontsize=7, color='white',
                           fontweight='bold')
@@ -2551,7 +2539,7 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
     figure.suptitle("Disease Association Enrichment Across Quality Tiers",
                     fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
 
-    # Caption — dynamic values, no hardcoded dataset sizes
+    # Caption - dynamic values, no hardcoded dataset sizes
     n_effective = len(df)
     overall_disease_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
     caption_14 = (
@@ -2566,7 +2554,7 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
     _save_figure(figure, '14_Disease_Enrichment.png')
 
 
-# Old drug-target quality figure removed — null result (p = 0.270, n = 80);
+# Old drug-target quality figure removed - null result (p = 0.270, n = 80);
 # drug-target disease enrichment is reported as an annotation box in Fig 14 Panel A instead.
 
 
@@ -2600,11 +2588,11 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
     Requires NetworkX and 'reactome_pathways_a' column.
     """
     if not _HAS_NETWORKX:
-        print("  Skipping Fig 15 — NetworkX not installed")
+        print("  Skipping Fig 15 - NetworkX not installed")
         return
 
     if 'reactome_pathways_a' not in df.columns:
-        print("  Skipping Fig 15 — no pathway data available")
+        print("  Skipping Fig 15 - no pathway data available")
         return
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
@@ -2667,7 +2655,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
                 edge_data.setdefault(key, []).append(pdockq_val)
 
     if not pathway_complexes:
-        print("  Skipping Fig 15 — no parseable pathway data")
+        print("  Skipping Fig 15 - no parseable pathway data")
         return
 
     # ── Filter to target depth level ──
@@ -2712,7 +2700,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
                    frac_high=frac_high,
                    name=pathway_names.get(pid, pid))
 
-    # Build edges — exclude hierarchical parent-child links
+    # Build edges - exclude hierarchical parent-child links
     effective_threshold = min_shared_complexes
     for (p1, p2), vals in edge_data.items():
         if p1 in keep_pids and p2 in keep_pids and len(vals) >= effective_threshold:
@@ -2732,16 +2720,16 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
             break  # no more edges to remove at this threshold
 
     if G.number_of_nodes() == 0:
-        print("  Skipping Fig 15 — empty graph after filtering")
+        print("  Skipping Fig 15 - empty graph after filtering")
         return
 
-    # ── Layout — shrink inward to leave margin for labels ──
+    # ── Layout - shrink inward to leave margin for labels ──
     pos = nx.kamada_kawai_layout(G)
     pos = {k: v * 0.85 for k, v in pos.items()}
 
     figure, ax = plt.subplots(1, 1, figsize=(14, 14))
 
-    # Colour normalisation — % High-tier (0% to dynamic max for better spread)
+    # Colour normalisation - % High-tier (0% to dynamic max for better spread)
     node_frac_high = [G.nodes[n]['frac_high'] for n in G.nodes()]
     vmin = 0.0
     vmax = max(node_frac_high) if node_frac_high and max(node_frac_high) > 0 else 0.5
@@ -2762,7 +2750,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
         alpha = 0.05 + 0.35 * frac  # weak edges fade, strong edges visible
         ax.plot(x_coords, y_coords, color='#888888', linewidth=width, alpha=alpha)
 
-    # Draw nodes — data-relative sizing for visible differentiation
+    # Draw nodes - data-relative sizing for visible differentiation
     counts = [G.nodes[n]['n_complexes'] for n in G.nodes()]
     min_c, max_c = min(counts), max(counts)
     node_sizes = [300 + 2700 * (c - min_c) / max(1, max_c - min_c) for c in counts]
@@ -2771,7 +2759,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
                            node_color=node_colors, edgecolors='black',
                            linewidths=0.8)
 
-    # Label ALL nodes — centred inside node with collision avoidance
+    # Label ALL nodes - centred inside node with collision avoidance
     node_list = list(G.nodes())
     node_size_map = dict(zip(node_list, node_sizes))
     label_data = []
@@ -2784,7 +2772,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
         fs = 5 + 3 * (sz - 300) / max(1, 2700)
         label_data.append({'x': x, 'y': y, 'text': wrapped, 'fontsize': fs})
 
-    # Collision nudge — sort top-to-bottom, push overlapping labels apart
+    # Collision nudge - sort top-to-bottom, push overlapping labels apart
     label_data.sort(key=lambda d: -d['y'])
     nudge = 0.03
     for i in range(len(label_data)):
@@ -2802,7 +2790,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
     ax.axis('off')
     ax.margins(0.15)
 
-    # Colourbar — % High-tier complexes
+    # Colourbar - % High-tier complexes
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = figure.colorbar(sm, ax=ax, shrink=0.6, pad=0.06)
@@ -2813,7 +2801,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
     cbar.set_ticks(tick_vals)
     cbar.set_ticklabels([f'{v * 100:.0f}%' for v in tick_vals])
 
-    # Node-size legend — show min and max with explicit labels
+    # Node-size legend - show min and max with explicit labels
     ref_sizes = [min_c, max_c]
     ref_labels = [f'{min_c:,} (smallest)', f'{max_c:,} (largest)']
     legend_elements = []
@@ -2832,7 +2820,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
     figure.suptitle("Reactome Pathway Network by Structural Quality",
                     fontsize=FONT_TITLE + 1, fontweight='bold')
 
-    # Caption — dynamic values, no hardcoded sizes
+    # Caption - dynamic values, no hardcoded sizes
     n_nodes = G.number_of_nodes()
     n_edges = G.number_of_edges()
     hier_note = ', hierarchical parent\u2013child links excluded' if hierarchy_loaded else ''
@@ -2853,7 +2841,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
     _save_figure(figure, '15_Pathway_Network.png')
 
 
-# PTM-interface landscape figure removed — CSV lacks interface residue positions;
+# PTM-interface landscape figure removed - CSV lacks interface residue positions;
 # variant_details only records positions where variants exist, making PTM-interface
 # cross-referencing scientifically invalid (near-zero matches).
 
@@ -2862,15 +2850,15 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
 
 
 def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
-    """Fig 16 — The Prediction Quality Paradox.
+    """Fig 16 - The Prediction Quality Paradox.
 
     Produces a 2x2 panel figure:
-      Top row  — "Interface-level validation":
+      Top row  - "Interface-level validation":
         A: Pathogenic interface variant rate by tier (grouped bar, signal strengthens)
         B: PPI enrichment ratio by tier (violin+box, signal strengthens)
-      Bottom row — "Protein-level prediction bias":
+      Bottom row - "Protein-level prediction bias":
         C: LoF-intolerant gene fraction, pLI >= 0.9, by tier (grouped bar, declines)
-        D: Disorder fraction by tier (violin+box, declines — mechanistic bridge)
+        D: Disorder fraction by tier (violin+box, declines - mechanistic bridge)
 
     Each panel shows an omnibus p-value and a single Low-vs-High bracket.
     A homodimer robustness footnote is added to the figure.  Full
@@ -2890,7 +2878,7 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
     wdf['_has_path_iface'] = wdf['n_pathogenic_interface_variants'].fillna(0) > 0
 
     if len(wdf) == 0:
-        print("  Fig 16: no data after filtering — skipped.")
+        print("  Fig 16: no data after filtering - skipped.")
         return
 
     # ── Figure assembly (2x2) ────────────────────────────────────────
@@ -3136,43 +3124,43 @@ def main() -> None:
     print("\n--- Generating Figures ---\n")
 
     # ALWAYS generated: Fig 1 and Fig 2
-    print("Fig 1 — Quality Scatter (ipTM vs pDockQ)")
+    print("Fig 1 - Quality Scatter (ipTM vs pDockQ)")
     plot_fig1_quality_scatter(df, col_flags, density_mode=args.density)
     figures_generated += 1
 
-    print("Fig 2 — Global PAE Health Check")
+    print("Fig 2 - Global PAE Health Check")
     plot_fig2_pae_health_check(df)
     figures_generated += 1
 
     # Supplementary Fig 1b (only when --disorder-scatter AND V2 data present)
     if args.disorder_scatter and col_flags['has_v2_data']:
-        print("Fig 1b — Disorder Scatter (supplementary)")
+        print("Fig 1b - Disorder Scatter (supplementary)")
         plot_fig1b_disorder_scatter(df, density_mode=args.density)
         figures_generated += 1
 
     # Interface figures (require V2 + interface data): Figs 3-8
     if col_flags['has_v2_data'] and col_flags['has_interface_data']:
-        print("Fig 3 — Interface PAE by Tier")
+        print("Fig 3 - Interface PAE by Tier")
         plot_fig3_interface_pae_by_tier(df)
         figures_generated += 1
 
-        print("Fig 4 — Composite & Tier Validation")
+        print("Fig 4 - Composite & Tier Validation")
         plot_fig4_composite_validation(df, density_mode=args.density)
         figures_generated += 1
 
-        print("Fig 5 — Interface vs Bulk")
+        print("Fig 5 - Interface vs Bulk")
         plot_fig5_interface_vs_bulk(df, density_mode=args.density)
         figures_generated += 1
 
-        print("Fig 6 — Paradox Spotlight")
+        print("Fig 6 - Paradox Spotlight")
         plot_fig6_paradox_spotlight(df)
         figures_generated += 1
 
-        print("Fig 7 — Homo vs Hetero")
+        print("Fig 7 - Homo vs Hetero")
         plot_fig7_homo_vs_hetero(df)
         figures_generated += 1
 
-        print("Fig 8 — Metric Disagreement")
+        print("Fig 8 - Metric Disagreement")
         plot_fig8_metric_disagreement(df, density_mode=args.density)
         figures_generated += 1
     else:
@@ -3182,47 +3170,47 @@ def main() -> None:
 
     # Chain-count figure (requires n_chains column)
     if col_flags['has_chain_info']:
-        print("Fig 9 — Chain-Count Quality Profile")
+        print("Fig 9 - Chain-Count Quality Profile")
         plot_fig9_chain_count_profile(df, density_mode=args.density)
         figures_generated += 1
 
     # Clustering validation (requires --clustering)
     if col_flags.get('has_clustering_data', False) and 'complex_type' in df.columns:
-        print("Fig 10 — Sequence Clustering Validation")
+        print("Fig 10 - Sequence Clustering Validation")
         plot_fig10_clustering_validation(df)
         figures_generated += 1
 
     # Variant figures (require --variants)
     if col_flags['has_variant_data']:
-        print("Fig 11 — Classified Variant Sankey")
+        print("Fig 11 - Classified Variant Sankey")
         plot_fig11_variant_consequence_flow(df)
         figures_generated += 1
 
-        print("Fig 12 — Interface Variant Density vs Quality")
+        print("Fig 12 - Interface Variant Density vs Quality")
         plot_fig12_variant_density(df, density_mode=args.density)
         figures_generated += 1
 
     # Stability cross-validation (requires --stability + --protvar)
     if col_flags.get('has_stability_data', False):
-        print("Fig 13 — Stability Predictor Cross-Validation")
+        print("Fig 13 - Stability Predictor Cross-Validation")
         plot_fig13_stability_crossvalidation(df)
         figures_generated += 1
 
     # Disease enrichment (requires --disease)
     if col_flags.get('has_disease_data', False):
-        print("Fig 14 — Disease Enrichment by Tier")
+        print("Fig 14 - Disease Enrichment by Tier")
         plot_fig14_disease_enrichment(df)
         figures_generated += 1
 
     # Pathway-level network (requires --pathways)
     if col_flags.get('has_pathway_data', False):
-        print("Fig 15 — Pathway-Level Network")
+        print("Fig 15 - Pathway-Level Network")
         plot_fig15_pathway_network(df)
         figures_generated += 1
 
     # Prediction quality paradox (requires --variants + --pathways)
     if col_flags.get('has_paradox_data', False):
-        print("Fig 16 — Prediction Quality Paradox")
+        print("Fig 16 - Prediction Quality Paradox")
         plot_fig16_prediction_quality_paradox(df)
         figures_generated += 1
 
