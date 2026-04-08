@@ -1,9 +1,45 @@
 #!/usr/bin/env python3
 """
-AlphaFold2 Analysis Visualisation Tool - generates up to 19 figures from the
-CSV produced by toolkit.py.  Figures are auto-detected from the columns
-present in the CSV, so only the relevant subset is generated for any given
-pipeline run.
+AlphaFold2 Analysis Visualisation Tool — generates up to 16 figures + 1b
+supplementary from the CSV produced by toolkit.py.  Figures are auto-detected
+from the columns present in the CSV, so only the relevant subset is generated
+for any given pipeline run.
+
+Figures are grouped by MSc Research Project Plan item
+(see Documentation/MSc Research Project Plan.pdf):
+
+Item 5 — Structure prediction (Figs 1-9, always/interface/chain-count):
+  1.  ipTM vs pDockQ by Quality Tier (or disorder-coloured fallback)
+  2.  Global PAE Health Check histogram
+  3.  Interface PAE by Quality Tier  (boxplots + strip)
+  4.  Composite Score & Quality Tier Validation  (violin + scatter)
+  5.  Interface vs Bulk pLDDT  (scatter with diagonal)
+  6.  Paradox Complexes Spotlight  (violin triptych)
+  7.  Complex Architecture Comparison  (Homo / Hetero / Multi-chain)
+  8.  Metric Disagreement  (scatter with disagreement band)
+  9.  Chain-Count Quality Profile  (violin + scatter by chain count)
+
+Item 3 — Identify similar proteins/pairs (Fig 10, require --clustering):
+ 10.  Sequence Clustering Validation  (cluster sharing by architecture + tier)
+
+Item 4 — Mapping genome variation (Figs 11-12, require --variants):
+ 11.  Classified Variant Sankey  (significance -> structural context)
+ 12.  Interface Variant Density vs Quality  (density scatter + Spearman)
+
+Item 6 — Map stability scores (Fig 13, require --stability + --protvar):
+ 13.  Stability Predictor Cross-Validation  (EVE vs ProtVar concordance)
+
+Disease & pathway analysis (Figs 14-15):
+ 14.  Disease Enrichment by Quality Tier  (require --disease)
+ 15.  Pathway-Level Network  (require --pathways, NetworkX)
+
+Synthesis (Fig 16, require --variants + --pathways):
+ 16.  Prediction Quality Paradox  (2x2 panel: pathogenic interface variants
+      and PPI density strengthen with quality while gene constraint and
+      disorder fraction reveal systematic AF2-Multimer prediction bias)
+
+Supplementary:
+ 1b.  Disorder-coloured quality scatter (requires --disorder-scatter flag)
 
 Rendering approach:
     All scatter figures use matplotlib scatter() at every dataset scale.
@@ -16,48 +52,6 @@ Rendering approach:
     The --density flag adds KDE density contour overlays with percentile labels
     to scatter figures where density context aids interpretation.
 
-Figures (always generated - base CSV columns only):
-  1.  ipTM vs pDockQ by Quality Tier (or disorder-coloured fallback)
-  2.  Global PAE Health Check histogram
-
-Figures (require full 44-column interface CSV):
-  3.  Interface PAE by Quality Tier  (boxplots + strip)
-  4.  Composite Score & Quality Tier Validation  (violin + scatter)
-  5.  Interface vs Bulk pLDDT  (scatter with diagonal)
-  6.  Paradox Complexes Spotlight  (violin triptych)
-  7.  Complex Architecture Comparison  (Homo / Hetero / Multi-chain)
-  8.  Metric Disagreement  (scatter with disagreement band)
-  9.  Correlation & Flag Landscape  (heatmap pair)
-
-Figures (require n_chains column from multi-chain pipeline):
- 10.  Chain-Count Quality Profile  (violin + scatter by chain count)
-
-Figures (require variant data from --variants):
- 11.  Classified Variant Sankey  (significance -> structural context)
- 12.  Enrichment Distribution by Quality Tier  (histogram + KDE + Wilcoxon)
- 13.  Interface Variant Density vs Quality  (density scatter + Spearman)
-
-Figures (require pathway data from --pathways):
- 14.  Pathway Functional Coherence  (shared pathway rates + PPI enrichment)
- 16.  Pathway-Level Network  (NetworkX graph of pathway co-occurrence)
-
-Figures (require disease data from --disease):
- 15.  Disease Enrichment by Quality Tier  (disease rate + drug target overlay)
-
-Figures (require stability data from --stability + --protvar):
- 17.  Stability Predictor Cross-Validation  (EVE vs ProtVar concordance)
-
-Figures (require clustering data from --clustering):
- 18.  Sequence Clustering Validation  (cluster sharing by architecture + tier)
-
-Figures (require --variants + --pathways):
- 19.  Prediction Quality Paradox  (2x2 panel: pathogenic interface variants
-      and PPI density strengthen with quality while gene constraint and
-      disorder fraction reveal systematic AF2-Multimer prediction bias)
-
-Supplementary:
- 1b.  Disorder-coloured quality scatter (requires --disorder-scatter flag)
-
 Per-complex PAE heatmaps are available on demand via --pae-heatmaps.
 When a matching PDB file is found, chain boundaries are drawn and the best
 interacting chain pair is highlighted.
@@ -66,7 +60,7 @@ Dependencies:
     read_af2_nojax.py   -> JAX mocking and PKL loading (same directory).
     pdockq.py           -> Chain info / offsets for PAE heatmaps (optional).
     pandas, matplotlib, numpy, scipy (stats + KDE), seaborn (optional),
-    networkx (optional, for Fig 16).
+    networkx (optional, for Fig 15).
 
 Usage:
     python visualise_results.py results.csv                               # auto-detect
@@ -113,7 +107,7 @@ from read_af2_nojax import load_pkl_without_jax
 
 
 # Output Directory - set by command-line argument (default is current directory)
-OUTPUT_DIR: str = ""  
+OUTPUT_DIR: str = ""
 
 
 #---------Shared Design Constants---------------------------------------------
@@ -150,7 +144,7 @@ PAE_FIGURE_SIZE = (8, 7)
 PAE_VMIN = 0
 PAE_VMAX = 30  # Angstroms
 
-# Variant visualisation constants (Figs 11-13, require --variants CSV columns)
+# Variant visualisation constants (Figs 11-12, require --variants CSV columns)
 CONTEXT_ORDER = ['interface_core', 'interface_rim', 'surface_non_interface', 'buried_core']
 CONTEXT_LABELS = {
     'interface_core': 'Interface Core\n(<4\u00c5)',
@@ -173,14 +167,8 @@ SIGNIFICANCE_COLORS = {
     'Unknown': '#bdc3c7',
 }
 
-# Phase E figure constants (Figs 14-15, 16)
-SHARED_PATHWAY_BINS = [
-    (0, 3, '0\u20133'), (4, 10, '4\u201310'),
-    (11, 30, '11\u201330'), (31, float('inf'), '31+'),
-]
 
-
-#---------------------Adaptive Scatter Sizing----------------------------------------------
+# ── Infrastructure helpers ──────────────────────────────────────────
 
 def _adaptive_scatter_params(n: int) -> Tuple[float, float]:
     """Return (point_size, alpha) scaled to dataset size.
@@ -223,7 +211,7 @@ def _timed_scatter(axes: plt.Axes, x, y, n_points: int, fig_label: str = '', **k
         print(f"{prefix}scatter: {elapsed:.1f}s")
     return result
 
-#------------------Column Detection--------------------------------------------------
+# ── Column detection & data loading ────────────────────────────────
 
 def detect_columns(df: pd.DataFrame) -> dict:
     """Detect which column groups are present in the CSV.
@@ -251,14 +239,12 @@ def detect_columns(df: pd.DataFrame) -> dict:
         ),
     }
 
-#------------------------Data Loading-----------------------------------
-
 def load_data(csv_path: str) -> pd.DataFrame:
     """Load the analysis CSV into a pandas DataFrame.
     Numeric columns are coerced and non-numeric values become NaN. Rows with missing ipTM are dropped and pDockQ = 0 is retained because genuine zero-contact complexes are informative for diagnostics.
     Also performs:
       - Case normalisation on complex_type (Homodimer -> homodimer).
-      - Splits the comma-separated interface_flags column into individual boolean columns (one per flag) so that downstream figures (e.g. Fig 9b) can filter by specific flags directly.
+      - Splits the comma-separated interface_flags column into individual boolean columns (one per flag) so that downstream figures can filter by specific flags directly.
     Args:
         csv_path: Path to the CSV produced by toolkit.py.
     Returns:
@@ -280,7 +266,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Item 1: Expand interface_flags into individual boolean columns. 
+    # Item 1: Expand interface_flags into individual boolean columns.
     # The CSV stores flags as a single comma-separated string, e.g. "small_interface,metric_disagreement". Downstream figures need individual boolean columns.
     ALL_KNOWN_FLAGS = [
         'small_interface', 'sparse_interface', 'asymmetric_interface',
@@ -295,7 +281,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
         df['complex_type'] = df['complex_type'].astype(str).str.lower()
 
     # Item 3: Relaxed drop filter
-    # Keep complexes with pDockQ = 0 (genuine zero-contact interfaces) since they are informative for Fig 2 (PAE health), Fig 9 (flag landscape), and the new chain-count profile.  
+    # Keep complexes with pDockQ = 0 (genuine zero-contact interfaces) since they are informative for diagnostics.
     # Only drop rows that truly lack ipTM.
     initial_count = len(df)
     df = df.dropna(subset=['iptm'])
@@ -326,7 +312,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
 
     return df.reset_index(drop=True)
 
-#---------------------Utility Helpers---------------------------------------------------
+# ── Shared rendering helpers (used across many figures) ─────────────
 
 def _apply_common_style(axes: plt.Axes, title: str, xlabel: str, ylabel: str, grid: bool = True) -> None:
     """Apply consistent font sizes and grid styling to a matplotlib axes.
@@ -391,7 +377,7 @@ def _build_tier_legend_handles(df: pd.DataFrame) -> list:
 
 def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray, color: str = '#333333', linewidth: float = 0.9, alpha: float = 0.6) -> None:
     """Overlay KDE density contours with percentile labels on a scatter axes.
-    Contour levels are percentile-based (10th, 30th, 50th, 70th, 90th of probability mass). 
+    Contour levels are percentile-based (10th, 30th, 50th, 70th, 90th of probability mass).
     The innermost ring encloses the top 10% density region and the outermost encloses 90% of all points - fails silently if too few points or if KDE encounters a singular matrix.
     Args:
         axes: Matplotlib axes with scatter data already plotted.
@@ -401,7 +387,7 @@ def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray, color: s
         alpha: Contour line alpha.
     """
     if len(x) < 20: # Too few points for KDE to be meaningful - skip contours
-        return 
+        return
     try:
         kde = gaussian_kde(np.vstack([x, y]), bw_method='scott')
         x_grid = np.linspace(x.min() - 0.02, x.max() + 0.02, 120)
@@ -445,7 +431,11 @@ def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray, color: s
     except np.linalg.LinAlgError:
         print("  Note: KDE failed (singular covariance); contours skipped.")
 
-#-----------------------------------Paradox Detection Helper---------------------------------------------
+def _despine(ax) -> None:
+    """Remove top and right spines if seaborn is available."""
+    if _HAS_SEABORN:
+        sns.despine(ax=ax)
+
 
 def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
     """Identify paradox complexes in a DataFrame.
@@ -460,7 +450,7 @@ def _get_paradox_mask(df: pd.DataFrame) -> pd.Series:
     mask = ((df['iptm'] >= IPTM_HIGH) & (df['pdockq'] >= PDOCKQ_HIGH) & (df['plddt_below50_fraction'] >= DISORDER_SUBSTANTIAL))
     return mask.fillna(False)
 
-#--------------------------------------------------------------Variant Detail Parsing-----------------------------------------------------------
+# ── Variant parsing helpers (Figs 11-12) ────────────────────────────
 
 def _normalise_significance(raw: str) -> str:
     """Map a raw ClinVar significance string to one of 5 display buckets."""
@@ -527,35 +517,6 @@ def _aggregate_all_variants(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ── Phase E Helpers (Figs 14-18) ─────────────────────────────────
-
-def _despine(ax) -> None:
-    """Remove top and right spines if seaborn is available."""
-    if _HAS_SEABORN:
-        sns.despine(ax=ax)
-
-
-def _parse_disease_name(entry: str) -> str:
-    """Extract disease name from a disease_details entry.
-
-    Input formats:
-        'OMIM:618428:Popov-Chang syndrome (POPCHAS)' → 'Popov-Chang syndrome (POPCHAS)'
-        'OMIM:154700:Marfan syndrome' → 'Marfan syndrome'
-        'Cancer' → 'Cancer'
-        '' → ''
-
-    Returns the disease name without OMIM prefix.
-    """
-    if not entry or not isinstance(entry, str):
-        return ''
-    entry = entry.strip()
-    if entry.startswith('OMIM:'):
-        # Format: OMIM:ID:name
-        parts = entry.split(':', 2)
-        return parts[2] if len(parts) == 3 else entry
-    return entry
-
-
 def _draw_sankey_band(ax, left_y0, left_y1, right_y0, right_y1,
                       x_left=0.15, x_right=0.85, color='grey', alpha=0.4):
     """Draw a curved flow band between left and right vertical positions.
@@ -588,8 +549,29 @@ def _draw_sankey_band(ax, left_y0, left_y1, right_y0, right_y1,
                                facecolor=color, edgecolor='none', alpha=alpha)
     ax.add_patch(patch)
 
+# ── Disease parsing helpers (Fig 14) ───────────────────────────────
 
-#--------------------------------------------------------------PAE Heatmaps-----------------------------------------------------------
+def _parse_disease_name(entry: str) -> str:
+    """Extract disease name from a disease_details entry.
+
+    Input formats:
+        'OMIM:618428:Popov-Chang syndrome (POPCHAS)' → 'Popov-Chang syndrome (POPCHAS)'
+        'OMIM:154700:Marfan syndrome' → 'Marfan syndrome'
+        'Cancer' → 'Cancer'
+        '' → ''
+
+    Returns the disease name without OMIM prefix.
+    """
+    if not entry or not isinstance(entry, str):
+        return ''
+    entry = entry.strip()
+    if entry.startswith('OMIM:'):
+        # Format: OMIM:ID:name
+        parts = entry.split(':', 2)
+        return parts[2] if len(parts) == 3 else entry
+    return entry
+
+# ── PAE heatmap helpers (on-demand via --pae-heatmaps) ──────────────
 
 def load_pae_matrix_from_pkl(pkl_path: str) -> Optional[np.ndarray]:
     """Load a PAE matrix from an AlphaFold2 PKL file.
@@ -717,1632 +699,7 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
     plt.close(figure)
     print(f"  Saved PAE Plot: {output_filename}")
 
-#-----------------------Figure 1-----------------------------------------------------------
-
-def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: bool = False) -> None:
-    """Fig 1: Overall prediction quality landscape.
-    Colours by V2 quality tier when available, otherwise falls back to disorder-fraction colouring (RdYlGn_r colourmap).
-    When density_mode is True, KDE contour overlays are added to show where complexes concentrate.
-    """
-    use_tier_colouring = col_flags['has_v2_data']
-    n_total = len(df)
-    pt_size, pt_alpha = _adaptive_scatter_params(n_total)
-    figure, axes = plt.subplots(figsize=(10, 8))
-    if use_tier_colouring:
-        # Plot by tier: Low first (behind), then Medium, then High on top
-        for tier in reversed(TIER_ORDER):
-            subset = df[df['quality_tier_v2'] == tier]
-            _timed_scatter(axes, subset['iptm'], subset['pdockq'], n_points=n_total, fig_label='Fig 1', c=TIER_COLORS[tier], s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=3, label=tier)
-
-        # Unclassified (missing PAE -> no tier)
-        unclassified = df[df['quality_tier_v2'].isna()]
-        if len(unclassified) > 0:
-            axes.scatter(unclassified['iptm'], unclassified['pdockq'], c='#bdc3c7', s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=2)
-    else:
-        # Fallback: disorder-fraction colouring
-        if 'plddt_below50_fraction' in df.columns:
-            disorder = df['plddt_below50_fraction'].fillna(0)
-            scatter = _timed_scatter(axes, df['iptm'], df['pdockq'], n_points=n_total, fig_label='Fig 1', c=disorder, cmap='RdYlGn_r', vmin=0, vmax=1, s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=3)
-            cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
-            cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
-        else:
-            _timed_scatter(axes, df['iptm'], df['pdockq'], n_points=n_total, fig_label='Fig 1', c='steelblue', s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=3)
-
-    # Optional density contours (--density flag)
-    if density_mode:
-        valid = df.dropna(subset=['iptm', 'pdockq'])
-        _overlay_kde_contours(axes, valid['iptm'].values, valid['pdockq'].values)
-
-    # Threshold lines
-    axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7, zorder=1)
-    axes.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7, zorder=1)
-
-    # Shaded high-quality quadrant (subtle)
-    axes.fill_between([IPTM_HIGH, 1.05], PDOCKQ_HIGH, 0.8, alpha=0.06, color='green', zorder=0)
-
-    # Build legend (tier handles only - multi-chain analysis is in Fig 10)
-    if use_tier_colouring:
-        final_handles = _build_tier_legend_handles(df)
-        axes.legend(handles=final_handles, title='Quality Tier', fontsize=FONT_TICK, title_fontsize=FONT_AXIS_LABEL, loc='lower right', framealpha=0.9)
-
-    axes.set_xlim(0.2, 1.05)
-    axes.set_ylim(-0.02, 0.8)
-    title = "AlphaFold2-Multimer: Quality Assessment (ipTM vs pDockQ)"
-    _apply_common_style(axes, title, 'ipTM', 'pDockQ')
-    _save_figure(figure, '1_Quality_Scatter.png')
-
-def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 1b (supplementary): Disorder-coloured scatter with density contours.
-    Each point is coloured by its disorder fraction (pLDDT < 50) using the RdYlGn_r colourmap.  KDE density contours with percentile labels are always overlaid so the reader can see where most complexes concentrate.
-    """
-    if 'plddt_below50_fraction' not in df.columns:
-        print("  Skipping Fig 1b: no disorder fraction column.")
-        return
-    disorder = df['plddt_below50_fraction'].fillna(0)
-
-    # Valid-data mask (need finite ipTM, pDockQ, and disorder)
-    mask = np.isfinite(df['iptm']) & np.isfinite(df['pdockq']) & np.isfinite(disorder)
-    x = df.loc[mask, 'iptm'].values
-    y = df.loc[mask, 'pdockq'].values
-    c = disorder[mask].values
-    n_points = len(x)
-    figure, axes = plt.subplots(figsize=(10, 8))
-
-    # Adaptive point sizing
-    pt_size, pt_alpha = _adaptive_scatter_params(n_points)
-
-    # Scatter: colour = disorder fraction
-    scatter = _timed_scatter(axes, x, y, n_points=n_points, fig_label='Fig 1b', c=c, cmap='RdYlGn_r', vmin=0, vmax=1, s=pt_size, alpha=pt_alpha, edgecolors='none', zorder=3)
-    cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
-    cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
-
-    # Density contours always shown for this figure
-    _overlay_kde_contours(axes, x, y)
-
-    # Reference lines & "confident" quadrant
-    axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
-    axes.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
-    axes.fill_between([IPTM_HIGH, 1.05], PDOCKQ_HIGH, 0.8, alpha=0.06, color='green', zorder=0)
-    axes.set_xlim(0.2, 1.05)
-    axes.set_ylim(-0.02, 0.8)
-
-    # Annotation: sample size
-    axes.text(0.02, 0.98, f'n = {n_points:,}', transform=axes.transAxes, fontsize=FONT_TICK, va='top', ha='left', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='grey', alpha=0.8))
-
-    _apply_common_style(axes, "Quality Scatter - Disorder Colouring (Supplementary)", 'ipTM', 'pDockQ')
-    _save_figure(figure, '1b_Quality_Scatter_Disorder.png')
-
-#----------------Figure 2--------------------------------------------------------
-
-def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
-    """Fig 2: Is the dataset generally well-resolved?"""
-    if 'pae_mean' not in df.columns:
-        print("  Skipping Fig 2: no pae_mean column.")
-        return
-    pae_values = df['pae_mean'].dropna()
-
-    if len(pae_values) == 0:
-        print("  Skipping Fig 2: no valid PAE values.")
-        return
-    
-    median_pae = pae_values.median()
-    below_threshold = (pae_values < PAE_CONFIDENT).sum()
-    figure, axes = plt.subplots(figsize=(8, 5))
-    axes.hist(pae_values, bins=30, color='#3498db', alpha=0.75, edgecolor='white', linewidth=0.5)
-
-    # Median line
-    axes.axvline(x=median_pae, color='red', linestyle='--', linewidth=1.5, label=f'Median: {median_pae:.1f} Å')
-
-    # Confident guideline
-    axes.axvline(x=PAE_CONFIDENT, color='green', linestyle='--', linewidth=1.5, label=f'Confident guideline: {PAE_CONFIDENT} Å')
-
-    axes.legend(fontsize=FONT_TICK, loc='upper right')
-
-    title = (f"Global PAE Health Check - {len(pae_values)} complexes, "
-             f"median {median_pae:.1f} Å, {below_threshold} below {PAE_CONFIDENT} Å")
-    _apply_common_style(axes, title, 'Mean PAE (Å)', 'Count', grid=False)
-    _save_figure(figure, '2_PAE_Health_Check.png')
-
-#------Figure 3--------------------------------------------------------------
-
-def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
-    """Fig 3: How confident are the contacts that matter for quality assessment?"""
-    required = ['interface_pae_mean', 'quality_tier_v2']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 3: missing required columns.")
-        return
-    plot_df = df.dropna(subset=required).copy()
-
-    if len(plot_df) == 0:
-        print("  Skipping Fig 3: no valid data after filtering.")
-        return
-
-    figure, axes = plt.subplots(figsize=(10, 6))
-
-    # Build data and positions for boxplots + strip
-    tier_data = []
-    tier_labels = []
-    tier_medians = []
-    positions = []
-    for idx, tier in enumerate(TIER_ORDER):
-        subset = plot_df[plot_df['quality_tier_v2'] == tier]['interface_pae_mean']
-        if len(subset) > 0:
-            tier_data.append(subset.values)
-            tier_labels.append(f'{tier}\n(n={len(subset)})')
-            tier_medians.append(subset.median())
-            positions.append(idx)
-
-    # Boxplots
-    box_parts = axes.boxplot(tier_data, positions=positions, widths=0.5, patch_artist=True, showfliers=False, medianprops=dict(color='black', linewidth=2))
-
-    # Colour the boxes
-    for idx, patch in enumerate(box_parts['boxes']):
-        tier_name = TIER_ORDER[idx] if idx < len(TIER_ORDER) else 'High'
-        patch.set_facecolor(TIER_COLORS.get(tier_name, '#cccccc'))
-        patch.set_alpha(0.6)
-
-    # Ensure median lines render above scatter points
-    for median_line in box_parts['medians']:
-        median_line.set_zorder(10)
-
-    # Jittered strip plot behind
-    for idx, data in enumerate(tier_data):
-        jitter = np.random.normal(0, 0.06, size=len(data))
-        axes.scatter(positions[idx] + jitter, data, c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'), alpha=0.35, s=20, zorder=1, edgecolors='none')
-
-    # PAE threshold line
-    axes.axhline(y=PAE_CONFIDENT, color='red', linestyle='--', linewidth=1.5, alpha=0.7, label=f'Confident contact cutoff ({PAE_CONFIDENT} Å)')
-
-    axes.set_xticks(positions)
-    axes.set_xticklabels(tier_labels, fontsize=FONT_AXIS_LABEL)
-    axes.legend(fontsize=FONT_TICK, loc='upper right')
-
-    # Subtitle with medians
-    median_text = " | ".join(
-        f"{TIER_ORDER[i]} median: {tier_medians[i]:.1f} Å"
-        for i in range(len(tier_medians))
-    )
-    axes.text(0.5, -0.12, median_text, transform=axes.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
-    _apply_common_style(axes, "Interface PAE by Quality Tier", '', 'Interface PAE (Å)', grid=False)
-    _save_figure(figure, '3_Interface_PAE_by_Tier.png')
-
-#---------Figure 4-----------------------------------------------------------
-
-def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 4: Why should I trust the quality tier assigned?
-    Panel (a): Composite score distributions by tier (violin/boxplot).
-    Panel (b): Composite vs confident contact fraction scatter.
-    """
-    required = ['interface_confidence_score', 'quality_tier_v2', 'confident_contact_fraction']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 4: missing required columns.")
-        return
-    plot_df = df.dropna(subset=required).copy()
-
-    if len(plot_df) == 0:
-        print("  Skipping Fig 4: no valid data.")
-        return
-
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
-
-    #-------------Panel (a): Composite score distributions--------------------------
-    tier_data_a = []
-    tier_labels_a = []
-    positions_a = []
-    for idx, tier in enumerate(TIER_ORDER):
-        subset = plot_df[plot_df['quality_tier_v2'] == tier]['interface_confidence_score']
-        if len(subset) > 0:
-            tier_data_a.append(subset.values)
-            tier_labels_a.append(f'{tier}\n(n={len(subset)})')
-            positions_a.append(idx)
-
-    # Violin plots
-    if tier_data_a:
-        vp = ax_a.violinplot(tier_data_a, positions=positions_a, showmedians=True, showextrema=False)
-        for idx, body in enumerate(vp['bodies']):
-            tier_name = TIER_ORDER[idx] if idx < len(TIER_ORDER) else 'High'
-            body.set_facecolor(TIER_COLORS.get(tier_name, '#cccccc'))
-            body.set_alpha(0.6)
-        if 'cmedians' in vp:
-            vp['cmedians'].set_color('black')
-            vp['cmedians'].set_linewidth(2)
-            vp['cmedians'].set_zorder(10)
-
-    # Jittered strip overlay
-    for idx, data in enumerate(tier_data_a):
-        jitter = np.random.normal(0, 0.06, size=len(data))
-        ax_a.scatter(positions_a[idx] + jitter, data, c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
-
-    # Decision threshold lines
-    thresholds = [
-        (UPGRADE_LOW_THRESHOLD, 'Low -> High upgrade', '#e74c3c'),
-        (UPGRADE_MEDIUM_THRESHOLD, 'Medium -> High upgrade', '#f39c12'),
-        (DOWNGRADE_HIGH_THRESHOLD, 'High -> Medium downgrade', '#2ecc71'),
-    ]
-    for val, label, colour in thresholds:
-        ax_a.axhline(y=val, color=colour, linestyle=':', linewidth=1.2, alpha=0.7)
-        ax_a.text(ax_a.get_xlim()[1], val, f' {label} ({val})', va='center', fontsize=8, color=colour, alpha=0.8)
-
-    ax_a.set_xticks(positions_a)
-    ax_a.set_xticklabels(tier_labels_a, fontsize=FONT_AXIS_LABEL)
-
-    # Tier colour legend - upper-left to avoid threshold label overlap
-    tier_legend = [mpatches.Patch(color=TIER_COLORS[t], alpha=0.6, label=t) for t in TIER_ORDER]
-    ax_a.legend(handles=tier_legend, fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
-
-    _apply_common_style(ax_a, "(a) Composite Score by Tier", '', 'Interface Confidence Score', grid=False)
-
-    #--------------Panel (b): Composite vs confident contact fraction-------------------------
-    n_panel_b = len(plot_df)
-    pt_size_b, pt_alpha_b = _adaptive_scatter_params(n_panel_b)
-
-    for tier in reversed(TIER_ORDER):
-        subset = plot_df[plot_df['quality_tier_v2'] == tier]
-        axes_b_kwargs = dict(c=TIER_COLORS[tier], alpha=pt_alpha_b, s=pt_size_b, edgecolors='white', linewidths=0.3, label=tier, zorder=3)
-        _timed_scatter(ax_b, subset['confident_contact_fraction'], subset['interface_confidence_score'], n_points=n_panel_b, fig_label='Fig 4b', **axes_b_kwargs)
-    ax_b.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK)
-
-    # Optional density contours
-    if density_mode:
-        valid_b = plot_df[['confident_contact_fraction', 'interface_confidence_score']].dropna()
-        _overlay_kde_contours(ax_b, valid_b['confident_contact_fraction'].values, valid_b['interface_confidence_score'].values)
-
-    # Correlation annotation
-    valid_both = plot_df[['confident_contact_fraction', 'interface_confidence_score']].dropna()
-    if len(valid_both) > 2:
-        r = valid_both['confident_contact_fraction'].corr(valid_both['interface_confidence_score'])
-        ax_b.text(0.05, 0.95, f'r = {r:.2f}', transform=ax_b.transAxes, fontsize=FONT_AXIS_LABEL, va='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    _apply_common_style(ax_b, "(b) Composite vs Confident Contact Fraction", 'Confident Contact Fraction', 'Interface Confidence Score')
-    figure.suptitle("Quality Tier Validation: Composite Score Evidence", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '4_Composite_Tier_Validation.png')
-
-#----------------------------Figure 5--------------------------------------------------------------
-
-def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 5: Are interfaces special, or do they just reflect bulk quality?"""
-    required = ['interface_plddt_combined', 'bulk_plddt_combined', 'quality_tier_v2']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 5: missing required columns.")
-        return
-    plot_df = df.dropna(subset=required).copy()
-    
-    if len(plot_df) == 0:
-        print("  Skipping Fig 5: no valid data.")
-        return
-
-    figure, axes = plt.subplots(figsize=(8, 8))
-
-    # Identify paradox complexes for special marking
-    paradox_mask = _get_paradox_mask(plot_df)
-
-    # Plot non-paradox by tier with adaptive sizing
-    non_paradox = plot_df[~paradox_mask]
-    n_non_paradox = len(non_paradox)
-    pt_size, pt_alpha = _adaptive_scatter_params(n_non_paradox)
-
-    for tier in reversed(TIER_ORDER):
-        subset = non_paradox[non_paradox['quality_tier_v2'] == tier]
-        _timed_scatter(axes, subset['bulk_plddt_combined'],
-                       subset['interface_plddt_combined'],
-                       n_points=n_non_paradox, fig_label='Fig 5',
-                       c=TIER_COLORS[tier], s=pt_size,
-                       alpha=pt_alpha, edgecolors='white',
-                       linewidths=0.5, zorder=3, label=tier)
-
-    # Optional density contours
-    if density_mode:
-        _overlay_kde_contours(axes, non_paradox['bulk_plddt_combined'].values, non_paradox['interface_plddt_combined'].values)
-
-    # Paradox complexes - small triangles so each marker represents one complex
-    paradox_df = plot_df[paradox_mask]
-    if len(paradox_df) > 0:
-        axes.scatter(paradox_df['bulk_plddt_combined'], paradox_df['interface_plddt_combined'], c='#9b59b6', s=50, alpha=0.9, marker='^', edgecolors='black', linewidths=0.6, zorder=5, label=f'Paradox ({len(paradox_df)})')
-
-    # Diagonal y = x line
-    lims = [min(axes.get_xlim()[0], axes.get_ylim()[0]), max(axes.get_xlim()[1], axes.get_ylim()[1])]
-    axes.plot(lims, lims, 'k--', linewidth=1.2, alpha=0.6, zorder=1)
-    axes.set_xlim(lims)
-    axes.set_ylim(lims)
-
-    # Annotations
-    above_diagonal = (plot_df['interface_plddt_combined'] > plot_df['bulk_plddt_combined']).sum()
-    total = len(plot_df)
-    pct = above_diagonal / total * 100 if total > 0 else 0
-
-    axes.text(0.05, 0.95, "Interface > Bulk ↑", transform=axes.transAxes, fontsize=FONT_TICK, va='top', ha='left', color='#27ae60', fontweight='bold')
-    axes.text(0.95, 0.05, "Bulk > Interface ↓", transform=axes.transAxes, fontsize=FONT_TICK, va='bottom', ha='right', color='#e74c3c', fontweight='bold')
-    axes.text(0.5, 0.02, f'{above_diagonal}/{total} ({pct:.0f}%) above diagonal', transform=axes.transAxes, ha='center', fontsize=FONT_TICK, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    axes.legend(fontsize=FONT_TICK, loc='lower left', framealpha=0.9)
-    _apply_common_style(axes, "Interface vs Bulk pLDDT: Are Interfaces Special?", 'Bulk pLDDT', 'Interface pLDDT')
-    _save_figure(figure, '5_Interface_vs_Bulk.png')
-
-#---------------------------------Figure 6------------------------------------------------------------
-
-def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
-    """Fig 6: Can disordered proteins form confident interfaces?
-    3-panel comparison of paradox vs non-paradox complexes - Paradox: ipTM >= 0.75, pDockQ >= 0.5, disorder fraction >= 0.30.
-    """
-    required = ['iptm', 'pdockq', 'plddt_below50_fraction', 'interface_vs_bulk_delta', 'confident_contact_fraction', 'interface_symmetry']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 6: missing required columns.")
-        return
-
-    # Count paradox complexes before dropping rows with missing panel data so we can report how many are lost to incomplete interface metrics
-    n_paradox_before_dropna = int(_get_paradox_mask(df).sum())
-
-    plot_df = df.dropna(subset=required).copy()
-    if len(plot_df) == 0:
-        print("  Skipping Fig 6: no complexes with complete interface data.")
-        return
-
-    paradox_mask = _get_paradox_mask(plot_df)
-    paradox = plot_df[paradox_mask]
-    non_paradox = plot_df[~paradox_mask]
-
-    n_paradox = len(paradox)
-    n_non_paradox = len(non_paradox)
-    n_paradox_missing_data = n_paradox_before_dropna - n_paradox
-
-    if n_paradox_missing_data > 0:
-        print(f"  Note: {n_paradox_missing_data} of {n_paradox_before_dropna} paradox "
-              f"complexes excluded from Fig 6 (missing interface data)")
-
-    if n_paradox == 0:
-        print("  Skipping Fig 6: no paradox complexes found.")
-        return
-
-    colour_paradox = '#9b59b6'
-    colour_non_paradox = '#3498db'
-    figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
-    panels = [
-        (ax_a, 'interface_vs_bulk_delta', '(a) Interface vs Bulk (Δ pLDDT)', 'Δ pLDDT'),
-        (ax_b, 'confident_contact_fraction', '(b) Confident Contact Fraction', 'Fraction'),
-        (ax_c, 'interface_symmetry', '(c) Interface Symmetry', 'Symmetry Score'),
-    ]
-
-    for ax, col, title, ylabel in panels:
-        data_paradox = paradox[col].dropna().values
-        data_non_paradox = non_paradox[col].dropna().values
-        if len(data_paradox) == 0 or len(data_non_paradox) == 0:
-            ax.text(0.5, 0.5, 'Insufficient data', transform=ax.transAxes, ha='center', va='center')
-            ax.set_title(title, fontsize=FONT_TITLE, fontweight='bold')
-            continue
-
-        # Box + strip for each group
-        box_data = [data_paradox, data_non_paradox]
-        positions = [0, 1]
-        bp = ax.boxplot(box_data, positions=positions, widths=0.5, patch_artist=True, showfliers=False, medianprops=dict(color='black', linewidth=2))
-        bp['boxes'][0].set_facecolor(colour_paradox)
-        bp['boxes'][0].set_alpha(0.5)
-        bp['boxes'][1].set_facecolor(colour_non_paradox)
-        bp['boxes'][1].set_alpha(0.5)
-
-        # Ensure median lines render above scatter points
-        for median_line in bp['medians']:
-            median_line.set_zorder(10)
-
-        # Jittered strip
-        for i, (data, colour) in enumerate([(data_paradox, colour_paradox), (data_non_paradox, colour_non_paradox)]):
-            jitter = np.random.normal(0, 0.06, size=len(data))
-            ax.scatter(positions[i] + jitter, data, c=colour, alpha=0.4, s=20, zorder=3, edgecolors='none')
-
-        ax.set_xticks(positions)
-        ax.set_xticklabels([f'Paradox\n(n={n_paradox})',
-                            f'Non-paradox\n(n={n_non_paradox})'], fontsize=FONT_TICK)
-        ax.set_title(title, fontsize=FONT_TITLE, fontweight='bold')
-        ax.set_ylabel(ylabel, fontsize=FONT_AXIS_LABEL)
-        ax.tick_params(labelsize=FONT_TICK)
-
-        # Median annotations
-        med_p = np.median(data_paradox)
-        med_np = np.median(data_non_paradox)
-        ax.text(0.5, -0.15, f'Medians: {med_p:.2f} vs {med_np:.2f}', transform=ax.transAxes, ha='center', fontsize=9, style='italic', color='#555555')
-
-    # Shared legend on the first panel
-    legend_handles = [
-        mpatches.Patch(color=colour_paradox, alpha=0.6, label='Paradox'),
-        mpatches.Patch(color=colour_non_paradox, alpha=0.6, label='Non-paradox'),
-    ]
-    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
-    figure.suptitle("Paradox Complexes: Confident Interfaces Despite Structural Disorder", fontsize=14, fontweight='bold', y=1.04)
-
-    subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
-                f"non-paradox complexes")
-    if n_paradox_missing_data > 0:
-        subtitle += (f" ({n_paradox_missing_data} paradox complexes excluded "
-                     f"due to incomplete interface data)")
-
-    figure.text(0.5, 0.99, subtitle, ha='center', fontsize=FONT_AXIS_LABEL, style='italic', color='#555555')
-    _save_figure(figure, '6_Paradox_Spotlight.png')
-
-#---------Figure 7-----------------------------------------------------------
-
-def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
-    """Fig 7: How does prediction quality vary by complex architecture?
-    Panel (a): Stacked bar chart of tier proportions (Homo / Hetero / Multi-chain).
-    Panel (b): Interface symmetry distributions.
-    Multi-chain complexes (3+ chains) are shown as a 3rd category when the n_chains column is available, and the case-normalised complex_type column (from load_data) is used for homodimer/heterodimer classification.
-    """
-    required = ['complex_type', 'quality_tier_v2']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 7: missing required columns.")
-        return
-
-    plot_df = df.dropna(subset=required).copy()
-    if len(plot_df) == 0:
-        print("  Skipping Fig 7: no valid data.")
-        return
-
-    # Split into architecture categories - multi-chain (3+) gets its own group regardless of homodimer/heterodimer label
-    has_chain_info = 'n_chains' in plot_df.columns
-    if has_chain_info:
-        multi = plot_df[plot_df['n_chains'] >= 3]
-        dimers = plot_df[plot_df['n_chains'] < 3]
-    else:
-        multi = pd.DataFrame()
-        dimers = plot_df
-
-    homo = dimers[dimers['complex_type'] == 'homodimer']
-    hetero = dimers[dimers['complex_type'] == 'heterodimer']
-
-    # Build category list (only include non-empty groups)
-    MULTI_COLOUR = '#8e44ad'
-    categories = []
-    cat_colours = []
-    if len(homo) > 0:
-        categories.append(('Homodimer', homo))
-        cat_colours.append('#3498db')
-    if len(hetero) > 0:
-        categories.append(('Heterodimer', hetero))
-        cat_colours.append('#e67e22')
-    if len(multi) > 0:
-        categories.append(('Multi-chain', multi))
-        cat_colours.append(MULTI_COLOUR)
-
-    if len(categories) == 0:
-        print("  Skipping Fig 7: no classified complexes.")
-        return
-
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
-
-    #----------------Panel (a): Stacked bar chart------------------------
-    bar_positions = list(range(len(categories)))
-    bar_labels = []
-
-    for cat_idx, (label, subset) in enumerate(categories):
-        count = len(subset)
-        bottom = 0
-        for tier in TIER_ORDER:
-            tier_count = (subset['quality_tier_v2'] == tier).sum()
-            pct = tier_count / count * 100 if count > 0 else 0
-            ax_a.bar(cat_idx, pct, bottom=bottom, color=TIER_COLORS[tier], edgecolor='white', linewidth=0.5)
-            if pct > 3:  # Only label if visible
-                ax_a.text(cat_idx, bottom + pct / 2, f'{pct:.1f}%', ha='center', va='center', fontsize=9, fontweight='bold', color='white' if pct > 10 else 'black')
-            bottom += pct
-        bar_labels.append(f'{label}\n(n={count})')
-
-    ax_a.set_xticks(bar_positions)
-    ax_a.set_xticklabels(bar_labels, fontsize=FONT_AXIS_LABEL)
-    ax_a.set_ylim(0, 105)
-
-    # Legend
-    legend_handles = [mpatches.Patch(color=TIER_COLORS[t], label=t) for t in TIER_ORDER]
-    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right')
-
-    _apply_common_style(ax_a, "(a) Quality Tier Proportions", '', 'Percentage (%)', grid=False)
-
-    #---------------Panel (b): Interface symmetry distributions-------------------------
-    has_symmetry = 'interface_symmetry' in df.columns
-    if has_symmetry:
-        sym_data = []
-        sym_labels = []
-        sym_colours = []
-        for (label, subset), colour in zip(categories, cat_colours):
-            sym_values = subset['interface_symmetry'].dropna().values
-            if len(sym_values) > 0:
-                sym_data.append(sym_values)
-                sym_labels.append(f'{label}\n(n={len(sym_values)})')
-                sym_colours.append(colour)
-        if sym_data:
-            positions_b = list(range(len(sym_data)))
-            vp = ax_b.violinplot(sym_data, positions=positions_b, showmedians=True, showextrema=False)
-            for idx, body in enumerate(vp['bodies']):
-                body.set_facecolor(sym_colours[idx])
-                body.set_alpha(0.6)
-            if 'cmedians' in vp:
-                vp['cmedians'].set_color('black')
-                vp['cmedians'].set_linewidth(2)
-                vp['cmedians'].set_zorder(10)
-            ax_b.set_xticks(positions_b)
-            ax_b.set_xticklabels(sym_labels, fontsize=FONT_AXIS_LABEL)
-    else:
-        ax_b.text(0.5, 0.5, 'Interface symmetry data\nnot available', transform=ax_b.transAxes, ha='center', va='center', fontsize=FONT_AXIS_LABEL, color='grey')
-
-    _apply_common_style(ax_b, "(b) Interface Symmetry", '', 'Symmetry Score', grid=False)
-    figure.suptitle("Prediction Quality by Complex Architecture", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '7_Homo_vs_Hetero.png')
-
-#-----------------------------------Figure 8--------------------------------------------
-
-def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 8: Why do ipTM and pDockQ disagree so systematically?"""
-    required = ['iptm', 'pdockq', 'quality_tier_v2']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 8: missing required columns.")
-        return
-    plot_df = df.dropna(subset=required).copy()
-
-    figure, axes = plt.subplots(figsize=(10, 8))
-    n_plot = len(plot_df)
-    pt_size, pt_alpha = _adaptive_scatter_params(n_plot)
-
-    for tier in reversed(TIER_ORDER):
-        subset = plot_df[plot_df['quality_tier_v2'] == tier]
-        _timed_scatter(axes, subset['iptm'], subset['pdockq'],
-                       n_points=n_plot, fig_label='Fig 8',
-                       c=TIER_COLORS[tier], s=pt_size,
-                       alpha=pt_alpha, edgecolors='white',
-                       linewidths=0.5, zorder=3, label=tier)
-    axes.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK, loc='upper left')
-
-    # Optional density contours
-    if density_mode:
-        _overlay_kde_contours(axes, plot_df['iptm'].values, plot_df['pdockq'].values)
-
-    # Diagonal y = x line
-    axes.plot([0, 1.1], [0, 1.1], 'k--', linewidth=1.2, alpha=0.6, zorder=1)
-
-    # Disagreement band: region where ipTM - pDockQ > METRIC_DISAGREEMENT_GAP
-    # This is below the line y = x - gap
-    x_band = np.linspace(0, 1.1, 100)
-    y_band = x_band - METRIC_DISAGREEMENT_GAP
-    axes.fill_between(x_band, -0.1, y_band, alpha=0.08, color='#e74c3c', zorder=0)
-
-    # Count disagreement cases - intentionally one-directional (ipTM >> pDockQ) to highlight the systematic bias where pDockQ penalises disordered complexes.
-    # The flag in interface_analysis.py uses abs() for bidirectional detection.
-    disagreement_mask = (plot_df['iptm'] - plot_df['pdockq']) > METRIC_DISAGREEMENT_GAP
-    n_disagree = disagreement_mask.sum()
-    pct_disagree = n_disagree / len(plot_df) * 100 if len(plot_df) > 0 else 0
-
-    # Annotation in the disagreement zone
-    axes.text(0.85, 0.10,
-              f'{n_disagree} complexes ({pct_disagree:.0f}%)\nipTM >> pDockQ',
-              transform=axes.transAxes, ha='center', va='center',
-              fontsize=FONT_AXIS_LABEL, fontweight='bold', color='#c0392b',
-              bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
-
-    axes.text(0.85, 0.02,
-              'pDockQ penalises structural\ndisorder; ipTM does not',
-              transform=axes.transAxes, ha='center', fontsize=9,
-              style='italic', color='#777777',
-              bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.85, edgecolor='none'))
-
-    axes.set_xlim(0.2, 1.05)
-    axes.set_ylim(-0.02, 0.8)
-
-    _apply_common_style(axes, "Metric Disagreement: ipTM vs pDockQ Systematic Bias", 'ipTM', 'pDockQ')
-    _save_figure(figure, '8_Metric_Disagreement.png')
-
-#--------Figure 9------------------------------------------------------------
-
-def plot_fig9_correlation_flags(df: pd.DataFrame) -> None:
-    """Fig 9: Metric structure and flag co-occurrence patterns.
-    Panel (a): Pearson correlation heatmap of key metrics.
-    Panel (b): Flag co-occurrence heatmap.
-    """
-    #-----------Panel (a): Correlation heatmap---------------------
-    correlation_metrics = ['iptm', 'pdockq', 'interface_confidence_score', 'confident_contact_fraction', 'interface_pae_mean', 'interface_vs_bulk_delta', 'interface_symmetry', 'plddt_below50_fraction']
-    # Optionally include contacts_per_interface_residue
-    if 'contacts_per_interface_residue' in df.columns:
-        correlation_metrics.append('contacts_per_interface_residue')
-
-    available_metrics = [m for m in correlation_metrics if m in df.columns]
-
-    if len(available_metrics) < 3:
-        print("  Skipping Fig 9: fewer than 3 metrics available for correlation.")
-        return
-
-    # Readable labels for the heatmap
-    label_map = {
-        'iptm': 'ipTM',
-        'pdockq': 'pDockQ',
-        'interface_confidence_score': 'Composite Score',
-        'confident_contact_fraction': 'Confident Contact Frac',
-        'interface_pae_mean': 'Interface PAE',
-        'interface_vs_bulk_delta': 'Interface-Bulk Δ',
-        'interface_symmetry': 'Symmetry',
-        'plddt_below50_fraction': 'Disorder Fraction',
-        'contacts_per_interface_residue': 'Contacts/Residue',
-    }
-
-    corr_df = df[available_metrics].dropna()
-    if len(corr_df) < 10:
-        print("  Skipping Fig 9 panel (a): insufficient data for correlations.")
-        return
-    corr_matrix = corr_df.corr()
-    n_metrics = len(available_metrics)
-    mask_upper = np.triu(np.ones((n_metrics, n_metrics), dtype=bool), k=1)
-
-    #----------------------Panel (b): Flag co-occurrence heatmap-------------------------
-    active_flags = ['small_interface', 'sparse_interface', 'asymmetric_interface', 'interface_better_than_bulk', 'low_interface_confidence', 'paradox_confident_disorder', 'metric_disagreement']
-    available_flags = [f for f in active_flags if f in df.columns]
-    has_flags = len(available_flags) >= 2
-
-    if has_flags:
-        figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(16, 7))
-    else:
-        figure, ax_a = plt.subplots(figsize=(8, 7))
-
-    # Plot correlation heatmap 
-    im = ax_a.imshow(corr_matrix.values, cmap='RdBu_r', vmin=-1, vmax=1, aspect='equal')
-
-    # Mask upper triangle by setting those cells to white
-    for i in range(n_metrics):
-        for j in range(n_metrics):
-            if mask_upper[i, j]:
-                ax_a.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=True, color='white', zorder=4))
-            else:
-                # Annotate with correlation value
-                val = corr_matrix.values[i, j]
-                text_colour = 'white' if abs(val) > 0.6 else 'black'
-                ax_a.text(j, i, f'{val:.2f}', ha='center', va='center', fontsize=8, color=text_colour, zorder=5)
-
-    readable_labels = [label_map.get(m, m) for m in available_metrics]
-    ax_a.set_xticks(range(n_metrics))
-    ax_a.set_xticklabels(readable_labels, rotation=45, ha='right', fontsize=FONT_TICK)
-    ax_a.set_yticks(range(n_metrics))
-    ax_a.set_yticklabels(readable_labels, fontsize=FONT_TICK)
-
-    cbar_a = figure.colorbar(im, ax=ax_a, shrink=0.8, label='Pearson r')
-    ax_a.set_title("(a) Metric Correlations", fontsize=FONT_TITLE, fontweight='bold', pad=12)
-
-    # Flag co-occurrence heatmap
-    if has_flags:
-        flag_label_map = {
-            'small_interface': 'Small Interface',
-            'sparse_interface': 'Sparse Interface',
-            'asymmetric_interface': 'Asymmetric',
-            'interface_better_than_bulk': 'Better Than Bulk',
-            'low_interface_confidence': 'Low Confidence',
-            'paradox_confident_disorder': 'Paradox',
-            'metric_disagreement': 'Metric Disagreement',
-        }
-
-        n_flags = len(available_flags)
-        co_occurrence = np.zeros((n_flags, n_flags), dtype=int)
-
-        # Convert flag columns to boolean
-        flag_matrix = df[available_flags].fillna(False)
-        # Handle string 'True'/'False' columns
-        for col in available_flags:
-            if flag_matrix[col].dtype == object:
-                flag_matrix[col] = flag_matrix[col].astype(str).str.lower() == 'true'
-            else:
-                flag_matrix[col] = flag_matrix[col].astype(bool)
-
-        for i in range(n_flags):
-            for j in range(n_flags):
-                co_occurrence[i, j] = (flag_matrix[available_flags[i]] & flag_matrix[available_flags[j]]).sum()
-
-        im_b = ax_b.imshow(co_occurrence, cmap='YlOrRd', aspect='equal')
-
-        # Annotate with counts
-        for i in range(n_flags):
-            for j in range(n_flags):
-                val = co_occurrence[i, j]
-                text_colour = ('white' if val > co_occurrence.max() * 0.6 else 'black')
-                ax_b.text(j, i, str(val), ha='center', va='center', fontsize=9, color=text_colour, fontweight='bold')
-
-        flag_labels = [flag_label_map.get(f, f) for f in available_flags]
-        ax_b.set_xticks(range(n_flags))
-        ax_b.set_xticklabels(flag_labels, rotation=45, ha='right', fontsize=FONT_TICK)
-        ax_b.set_yticks(range(n_flags))
-        ax_b.set_yticklabels(flag_labels, fontsize=FONT_TICK)
-
-        figure.colorbar(im_b, ax=ax_b, shrink=0.8, label='Co-occurrence Count')
-        ax_b.set_title("(b) Flag Co-occurrence", fontsize=FONT_TITLE, fontweight='bold', pad=12)
-
-    figure.suptitle("Metric Relationships and Flag Co-occurrence Patterns", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '9_Correlation_Flags.png')
-
-#--------------------------Figure 10---------------------------------------------------
-
-def plot_fig10_chain_count_profile(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 10: Does prediction quality degrade for multi-chain complexes?
-    Panel (a): Composite score distributions by chain count (violin + strip).
-    Panel (b): ipTM vs pDockQ coloured by chain count.
-    Requires the n_chains column which is added by the multi-chain pipeline - complexes are grouped into 2, 3, and 4+ chains.
-    """
-    required = ['n_chains', 'iptm', 'pdockq']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 10: missing required columns.")
-        return
-    plot_df = df.dropna(subset=required).copy()
-
-    if len(plot_df) == 0:
-        print("  Skipping Fig 10: no valid data.")
-        return
-
-    # Bin chain counts into interpretable groups
-    def chain_group(n):
-        if n <= 2:
-            return '2 chains'
-        elif n == 3:
-            return '3 chains'
-        else:
-            return '4+ chains'
-
-    plot_df['chain_group'] = plot_df['n_chains'].apply(chain_group)
-    group_order = ['2 chains', '3 chains', '4+ chains']
-    group_colours = {'2 chains': '#3498db', '3 chains': '#e67e22', '4+ chains': '#8e44ad'}
-
-    # Only keep groups that actually appear
-    present_groups = [g for g in group_order if (plot_df['chain_group'] == g).any()]
-    if len(present_groups) < 2:
-        print("  Skipping Fig 10: need at least 2 chain-count groups for comparison.")
-        return
-
-    has_composite = 'interface_confidence_score' in plot_df.columns
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
-
-    #------------------Panel (a): Composite score or ipTM distributions by chain group---------------
-    metric_col = 'interface_confidence_score' if has_composite else 'iptm'
-    metric_label = 'Composite Score' if has_composite else 'ipTM'
-    group_data = []
-    group_labels = []
-    positions_a = []
-    for idx, group in enumerate(present_groups):
-        values = plot_df.loc[plot_df['chain_group'] == group, metric_col].dropna().values
-        if len(values) > 0:
-            group_data.append(values)
-            group_labels.append(f'{group}\n(n={len(values)})')
-            positions_a.append(idx)
-
-    if group_data:
-        vp = ax_a.violinplot(group_data, positions=positions_a, showmedians=True, showextrema=False)
-        for idx, body in enumerate(vp['bodies']):
-            grp = present_groups[idx]
-            body.set_facecolor(group_colours.get(grp, '#cccccc'))
-            body.set_alpha(0.6)
-        if 'cmedians' in vp:
-            vp['cmedians'].set_color('black')
-            vp['cmedians'].set_linewidth(2)
-            vp['cmedians'].set_zorder(10)
-
-        # Jittered strip overlay
-        for idx, data in enumerate(group_data):
-            jitter = np.random.normal(0, 0.06, size=len(data))
-            grp = present_groups[idx]
-            ax_a.scatter(positions_a[idx] + jitter, data, c=group_colours.get(grp, '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
-
-        ax_a.set_xticks(positions_a)
-        ax_a.set_xticklabels(group_labels, fontsize=FONT_AXIS_LABEL)
-
-        # Median annotation
-        medians = [np.median(d) for d in group_data]
-        median_text = " | ".join(f"{present_groups[i]}: {medians[i]:.2f}" for i in range(len(medians)))
-        ax_a.text(0.5, -0.12, median_text, transform=ax_a.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
-
-    _apply_common_style(ax_a, f"(a) {metric_label} by Chain Count", '', metric_label, grid=False)
-
-    #---------------Panel (b): ipTM vs pDockQ coloured by chain count----------------------
-    # 2-chain complexes are rendered as a translucent background context layer and multi-chain groups (3, 4+) are plotted on top at full opacity
-    n_panel_b = len(plot_df)
-    pt_size_b, _ = _adaptive_scatter_params(n_panel_b)
-
-    # Background layer: 2 chains (very low alpha)
-    if '2 chains' in present_groups:
-        subset_2 = plot_df[plot_df['chain_group'] == '2 chains']
-        _timed_scatter(ax_b, subset_2['iptm'], subset_2['pdockq'],
-                       n_points=n_panel_b, fig_label='Fig 10b',
-                       c=group_colours.get('2 chains', '#cccccc'),
-                       s=pt_size_b, alpha=0.12,
-                       edgecolors='none', linewidths=0, zorder=2,
-                       label=f'2 chains (n={len(subset_2)})')
-
-    # Foreground layer: multi-chain groups (full opacity)
-    for group in reversed([g for g in present_groups if g != '2 chains']):
-        subset = plot_df[plot_df['chain_group'] == group]
-        _timed_scatter(ax_b, subset['iptm'], subset['pdockq'],
-                       n_points=n_panel_b, fig_label='Fig 10b',
-                       c=group_colours.get(group, '#cccccc'),
-                       s=pt_size_b, alpha=1.0,
-                       edgecolors='white', linewidths=0.5, zorder=5,
-                       label=f'{group} (n={len(subset)})')
-    ax_b.legend(fontsize=FONT_TICK, loc='lower right', framealpha=0.9)
-
-    # Optional density contours
-    if density_mode:
-        _overlay_kde_contours(ax_b, plot_df['iptm'].values, plot_df['pdockq'].values)
-
-    ax_b.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
-    ax_b.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
-    ax_b.set_xlim(0.2, 1.05)
-    ax_b.set_ylim(-0.02, 0.8)
-
-    _apply_common_style(ax_b, "(b) Quality Landscape by Chain Count", 'ipTM', 'pDockQ')
-    figure.suptitle("Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '10_Chain_Count_Profile.png')
-
-#-----------------------------------------------Variant Figures (11-13)------------------------------------------------------------
-
-def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
-    """Fig 11: Where do clinically classified variants land structurally?
-
-    Sankey (alluvial) diagram. Left nodes: clinical significance categories
-    (Unknown excluded). Right nodes: 4 structural contexts. Flow bands show
-    how many variants of each significance land in each context.
-    """
-    var_df = _aggregate_all_variants(df)
-    total_parsed = len(var_df)
-    if total_parsed < 10:
-        print("  Skipping Fig 11: fewer than 10 parsed variants.")
-        return
-
-    # Filter to classified variants only (exclude Unknown)
-    classified_sigs = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Benign']
-    classified = var_df[var_df['significance'].isin(classified_sigs)].copy()
-    n_classified = len(classified)
-    n_unknown = total_parsed - n_classified
-    pct_unknown = 100.0 * n_unknown / total_parsed if total_parsed > 0 else 0.0
-
-    if n_classified < 10:
-        print("  Skipping Fig 11: fewer than 10 classified variants after removing Unknown.")
-        return
-
-    # Cross-tabulate: significance (left) x context (right)
-    classified['significance'] = pd.Categorical(classified['significance'],
-                                                categories=classified_sigs, ordered=True)
-    classified['context'] = pd.Categorical(classified['context'],
-                                           categories=CONTEXT_ORDER, ordered=True)
-    ct = pd.crosstab(classified['significance'], classified['context'], dropna=False)
-    ct = ct.reindex(index=classified_sigs, columns=CONTEXT_ORDER, fill_value=0)
-
-    figure, ax = plt.subplots(figsize=(12, 7.5))
-    ax.set_xlim(-0.05, 1.05)
-    ax.set_ylim(-0.02, 1.02)
-    ax.axis('off')
-    figure.subplots_adjust(top=0.88, bottom=0.12)
-
-    bar_w = 0.12  # width of stacked bars
-    x_left = 0.15
-    x_right = 0.85
-    gap = 0.015  # vertical gap between segments
-
-    # ── Left bars (significance) ──
-    left_totals = ct.sum(axis=1).values.astype(float)
-    left_total = left_totals.sum()
-    usable_height = 1.0 - gap * (len(classified_sigs) - 1)
-    left_heights = (left_totals / left_total) * usable_height
-    left_positions = []  # (y0, y1) for each significance
-    y_cursor = 0.0
-    for i, sig in enumerate(classified_sigs):
-        h = left_heights[i]
-        y0, y1 = y_cursor, y_cursor + h
-        left_positions.append((y0, y1))
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (x_left - bar_w, y0), bar_w, h,
-            boxstyle="round,pad=0.005",
-            facecolor=SIGNIFICANCE_COLORS[sig], edgecolor='white', linewidth=1))
-        # Label
-        mid_y = (y0 + y1) / 2
-        count = int(left_totals[i])
-        ax.text(x_left - bar_w - 0.02, mid_y, f'{sig}\n(n={count:,})',
-                ha='right', va='center', fontsize=9, fontweight='bold')
-        y_cursor = y1 + gap
-
-    # ── Right bars (context) ──
-    right_totals = ct.sum(axis=0).values.astype(float)
-    right_total = right_totals.sum()
-    right_heights = (right_totals / right_total) * usable_height
-    right_positions = []  # (y0, y1) for each context
-    right_label_ys = []   # raw mid_y for each label
-    y_cursor = 0.0
-    for i, ctx in enumerate(CONTEXT_ORDER):
-        h = right_heights[i]
-        y0, y1 = y_cursor, y_cursor + h
-        right_positions.append((y0, y1))
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (x_right, y0), bar_w, h,
-            boxstyle="round,pad=0.005",
-            facecolor=CONTEXT_COLORS[ctx], edgecolor='white', linewidth=1))
-        right_label_ys.append((y0 + y1) / 2)
-        y_cursor = y1 + gap
-
-    # Enforce minimum vertical spacing between right-side labels to prevent overlap
-    min_label_gap = 0.05
-    adjusted_ys = list(right_label_ys)
-    for i in range(len(adjusted_ys) - 1, 0, -1):
-        if adjusted_ys[i] - adjusted_ys[i - 1] < min_label_gap:
-            adjusted_ys[i - 1] = adjusted_ys[i] - min_label_gap
-
-    for i, ctx in enumerate(CONTEXT_ORDER):
-        count = int(right_totals[i])
-        label = CONTEXT_LABELS[ctx].replace('\n', ' ')
-        fsize = 8 if right_heights[i] < 0.03 else 9
-        ax.text(x_right + bar_w + 0.02, adjusted_ys[i], f'{label}\n(n={count:,})',
-                ha='left', va='center', fontsize=fsize, fontweight='bold')
-
-    # ── Flow bands ──
-    # Track cumulative position within each bar for sub-band placement
-    left_cursors = [pos[0] for pos in left_positions]
-    right_cursors = [pos[0] for pos in right_positions]
-
-    for i, sig in enumerate(classified_sigs):
-        for j, ctx in enumerate(CONTEXT_ORDER):
-            count = ct.iloc[i, j]
-            if count == 0:
-                continue
-            # Band height proportional to count within each bar
-            left_h = (count / left_total) * usable_height
-            right_h = (count / right_total) * usable_height
-            _draw_sankey_band(ax,
-                              left_y0=left_cursors[i],
-                              left_y1=left_cursors[i] + left_h,
-                              right_y0=right_cursors[j],
-                              right_y1=right_cursors[j] + right_h,
-                              x_left=x_left, x_right=x_right,
-                              color=SIGNIFICANCE_COLORS[sig], alpha=0.35)
-            left_cursors[i] += left_h
-            right_cursors[j] += right_h
-
-    # ── Annotations ──
-    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance -> Structural Context",
-            ha='center', va='bottom', fontsize=14, fontweight='bold',
-            transform=ax.transAxes)
-    # Footer annotation (merged to avoid overlap)
-    footer_parts = [f'n = {n_classified:,} classified variants ({pct_unknown:.1f}% Unknown excluded, {n_unknown:,} variants)']
-    true_total_a = pd.to_numeric(df.get('n_variants_a', pd.Series(dtype=float)), errors='coerce').sum()
-    true_total_b = pd.to_numeric(df.get('n_variants_b', pd.Series(dtype=float)), errors='coerce').sum()
-    true_total = true_total_a + true_total_b
-    if not np.isnan(true_total) and true_total > total_parsed * 1.05:
-        footer_parts.append(f'Variant details limited to 20 per chain ({total_parsed:,} shown of ~{int(true_total):,} total)')
-    ax.text(0.50, -0.06, '\n'.join(footer_parts), ha='center', va='top',
-            fontsize=8, style='italic', color='#666666', transform=ax.transAxes)
-
-    _save_figure(figure, '11_Variant_Consequence_Flow.png')
-
-
-def plot_fig12_variant_density_heatmap(df: pd.DataFrame) -> None:
-    """Fig 12: Are predicted interfaces under evolutionary constraint?
-
-    Histogram of interface_variant_enrichment across all complexes, with
-    overlaid KDE curves per quality tier. Vertical reference at 1.0 (neutral).
-    Tier medians and Wilcoxon signed-rank p-values annotated.
-    """
-    enrichment = pd.to_numeric(df.get('interface_variant_enrichment',
-                                      pd.Series(dtype=float)), errors='coerce')
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-
-    # Filter: enrichment must be defined and positive (0 = no variants, undefined)
-    valid_mask = enrichment.notna() & (enrichment > 0)
-    n_excluded = (~valid_mask).sum()
-    enrich_vals = enrichment[valid_mask].values
-    tiers = df.loc[valid_mask, tier_col].values if tier_col in df.columns else None
-
-    if len(enrich_vals) < 5:
-        print("  Skipping Fig 12: fewer than 5 complexes with valid enrichment.")
-        return
-
-    figure, ax = plt.subplots(figsize=(10, 6))
-
-    # ── Histogram (all tiers combined) ──
-    ax.hist(enrich_vals, bins=min(40, max(10, len(enrich_vals) // 10)),
-            color='#cccccc', edgecolor='white', alpha=0.4, label='All complexes', zorder=1)
-
-    # ── KDE per tier + medians + Wilcoxon ──
-    stat_lines = []
-    x_smooth = np.linspace(max(0, enrich_vals.min() - 0.2),
-                           enrich_vals.max() + 0.2, 300)
-
-    if tiers is not None:
-        for tier in TIER_ORDER:
-            tier_mask = tiers == tier
-            tier_vals = enrich_vals[tier_mask]
-            if len(tier_vals) < 3:
-                continue
-            color = TIER_COLORS[tier]
-            median_val = np.median(tier_vals)
-
-            # KDE overlay (skip if too few or constant values)
-            if len(tier_vals) >= 5 and np.std(tier_vals) > 1e-6:
-                try:
-                    kde = gaussian_kde(tier_vals)
-                    # Scale KDE to match histogram visual height
-                    kde_y = kde(x_smooth) * len(tier_vals) * (enrich_vals.max() - enrich_vals.min()) / min(40, max(10, len(enrich_vals) // 10))
-                    ax.plot(x_smooth, kde_y, color=color, linewidth=2.5,
-                            label=f'{tier} (n={len(tier_vals)}, med={median_val:.3f})', zorder=3)
-                except Exception:
-                    ax.axvline(x=median_val, color=color, linestyle='-', linewidth=1.5,
-                               alpha=0.7, label=f'{tier} (n={len(tier_vals)}, med={median_val:.3f})')
-
-            # Median marker on x-axis
-            ax.plot(median_val, 0, marker='v', color=color, markersize=10,
-                    zorder=5, clip_on=False)
-
-            # Wilcoxon signed-rank test (H0: median = 1.0)
-            if len(tier_vals) >= 10:
-                try:
-                    diffs = tier_vals - 1.0
-                    diffs = diffs[diffs != 0]  # remove exact zeros for Wilcoxon
-                    if len(diffs) >= 10:
-                        stat, pval = wilcoxon(diffs)
-                        if pval < 0.001:
-                            stat_lines.append(f'{tier}: p < 0.001')
-                        else:
-                            stat_lines.append(f'{tier}: p = {pval:.3f}')
-                    else:
-                        stat_lines.append(f'{tier}: n too small after ties')
-                except Exception:
-                    stat_lines.append(f'{tier}: test failed')
-
-    # ── Neutral expectation line ──
-    ax.axvline(x=1.0, color='#333333', linestyle='--', linewidth=1.5,
-               alpha=0.7, zorder=2, label='Neutral (1.0)')
-
-    # ── Annotations ──
-    if stat_lines:
-        stat_text = 'Wilcoxon vs 1.0:\n' + '\n'.join(stat_lines)
-        ax.text(0.97, 0.95, stat_text, transform=ax.transAxes,
-                fontsize=8, va='top', ha='right',
-                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                          edgecolor='#cccccc', alpha=0.9))
-
-    ax.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9,
-              bbox_to_anchor=(0.0, 0.88))
-
-    if n_excluded > 0:
-        ax.text(0.03, 0.62, f'{n_excluded} complexes excluded\n(no interface variants)',
-                transform=ax.transAxes, fontsize=8, va='top', ha='left',
-                color='#888888', style='italic')
-    # Clip x-axis to focus on the main distribution (hide extreme right tail)
-    x_upper = max(3.0, np.percentile(enrich_vals, 99.5))
-    ax.set_xlim(0, x_upper)
-
-    _apply_common_style(ax, '', 'Interface Variant Enrichment (fold-change)',
-                        'Number of Complexes')
-
-    figure.suptitle("Interface Variant Enrichment Distribution by Quality Tier",
-                    fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '12_Variant_Density_Heatmap.png')
-
-
-def plot_fig13_variant_burden(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 13: Does the toolkit's confidence metric predict variant biology?
-
-    Scatter plot of interface variant density (variants per interface residue)
-    against composite score, coloured by quality tier. Spearman and partial
-    correlations annotated. Tier-stratified median densities in text box.
-    """
-    # Compute interface variant density per complex
-    n_if_var_a = pd.to_numeric(df.get('n_interface_variants_a', pd.Series(dtype=float)),
-                               errors='coerce').fillna(0)
-    n_if_var_b = pd.to_numeric(df.get('n_interface_variants_b', pd.Series(dtype=float)),
-                               errors='coerce').fillna(0)
-    n_if_res_a = pd.to_numeric(df.get('n_interface_residues_a', pd.Series(dtype=float)),
-                               errors='coerce').fillna(0)
-    n_if_res_b = pd.to_numeric(df.get('n_interface_residues_b', pd.Series(dtype=float)),
-                               errors='coerce').fillna(0)
-
-    n_if_var = n_if_var_a + n_if_var_b
-    n_if_res = n_if_res_a + n_if_res_b
-    # Density: variants per interface residue (NaN where no interface residues)
-    density = np.where(n_if_res > 0, n_if_var / n_if_res, np.nan)
-    density = pd.Series(density, index=df.index)
-
-    # Choose x-axis metric
-    if 'interface_confidence_score' in df.columns:
-        x_col = 'interface_confidence_score'
-        x_label = 'Composite Score'
-    else:
-        x_col = 'iptm'
-        x_label = 'ipTM'
-
-    # Filter to valid rows
-    x_series = pd.to_numeric(df.get(x_col, pd.Series(dtype=float)), errors='coerce')
-    valid_mask = density.notna() & x_series.notna() & (n_if_res > 0)
-
-    if valid_mask.sum() < 5:
-        print("  Skipping Fig 13: fewer than 5 complexes with valid density.")
-        return
-
-    x_vals = x_series[valid_mask].values.astype(float)
-    y_vals = density[valid_mask].values.astype(float)
-    size_vals = n_if_res[valid_mask].values.astype(float)  # for partial correlation
-
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-
-    figure, ax = plt.subplots(figsize=(10, 7))
-
-    # ── Scatter coloured by quality tier ──
-    base_size, base_alpha = _adaptive_scatter_params(len(x_vals))
-    colors = df.loc[valid_mask, tier_col].map(TIER_COLORS).fillna('#bdc3c7').values if tier_col in df.columns else '#3498db'
-
-    _timed_scatter(ax, x_vals, y_vals, len(x_vals), fig_label='Fig 13',
-                   c=colors, s=base_size, alpha=base_alpha,
-                   edgecolors='white', linewidths=0.3)
-
-    if density_mode:
-        _overlay_kde_contours(ax, x_vals, y_vals)
-
-    # ── Spearman correlation ──
-    stat_lines = []
-    if len(x_vals) >= 5 and np.std(x_vals) > 1e-9 and np.std(y_vals) > 1e-9:
-        rho, pval = spearmanr(x_vals, y_vals)
-        p_str = 'p < 0.001' if pval < 0.001 else f'p = {pval:.3f}'
-        stat_lines.append(f'Spearman \u03c1 = {rho:.4f}, {p_str}')
-
-        # Partial correlation controlling for interface size (rank-residual method)
-        if len(x_vals) >= 10 and np.std(size_vals) > 1e-9:
-            from scipy.stats import rankdata
-            rx = rankdata(x_vals)
-            ry = rankdata(y_vals)
-            rz = rankdata(size_vals)
-            # Regress ranks on size ranks via OLS, take residuals
-            rz_mean = rz.mean()
-            rz_centered = rz - rz_mean
-            rz_ss = np.dot(rz_centered, rz_centered)
-            if rz_ss > 1e-9:
-                beta_x = np.dot(rz_centered, rx - rx.mean()) / rz_ss
-                beta_y = np.dot(rz_centered, ry - ry.mean()) / rz_ss
-                resid_x = rx - beta_x * rz_centered
-                resid_y = ry - beta_y * rz_centered
-                if np.std(resid_x) > 1e-9 and np.std(resid_y) > 1e-9:
-                    rho_partial, pval_partial = spearmanr(resid_x, resid_y)
-                    p_str2 = 'p < 0.001' if pval_partial < 0.001 else f'p = {pval_partial:.3f}'
-                    stat_lines.append(f'Partial \u03c1 = {rho_partial:.4f}, {p_str2}  (size-controlled)')
-
-    # ── Tier-stratified medians ──
-    median_lines = []
-    if tier_col in df.columns:
-        tiers_valid = df.loc[valid_mask, tier_col].values
-        for tier in TIER_ORDER:
-            tier_vals = y_vals[tiers_valid == tier]
-            if len(tier_vals) > 0:
-                median_lines.append(f'{tier}: {np.median(tier_vals):.3f} (n={len(tier_vals)})')
-
-    # ── Annotation box ──
-    annotation_parts = []
-    if stat_lines:
-        annotation_parts.extend(stat_lines)
-    if median_lines:
-        annotation_parts.append('')
-        annotation_parts.append('Median density by tier:')
-        annotation_parts.extend(f'  {line}' for line in median_lines)
-
-    if annotation_parts:
-        ax.text(0.03, 0.72, '\n'.join(annotation_parts),
-                transform=ax.transAxes, fontsize=8, va='top', ha='left',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
-                          edgecolor='#cccccc', alpha=0.95),
-                family='monospace')
-
-    # ── Legend ──
-    if tier_col in df.columns:
-        legend_handles = []
-        tiers_valid = df.loc[valid_mask, tier_col].values
-        for tier in TIER_ORDER:
-            count = (tiers_valid == tier).sum()
-            if count > 0:
-                legend_handles.append(
-                    Line2D([0], [0], marker='o', color='w',
-                           markerfacecolor=TIER_COLORS[tier],
-                           markeredgecolor='white', markersize=9,
-                           label=f'{tier} (n={count})'))
-        if legend_handles:
-            ax.legend(handles=legend_handles, fontsize=FONT_TICK,
-                      loc='upper left', framealpha=0.9)
-
-    _apply_common_style(ax, '', x_label,
-                        'Variant Density (per interface residue)')
-
-    figure.suptitle("Interface Variant Density vs Composite Score",
-                    fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '13_Variant_Burden.png')
-
-
-# ── Phase E: Disease & Pathway Figures ────────────────────────────
-
-
-def plot_fig14_pathway_coherence(df: pd.DataFrame) -> None:
-    """Fig 14: Pathway Functional Coherence and Structural Quality.
-
-    Two-panel figure: (A) shared-pathway depth vs pDockQ (4 bins: 0-3, 4-10,
-    11-30, 31+) with tier-composition text and Mann-Whitney test; (B) PPI
-    enrichment ratio by quality tier with secondary raw-value axis.
-
-    Requires 'n_shared_pathways' and 'ppi_enrichment_ratio' columns.
-    """
-    if 'n_shared_pathways' not in df.columns or 'ppi_enrichment_ratio' not in df.columns:
-        print("  Skipping Fig 14 — no shared pathway / enrichment data")
-        return
-
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-
-    # ── Panel A data: bin shared pathways ──
-    n_shared = pd.to_numeric(df['n_shared_pathways'], errors='coerce').fillna(0).astype(int)
-    pdockq = df['pdockq'].values
-    tiers = df[tier_col].values if tier_col in df.columns else np.full(len(df), '')
-
-    bin_data: list[list[float]] = []
-    bin_tier_counts: list[dict] = []
-    bin_labels: list[str] = []
-    bin_ns: list[int] = []
-
-    for lo, hi, label in SHARED_PATHWAY_BINS:
-        mask = (n_shared >= lo) & (n_shared <= hi) & ~np.isnan(pdockq)
-        vals = pdockq[mask]
-        bin_data.append(list(vals))
-        bin_labels.append(label)
-        bin_ns.append(len(vals))
-        tier_arr = tiers[mask]
-        counts = {}
-        for t in TIER_ORDER:
-            counts[t] = int(np.sum(tier_arr == t))
-        bin_tier_counts.append(counts)
-
-    if all(n == 0 for n in bin_ns):
-        print("  Skipping Fig 14 — no valid data for binning")
-        return
-
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(12, 5.5),
-                                         gridspec_kw={'width_ratios': [3, 2]})
-
-    # ── Panel A: box plots ──
-    bp_a = ax_a.boxplot(bin_data, positions=range(len(bin_labels)),
-                        whis=[5, 95], showfliers=False, showmeans=True, patch_artist=True,
-                        meanprops={'marker': 'D', 'markerfacecolor': 'black', 'markersize': 4},
-                        medianprops={'color': 'black', 'linewidth': 1.5})
-
-    for patch in bp_a['boxes']:
-        patch.set_facecolor('#ecf0f1')
-        patch.set_alpha(0.8)
-
-    # Global median dashed line for baseline reference
-    valid_pdockq = pdockq[~np.isnan(pdockq)]
-    global_median = float(np.nanmedian(valid_pdockq)) if len(valid_pdockq) > 0 else 0
-    ax_a.axhline(y=global_median, color='grey', linestyle='--', linewidth=0.8,
-                 alpha=0.6, label=f'Dataset median ({global_median:.2f})')
-
-    ax_a.set_xticks(range(len(bin_labels)))
-    ax_a.set_xticklabels(bin_labels, fontsize=FONT_TICK)
-
-    # Tier-composition text below each box (at Q1)
-    for i, counts in enumerate(bin_tier_counts):
-        total = sum(counts.values())
-        if total == 0:
-            continue
-        h_pct = counts.get('High', 0) / total * 100
-        m_pct = counts.get('Medium', 0) / total * 100
-        l_pct = counts.get('Low', 0) / total * 100
-        q1_val = float(np.percentile(bin_data[i], 25)) if bin_data[i] else 0
-        ax_a.text(i, q1_val - 0.02, f'H:{h_pct:.0f}% M:{m_pct:.0f}% L:{l_pct:.0f}%',
-                  ha='center', va='top', fontsize=6.5, color='#555555',
-                  bbox=dict(boxstyle='round,pad=0.15', facecolor='white', alpha=0.85))
-
-    # Annotate n above each box
-    for i, n in enumerate(bin_ns):
-        if n > 0:
-            upper = np.percentile(bin_data[i], 95) if bin_data[i] else 0
-            ax_a.text(i, upper + (ax_a.get_ylim()[1] - ax_a.get_ylim()[0]) * 0.03,
-                      f'n={n:,}', ha='center', va='bottom', fontsize=7, color='#555555')
-
-    # Spearman rho on raw ungrouped data
-    valid_mask = ~np.isnan(pdockq)
-    n_shared_valid = n_shared.values[valid_mask] if hasattr(n_shared, 'values') else n_shared[valid_mask]
-    pdockq_valid = pdockq[valid_mask]
-    rho, rho_p = spearmanr(n_shared_valid, pdockq_valid) if len(pdockq_valid) >= 3 else (0, 1)
-
-    # Mann-Whitney: first bin vs last bin
-    if bin_ns[0] >= 2 and bin_ns[-1] >= 2:
-        stat, p_val = mannwhitneyu(bin_data[0], bin_data[-1], alternative='two-sided')
-        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
-        ax_a.text(0.98, 0.95,
-                  f'{bin_labels[0]} vs {bin_labels[-1]}: {p_str}\n'
-                  f'Spearman \u03c1 = {rho:.3f}',
-                  transform=ax_a.transAxes, ha='right', va='top',
-                  fontsize=8, bbox=dict(boxstyle='round,pad=0.3',
-                                        facecolor='white', edgecolor='grey', alpha=0.8))
-
-    # Mean diamond legend
-    mean_handle = Line2D([0], [0], marker='D', color='w', markerfacecolor='black',
-                         markersize=5, linestyle='None', label='Mean')
-    median_handle = Line2D([0], [0], color='black', linewidth=1.5, label='Median')
-    global_median_handle = Line2D([0], [0], color='grey', linestyle='--',
-                                   linewidth=0.8, label='Dataset median')
-    ax_a.legend(handles=[mean_handle, median_handle, global_median_handle], fontsize=7,
-                loc='center right', framealpha=0.9)
-
-    _apply_common_style(ax_a, 'Shared Pathway Depth vs pDockQ',
-                        'Shared Pathways', 'pDockQ')
-    _despine(ax_a)
-
-    # ── Panel B: PPI enrichment by tier ──
-    enrichment = pd.to_numeric(df['ppi_enrichment_ratio'], errors='coerce')
-    tier_data_b: list[list[float]] = []
-
-    for t in TIER_ORDER:
-        mask = (df[tier_col] == t) & (enrichment > 0) & enrichment.notna()
-        vals = np.log10(enrichment[mask].values)
-        tier_data_b.append(list(vals))
-
-    bp_b = ax_b.boxplot(tier_data_b, positions=range(len(TIER_ORDER)),
-                        whis=[5, 95], showfliers=False, showmeans=True, patch_artist=True,
-                        meanprops={'marker': 'D', 'markerfacecolor': 'black', 'markersize': 4},
-                        medianprops={'color': 'black', 'linewidth': 1.5})
-
-    for i, patch in enumerate(bp_b['boxes']):
-        patch.set_facecolor(TIER_COLORS[TIER_ORDER[i]])
-        patch.set_alpha(0.4)
-
-    ax_b.set_xticks(range(len(TIER_ORDER)))
-    ax_b.set_xticklabels(TIER_ORDER, fontsize=FONT_TICK)
-
-    # Reference line at ratio = 1.0 (log10(1) = 0) — null expectation
-    ax_b.axhline(y=0.0, color='grey', linestyle='--', linewidth=0.8, alpha=0.6)
-    # Ensure y=0 is visible even if all data is above 0
-    ymin_b, ymax_b = ax_b.get_ylim()
-    ax_b.set_ylim(min(ymin_b, -0.15), ymax_b)
-
-    # Kruskal-Wallis test
-    non_empty = [d for d in tier_data_b if len(d) >= 2]
-    if len(non_empty) >= 2:
-        h_stat, p_val = kruskal(*non_empty)
-        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
-        ax_b.text(0.95, 0.95, f'H = {h_stat:.1f}, {p_str}',
-                  transform=ax_b.transAxes, ha='right', va='top',
-                  fontsize=8, bbox=dict(boxstyle='round,pad=0.3',
-                                        facecolor='white', edgecolor='grey', alpha=0.8))
-
-    _apply_common_style(ax_b, 'PPI Enrichment by Quality Tier',
-                        'Quality Tier', 'log\u2081\u2080(Enrichment Ratio)')
-    _despine(ax_b)
-
-    figure.subplots_adjust(top=0.85)
-    figure.suptitle("Pathway Functional Coherence and Structural Quality",
-                    fontsize=FONT_TITLE + 1, fontweight='bold', y=0.96)
-
-    # Caption — all values computed, no hardcoded dataset sizes
-    n_valid = int(np.sum(~np.isnan(pdockq)))
-    n_enrichment = int(((enrichment > 0) & enrichment.notna()).sum())
-    right_n_note = f', n = {n_enrichment:,}' if n_enrichment != n_valid else ''
-    caption_14 = (
-    f'Left: pDockQ distributions across shared Reactome pathway counts '
-    f'(Mann\u2013Whitney {bin_labels[0]} vs {bin_labels[-1]}, \u03c1 = {rho:.3f}, n = {n_valid:,}). '
-    f'Right: STRING PPI enrichment ratios by structural quality tier (Kruskal\u2013Wallis{right_n_note}). '
-    f'Dashed lines mark the dataset median ({global_median:.2f}, left) and null expectation '
-    f'(log\u2081\u2080 = 0, right).'
-    )
-    figure.text(0.5, -0.01, caption_14,
-                ha='center', fontsize=7, style='italic', color='#777777')
-
-    _save_figure(figure, '14_Pathway_Coherence.png')
-
-
-def plot_fig15_disease_enrichment(df: pd.DataFrame) -> None:
-    """Fig 15: Disease Association Enrichment Across Quality Tiers.
-
-    Two-panel figure: (A) grouped bar chart of disease prevalence by tier
-    with chi-square test and drug-target annotation box; (B) top 10 diseases
-    by frequency as horizontal stacked bars segmented by quality tier.
-
-    Requires 'n_diseases_a' column.
-    """
-    if 'n_diseases_a' not in df.columns:
-        print("  Skipping Fig 15 — no disease data available")
-        return
-
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-    if tier_col not in df.columns:
-        print("  Skipping Fig 15 — no quality tier column")
-        return
-
-    total_diseases = df['n_diseases_a'].fillna(0).astype(int)
-    if 'n_diseases_b' in df.columns:
-        total_diseases = total_diseases + df['n_diseases_b'].fillna(0).astype(int)
-
-    has_disease = total_diseases > 0
-
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5.5),
-                                         gridspec_kw={'width_ratios': [2.5, 2.5]})
-
-    # ── Panel A: disease prevalence by tier ──
-    tier_stats = {}
-    for t in TIER_ORDER:
-        mask = df[tier_col] == t
-        n_tier = mask.sum()
-        n_dis = (mask & has_disease).sum()
-        tier_stats[t] = {'n_tier': n_tier, 'n_disease': n_dis,
-                         'n_no_disease': n_tier - n_dis,
-                         'pct_disease': (n_dis / n_tier * 100) if n_tier > 0 else 0,
-                         'pct_no_disease': ((n_tier - n_dis) / n_tier * 100) if n_tier > 0 else 0}
-
-    x_pos = np.arange(len(TIER_ORDER))
-    width = 0.35
-
-    pct_dis = [tier_stats[t]['pct_disease'] for t in TIER_ORDER]
-    pct_no = [tier_stats[t]['pct_no_disease'] for t in TIER_ORDER]
-    n_dis_vals = [tier_stats[t]['n_disease'] for t in TIER_ORDER]
-    n_no_vals = [tier_stats[t]['n_no_disease'] for t in TIER_ORDER]
-
-    bars_dis = ax_a.bar(x_pos - width / 2, pct_dis, width, color='#c0392b',
-                        alpha=0.7, label='Has disease', edgecolor='grey', linewidth=0.5)
-    bars_no = ax_a.bar(x_pos + width / 2, pct_no, width, color='#d5d8dc',
-                       label='No disease', edgecolor='grey', linewidth=0.5)
-
-    # Annotate counts on bars
-    for i, (bar_d, bar_n, nd, nn) in enumerate(zip(bars_dis, bars_no, n_dis_vals, n_no_vals)):
-        ax_a.text(bar_d.get_x() + bar_d.get_width() / 2, bar_d.get_height() + 1,
-                  f'{nd:,}', ha='center', va='bottom', fontsize=7, color='#555555')
-        ax_a.text(bar_n.get_x() + bar_n.get_width() / 2, bar_n.get_height() + 1,
-                  f'{nn:,}', ha='center', va='bottom', fontsize=7, color='#555555')
-
-    ax_a.set_xticks(x_pos)
-    ax_a.set_xticklabels(TIER_ORDER, fontsize=FONT_TICK)
-    ax_a.set_ylim(0, max(pct_no + pct_dis) * 1.22)
-
-    # Chi-square test
-    contingency = np.array([[tier_stats[t]['n_disease'] for t in TIER_ORDER],
-                            [tier_stats[t]['n_no_disease'] for t in TIER_ORDER]])
-    if contingency.min() >= 5:
-        chi2, p_val, dof, expected = chi2_contingency(contingency)
-        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
-        ax_a.text(0.98, 0.95, f'\u03c7\u00b2 = {chi2:.1f}, {p_str}',
-                  transform=ax_a.transAxes, ha='right', va='top',
-                  fontsize=9, bbox=dict(boxstyle='round,pad=0.3',
-                                        facecolor='white', edgecolor='grey', alpha=0.8))
-
-    # Drug target disease prevalence — text annotation box with Fisher test
-    baseline_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
-    if 'is_drug_target_a' in df.columns:
-        drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
-        drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
-        is_drug = drug_a | drug_b
-        n_drug = is_drug.sum()
-        if n_drug >= 2:
-            drug_disease_pct = (is_drug & has_disease).sum() / n_drug * 100
-            # Fisher exact test: drug-target vs non-drug-target disease prevalence
-            n_drug_dis = int((is_drug & has_disease).sum())
-            n_drug_no = int(n_drug) - n_drug_dis
-            n_nondrug_dis = int(has_disease.sum()) - n_drug_dis
-            n_nondrug_no = int(len(df)) - n_drug_dis - n_drug_no - n_nondrug_dis
-            fisher_table = [[n_drug_dis, n_drug_no],
-                            [n_nondrug_dis, n_nondrug_no]]
-            _, fisher_p = fisher_exact(fisher_table, alternative='two-sided')
-            fisher_p_str = 'p < 0.001' if fisher_p < 0.001 else f'p = {fisher_p:.2e}'
-            ax_a.text(0.02, 0.35,
-                      f'Drug targets: {drug_disease_pct:.0f}% disease-assoc.\n'
-                      f'vs {baseline_pct:.0f}% baseline '
-                      f'(Fisher {fisher_p_str})\n'
-                      f'(n = {n_drug})',
-                      transform=ax_a.transAxes, ha='left', va='top',
-                      fontsize=8, color='#9b59b6',
-                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#f4ecf7',
-                                edgecolor='#9b59b6', alpha=0.9))
-
-    ax_a.legend(fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
-    _apply_common_style(ax_a, 'Disease Prevalence by Quality Tier',
-                        'Quality Tier', '% of Tier')
-    _despine(ax_a)
-
-    # ── Panel B: top diseases by tier (stacked horizontal bars) ──
-    disease_tier_counts: dict[str, dict[str, int]] = {}
-    disease_protein_counts: dict[str, set] = {}  # unique accessions per disease
-
-    for _, row in df.iterrows():
-        tier = row.get(tier_col, '')
-        if tier not in TIER_ORDER:
-            continue
-        for suffix in ('a', 'b'):
-            details_str = row.get(f'disease_details_{suffix}', '')
-            if not isinstance(details_str, str) or not details_str.strip():
-                continue
-            accession = str(row.get(f'protein_{suffix}', ''))
-            for entry in details_str.split('|'):
-                entry = entry.strip()
-                if not entry or entry.startswith('...'):
-                    continue
-                name = _parse_disease_name(entry)
-                if not name:
-                    continue
-                disease_tier_counts.setdefault(name, {t: 0 for t in TIER_ORDER})
-                disease_tier_counts[name][tier] += 1
-                disease_protein_counts.setdefault(name, set())
-                if accession:
-                    disease_protein_counts[name].add(accession)
-
-    if disease_tier_counts:
-        # Select top 10 diseases: primary = unique protein count (desc),
-        # tiebreaker = total annotations (desc)
-        sorted_diseases = sorted(
-            disease_tier_counts.keys(),
-            key=lambda d: (len(disease_protein_counts.get(d, set())),
-                           sum(disease_tier_counts[d].values())),
-            reverse=True
-        )[:10]
-
-        y_pos = np.arange(len(sorted_diseases))
-        left = np.zeros(len(sorted_diseases))
-
-        for t in TIER_ORDER:
-            widths = np.array([disease_tier_counts[d].get(t, 0) for d in sorted_diseases], dtype=float)
-            ax_b.barh(y_pos, widths, left=left, color=TIER_COLORS[t],
-                      label=t, height=0.6, edgecolor='white', linewidth=0.5)
-            left += widths
-
-        ax_b.set_yticks(y_pos)
-
-        def _truncate_name(name, max_len=50):
-            if len(name) <= max_len:
-                return name
-            return name[:max_len].rsplit(' ', 1)[0] + '...'
-
-        ax_b.set_yticklabels([_truncate_name(name) for name in sorted_diseases], fontsize=8)
-        ax_b.invert_yaxis()
-        ax_b.set_xlim(0, max(left) * 1.30)
-
-        # Total count + unique proteins annotation at end of each bar
-        xlim_upper = max(left) * 1.30
-        for i, d in enumerate(sorted_diseases):
-            total = sum(disease_tier_counts[d].values())
-            n_prots = len(disease_protein_counts.get(d, set()))
-            label_text = f'{total} ({n_prots} proteins)'
-            label_x = left[i] + max(left) * 0.02
-            if label_x + len(label_text) * 0.35 > xlim_upper:
-                # Bar too close to boundary — place label inside in white
-                ax_b.text(left[i] - max(left) * 0.02, i, label_text,
-                          va='center', ha='right', fontsize=7, color='white',
-                          fontweight='bold')
-            else:
-                ax_b.text(label_x, i, label_text,
-                          va='center', fontsize=7, color='#555555')
-
-        ax_b.legend(fontsize=FONT_TICK - 1, loc='center right', framealpha=1.0)
-        _apply_common_style(ax_b, 'Top Disease Categories by Tier',
-                            'Annotations (unique proteins shown)', '')
-        _despine(ax_b)
-
-        # Hub-protein footnote if any top disease has few unique proteins but many annotations
-        has_hub = any(
-            len(disease_protein_counts.get(d, set())) <= 3
-            and sum(disease_tier_counts[d].values()) >= 20
-            for d in sorted_diseases
-        )
-        if has_hub:
-            ax_b.text(0.5, -0.08,
-                      '\u2020 Diseases with \u22643 unique proteins may reflect hub-protein effects.',
-                      transform=ax_b.transAxes, ha='center', va='top',
-                      fontsize=6.5, style='italic', color='#777777')
-    else:
-        ax_b.text(0.5, 0.5, 'No disease details\navailable',
-                  transform=ax_b.transAxes, ha='center', va='center',
-                  fontsize=FONT_AXIS_LABEL, color='#999999')
-        ax_b.set_axis_off()
-
-    figure.subplots_adjust(top=0.88, wspace=0.45)
-    figure.suptitle("Disease Association Enrichment Across Quality Tiers",
-                    fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
-
-    # Caption — dynamic values, no hardcoded dataset sizes
-    n_effective = len(df)
-    overall_disease_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
-    caption_15 = (
-    f'Left: Disease annotation prevalence across quality tiers (\u03c7\u00b2, n = {n_effective:,}). '
-    f'Higher prevalence in lower tiers likely reflects annotation bias toward well-studied '
-    f'disordered proteins. Right: Top diseases ranked by unique proteins, displaying total '
-    f'annotations and protein counts.'
-    )
-    figure.text(0.5, -0.01, caption_15,
-                ha='center', fontsize=7, style='italic', color='#777777')
-
-    _save_figure(figure, '15_Disease_Enrichment.png')
-
-
-# Fig 16 removed — null result (p = 0.270, n = 80); drug-target disease
-# enrichment is reported as an annotation box in Fig 15 Panel A instead.
-
+# ── Pathway network helpers (Fig 15) ───────────────────────────────
 
 def _compute_reactome_depths(hierarchy: dict) -> dict:
     """Compute depth level for each Reactome pathway via BFS from roots.
@@ -2386,640 +743,12 @@ def _compute_reactome_depths(hierarchy: dict) -> dict:
 
     return depths
 
+# ── Prediction Quality Paradox helpers (Fig 16) ────────────────────
 
-def plot_fig16_pathway_network(df: pd.DataFrame,
-                                max_pathways: int = 20,
-                                min_shared_complexes: int = 20,
-                                hierarchy_file: Optional[str] = 'data/pathways/ReactomePathwaysRelation.txt',
-                                filter_hierarchy: bool = True,
-                                depth_level: int = 1) -> None:
-    """Fig 16: Pathway-level network coloured by % High-tier complexes.
-
-    Nodes are the top N Reactome pathways at a single hierarchy depth level.
-    Edges connect pathways that share complexes above a threshold, with
-    hierarchical parent-child links excluded. Node colour encodes
-    % High-tier complexes (RdYlGn), node size encodes complex count, edges
-    are grey with width proportional to shared complex count.
-
-    Uses kamada_kawai_layout for deterministic, reproducible layout.
-
-    Parameters
-    ----------
-    hierarchy_file : str or None
-        Path to ReactomePathwaysRelation.txt. Default searches in
-        ``data/pathways/``. Set to None to disable hierarchy filtering.
-    filter_hierarchy : bool
-        If True (default), remove parent-child edges from the network.
-    depth_level : int
-        Reactome hierarchy depth to display (0 = top-level, 1 = second-level).
-        Falls back to depth+1 if fewer than 5 pathways have data at target depth.
-
-    Requires NetworkX and 'reactome_pathways_a' column.
-    """
-    if not _HAS_NETWORKX:
-        print("  Skipping Fig 16 — NetworkX not installed")
-        return
-
-    if 'reactome_pathways_a' not in df.columns:
-        print("  Skipping Fig 16 — no pathway data available")
-        return
-
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-
-    # ── Load hierarchy for edge filtering and depth computation ──
-    hierarchy_pairs: set = set()
-    pathway_depths: dict = {}
-    hierarchy_loaded = False
-    if filter_hierarchy and hierarchy_file:
-        try:
-            from pathway_network import load_reactome_hierarchy
-            hierarchy = load_reactome_hierarchy(hierarchy_file)
-            for parent, children in hierarchy.items():
-                for child in children:
-                    hierarchy_pairs.add((parent, child))
-                    hierarchy_pairs.add((child, parent))
-            pathway_depths = _compute_reactome_depths(hierarchy)
-            hierarchy_loaded = True
-        except FileNotFoundError:
-            print(f"  Warning: hierarchy file not found ({hierarchy_file}), "
-                  f"skipping hierarchy filtering")
-        except Exception as e:
-            print(f"  Warning: could not load hierarchy file: {e}")
-
-    # ── Build pathway co-occurrence data ──
-    pathway_complexes: dict[str, list[float]] = {}
-    pathway_tiers: dict[str, list[str]] = {}  # for % High-tier colouring
-    pathway_names: dict[str, str] = {}
-    edge_data: dict[tuple, list[float]] = {}
-
-    for _, row in df.iterrows():
-        pdockq_val = row.get('pdockq')
-        if pd.isna(pdockq_val):
-            continue
-        pdockq_val = float(pdockq_val)
-        tier = str(row.get(tier_col, ''))
-
-        complex_pids = set()
-        for suffix in ('a', 'b'):
-            pathways_str = row.get(f'reactome_pathways_{suffix}', '')
-            if not pathways_str or pd.isna(pathways_str):
-                continue
-            for entry in str(pathways_str).split('|'):
-                if entry.startswith('...('):
-                    continue
-                parts = entry.split(':', 1)
-                if len(parts) == 2:
-                    pid, pname = parts
-                    complex_pids.add(pid)
-                    pathway_names[pid] = pname
-
-        for pid in complex_pids:
-            pathway_complexes.setdefault(pid, []).append(pdockq_val)
-            pathway_tiers.setdefault(pid, []).append(tier)
-
-        pid_list = sorted(complex_pids)
-        for i in range(len(pid_list)):
-            for j in range(i + 1, len(pid_list)):
-                key = (pid_list[i], pid_list[j])
-                edge_data.setdefault(key, []).append(pdockq_val)
-
-    if not pathway_complexes:
-        print("  Skipping Fig 16 — no parseable pathway data")
-        return
-
-    # ── Filter to target depth level ──
-    effective_depth = depth_level
-    if hierarchy_loaded and pathway_depths:
-        # Filter pathway_complexes to target depth
-        depth_candidates = {pid for pid in pathway_complexes
-                            if pathway_depths.get(pid) == depth_level}
-        # Fall back to depth+1 if too few pathways at target depth
-        if len(depth_candidates) < 5:
-            depth_candidates_fallback = {pid for pid in pathway_complexes
-                                          if pathway_depths.get(pid) == depth_level + 1}
-            if len(depth_candidates_fallback) >= 5:
-                depth_candidates = depth_candidates_fallback
-                effective_depth = depth_level + 1
-                print(f"  Fig 16: fell back to depth {effective_depth} "
-                      f"({len(depth_candidates)} pathways)")
-            # If still too few, use all pathways (no depth filter)
-            elif len(depth_candidates) < 5:
-                depth_candidates = set(pathway_complexes.keys())
-                effective_depth = -1  # signals no depth filtering applied
-                print("  Fig 16: too few pathways at target depth, using all depths")
-
-        # Select top N from depth-filtered candidates
-        sorted_pids = sorted(depth_candidates,
-                             key=lambda p: len(pathway_complexes[p]), reverse=True)
-    else:
-        sorted_pids = sorted(pathway_complexes.keys(),
-                             key=lambda p: len(pathway_complexes[p]), reverse=True)
-        effective_depth = -1  # no depth filtering
-
-    keep_pids = set(sorted_pids[:max_pathways])
-
-    G = nx.Graph()
-    for pid in keep_pids:
-        vals = pathway_complexes[pid]
-        tiers_list = pathway_tiers.get(pid, [])
-        frac_high = sum(1 for t in tiers_list if t == 'High') / len(tiers_list) if tiers_list else 0
-        G.add_node(pid,
-                   n_complexes=len(vals),
-                   mean_pdockq=float(np.mean(vals)),
-                   frac_high=frac_high,
-                   name=pathway_names.get(pid, pid))
-
-    # Build edges — exclude hierarchical parent-child links
-    effective_threshold = min_shared_complexes
-    for (p1, p2), vals in edge_data.items():
-        if p1 in keep_pids and p2 in keep_pids and len(vals) >= effective_threshold:
-            if hierarchy_loaded and (p1, p2) in hierarchy_pairs:
-                continue
-            G.add_edge(p1, p2, n_shared=len(vals),
-                       mean_pdockq=float(np.mean(vals)))
-
-    # Auto-raise threshold if network is too dense (> 3 edges per node)
-    n_nodes_g = G.number_of_nodes()
-    while G.number_of_edges() > 3 * n_nodes_g and effective_threshold < 10000:
-        effective_threshold *= 2
-        edges_to_remove = [(u, v) for u, v, d in G.edges(data=True)
-                           if d['n_shared'] < effective_threshold]
-        G.remove_edges_from(edges_to_remove)
-        if not edges_to_remove:
-            break  # no more edges to remove at this threshold
-
-    if G.number_of_nodes() == 0:
-        print("  Skipping Fig 16 — empty graph after filtering")
-        return
-
-    # ── Layout — shrink inward to leave margin for labels ──
-    pos = nx.kamada_kawai_layout(G)
-    pos = {k: v * 0.85 for k, v in pos.items()}
-
-    figure, ax = plt.subplots(1, 1, figsize=(14, 14))
-
-    # Colour normalisation — % High-tier (0% to dynamic max for better spread)
-    node_frac_high = [G.nodes[n]['frac_high'] for n in G.nodes()]
-    vmin = 0.0
-    vmax = max(node_frac_high) if node_frac_high and max(node_frac_high) > 0 else 0.5
-    # Round up to nearest 0.05 for clean tick labels
-    vmax = max(0.05, np.ceil(vmax * 20) / 20)
-    norm = plt.Normalize(vmin=vmin, vmax=vmax)
-    cmap = plt.cm.RdYlGn
-
-    # Draw edges first (grey, beneath nodes) with data-relative scaling
-    all_shared = [d['n_shared'] for _, _, d in G.edges(data=True)] if G.number_of_edges() > 0 else [1]
-    min_s, max_s = min(all_shared), max(all_shared)
-
-    for u, v, edata in G.edges(data=True):
-        x_coords = [pos[u][0], pos[v][0]]
-        y_coords = [pos[u][1], pos[v][1]]
-        frac = (edata['n_shared'] - min_s) / max(1, max_s - min_s)
-        width = 0.5 + 4.5 * frac
-        alpha = 0.05 + 0.35 * frac  # weak edges fade, strong edges visible
-        ax.plot(x_coords, y_coords, color='#888888', linewidth=width, alpha=alpha)
-
-    # Draw nodes — data-relative sizing for visible differentiation
-    counts = [G.nodes[n]['n_complexes'] for n in G.nodes()]
-    min_c, max_c = min(counts), max(counts)
-    node_sizes = [300 + 2700 * (c - min_c) / max(1, max_c - min_c) for c in counts]
-    node_colors = [cmap(norm(G.nodes[n]['frac_high'])) for n in G.nodes()]
-    nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes,
-                           node_color=node_colors, edgecolors='black',
-                           linewidths=0.8)
-
-    # Label ALL nodes — centred inside node with collision avoidance
-    node_list = list(G.nodes())
-    node_size_map = dict(zip(node_list, node_sizes))
-    label_data = []
-    for n in node_list:
-        full_name = pathway_names.get(n, n)
-        name = full_name[:40] + '\u2026' if len(full_name) > 40 else full_name
-        wrapped = _textwrap.fill(name, width=15)
-        x, y = pos[n]
-        sz = node_size_map[n]
-        fs = 5 + 3 * (sz - 300) / max(1, 2700)
-        label_data.append({'x': x, 'y': y, 'text': wrapped, 'fontsize': fs})
-
-    # Collision nudge — sort top-to-bottom, push overlapping labels apart
-    label_data.sort(key=lambda d: -d['y'])
-    nudge = 0.03
-    for i in range(len(label_data)):
-        for j in range(i + 1, len(label_data)):
-            if (abs(label_data[i]['x'] - label_data[j]['x']) < 0.08 and
-                    abs(label_data[i]['y'] - label_data[j]['y']) < nudge):
-                label_data[j]['y'] = label_data[i]['y'] - nudge
-
-    for ld in label_data:
-        ax.text(ld['x'], ld['y'], ld['text'],
-                fontsize=ld['fontsize'], ha='center', va='center',
-                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
-                          alpha=0.6, edgecolor='none'))
-
-    ax.axis('off')
-    ax.margins(0.15)
-
-    # Colourbar — % High-tier complexes
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = figure.colorbar(sm, ax=ax, shrink=0.6, pad=0.06)
-    cbar.set_label('Percentage of High-tier complexes', fontsize=12)
-    cbar.ax.tick_params(labelsize=10)
-    n_ticks = min(9, int(vmax / 0.05) + 1)
-    tick_vals = np.linspace(vmin, vmax, n_ticks)
-    cbar.set_ticks(tick_vals)
-    cbar.set_ticklabels([f'{v * 100:.0f}%' for v in tick_vals])
-
-    # Node-size legend — show min and max with explicit labels
-    ref_sizes = [min_c, max_c]
-    ref_labels = [f'{min_c:,} (smallest)', f'{max_c:,} (largest)']
-    legend_elements = []
-    for s, lbl in zip(ref_sizes, ref_labels):
-        display_size = 300 + 2700 * (s - min_c) / max(1, max_c - min_c)
-        legend_elements.append(Line2D([0], [0], marker='o', color='w',
-                                      markerfacecolor='#bdc3c7',
-                                      markeredgecolor='black', markeredgewidth=0.5,
-                                      markersize=max(4, np.sqrt(display_size) / 3),
-                                      label=lbl))
-    figure.legend(handles=legend_elements, fontsize=10,
-                  title='Pathway size (complexes)', title_fontsize=11,
-                  framealpha=1.0, borderpad=1.2, labelspacing=1.5, handletextpad=1.0,
-                  loc='upper right', bbox_to_anchor=(0.99, 0.97))
-
-    figure.suptitle("Reactome Pathway Network by Structural Quality",
-                    fontsize=FONT_TITLE + 1, fontweight='bold')
-
-    # Caption — dynamic values, no hardcoded sizes
-    n_nodes = G.number_of_nodes()
-    n_edges = G.number_of_edges()
-    hier_note = ', hierarchical parent\u2013child links excluded' if hierarchy_loaded else ''
-    depth_note = f'depth level {effective_depth}' if effective_depth >= 0 else 'all depths'
-    threshold_note = (f'\u2265{effective_threshold} shared complexes'
-                      if effective_threshold == min_shared_complexes
-                      else f'\u2265{effective_threshold} shared complexes '
-                           f'(auto-raised from {min_shared_complexes})')
-    caption_16 = (
-    f'Network of the top {n_nodes} Reactome pathways ({depth_note}, \u2265{min_c:,} complexes). '
-    f'Node size and color reflect total complex count and High-tier proportion, respectively. '
-    f'The {n_edges} edges denote pathway overlaps ({threshold_note}{hier_note}), with width '
-    f'scaling by overlap strength.'
-    )
-    figure.text(0.5, 0.01, caption_16,
-                ha='center', fontsize=7, style='italic', color='#777777')
-
-    _save_figure(figure, '16_Pathway_Network.png')
-
-
-# Fig 18 removed — CSV lacks interface residue positions; variant_details
-# only records positions where variants exist, making PTM-interface
-# cross-referencing scientifically invalid (near-zero matches).
-
-
-def plot_fig17_stability_crossvalidation(df: pd.DataFrame) -> None:
-    """Fig 17: Stability Predictor Cross-Validation (3-panel).
-
-    Panel A — EVE vs AlphaMissense concordance scatter (pooled both chains).
-    Panel B — AlphaMissense vs monomeric FoldX DDG scatter (chain A).
-    Panel C — Coverage landscape grouped bar chart by quality tier.
-
-    Requires stability + ProtVar columns:
-        eve_score_mean_a/b, protvar_am_mean_a/b, protvar_foldx_mean_a/b,
-        eve_coverage_a/b, quality_tier_v2.
-    """
-    required = ['eve_score_mean_a', 'protvar_am_mean_a', 'quality_tier_v2']
-    if not all(c in df.columns for c in required):
-        print("  Skipping Fig 17 — missing stability/ProtVar columns")
-        return
-
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-
-    figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
-
-    # ── Panel A: EVE vs AlphaMissense (pooled both chains) ──────────
-    eve_vals, am_vals, tier_vals_a = [], [], []
-    for _, row in df.iterrows():
-        tier = row.get(tier_col, '')
-        if tier not in TIER_ORDER:
-            continue
-        for suffix in ('a', 'b'):
-            eve = row.get(f'eve_score_mean_{suffix}', np.nan)
-            am = row.get(f'protvar_am_mean_{suffix}', np.nan)
-            if pd.notna(eve) and pd.notna(am) and eve > 0 and am > 0:
-                eve_vals.append(eve)
-                am_vals.append(am)
-                tier_vals_a.append(tier)
-
-    if len(eve_vals) >= 10:
-        eve_arr = np.array(eve_vals)
-        am_arr = np.array(am_vals)
-        colors_a = [TIER_COLORS.get(t, '#95a5a6') for t in tier_vals_a]
-        s, alpha = _adaptive_scatter_params(len(eve_arr))
-        ax_a.scatter(eve_arr, am_arr, c=colors_a, s=s, alpha=alpha, edgecolors='none')
-
-        try:
-            from scipy.stats import spearmanr
-            rho, p = spearmanr(eve_arr, am_arr)
-            p_str = f'p < 0.001' if p < 0.001 else f'p = {p:.3f}'
-            ax_a.text(0.05, 0.95, f'\u03c1 = {rho:.2f}, {p_str}\nn = {len(eve_arr):,}',
-                      transform=ax_a.transAxes, va='top', fontsize=FONT_TICK,
-                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                                edgecolor='grey', alpha=0.9))
-        except ImportError:
-            pass
-
-        # Tier legend
-        for t in TIER_ORDER:
-            ax_a.scatter([], [], c=TIER_COLORS[t], s=20, label=t)
-        ax_a.legend(fontsize=FONT_TICK - 1, loc='lower right', framealpha=0.9)
-    else:
-        ax_a.text(0.5, 0.5, 'Insufficient overlap\n(< 10 pairs)',
-                  transform=ax_a.transAxes, ha='center', va='center', fontsize=10)
-
-    ax_a.set_xlabel('EVE Mean Score (higher = more pathogenic)', fontsize=FONT_AXIS_LABEL)
-    ax_a.set_ylabel('AlphaMissense Mean Score (higher = more pathogenic)', fontsize=FONT_AXIS_LABEL)
-    ax_a.set_title('A: EVE vs AlphaMissense', fontsize=FONT_TITLE, fontweight='bold')
-    ax_a.tick_params(labelsize=FONT_TICK)
-    _despine(ax_a)
-
-    # ── Panel B: AlphaMissense vs FoldX (chain A only) ──────────────
-    am_b, foldx_b, tier_vals_b = [], [], []
-    for _, row in df.iterrows():
-        tier = row.get(tier_col, '')
-        if tier not in TIER_ORDER:
-            continue
-        am = row.get('protvar_am_mean_a', np.nan)
-        fx = row.get('protvar_foldx_mean_a', np.nan)
-        if pd.notna(am) and pd.notna(fx) and am > 0 and fx > 0:
-            am_b.append(am)
-            foldx_b.append(fx)
-            tier_vals_b.append(tier)
-
-    if len(am_b) >= 10:
-        am_b_arr = np.array(am_b)
-        fx_arr = np.array(foldx_b)
-        colors_b = [TIER_COLORS.get(t, '#95a5a6') for t in tier_vals_b]
-        s, alpha = _adaptive_scatter_params(len(am_b_arr))
-        ax_b.scatter(am_b_arr, fx_arr, c=colors_b, s=s, alpha=alpha, edgecolors='none')
-
-        try:
-            from scipy.stats import spearmanr
-            rho, p = spearmanr(am_b_arr, fx_arr)
-            p_str = f'p < 0.001' if p < 0.001 else f'p = {p:.3f}'
-            ax_b.text(0.05, 0.95, f'\u03c1 = {rho:.2f}, {p_str}\nn = {len(am_b_arr):,}',
-                      transform=ax_b.transAxes, va='top', fontsize=FONT_TICK,
-                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                                edgecolor='grey', alpha=0.9))
-        except ImportError:
-            pass
-    else:
-        ax_b.text(0.5, 0.5, 'Insufficient overlap\n(< 10 pairs)',
-                  transform=ax_b.transAxes, ha='center', va='center', fontsize=10)
-
-    ax_b.set_xlabel('AlphaMissense Mean Score', fontsize=FONT_AXIS_LABEL)
-    ax_b.set_ylabel('Monomeric FoldX \u0394\u0394G Mean (kcal/mol, higher = destabilising)', fontsize=FONT_AXIS_LABEL)
-    ax_b.set_title('B: AlphaMissense vs FoldX', fontsize=FONT_TITLE, fontweight='bold')
-    ax_b.tick_params(labelsize=FONT_TICK)
-    _despine(ax_b)
-
-    # ── Panel C: Coverage Landscape (grouped bar) ───────────────────
-    predictor_names = ['EVE', 'AlphaMissense', 'FoldX']
-    predictor_colors = ['#3498db', '#e67e22', '#2ecc71']
-    bar_width = 0.25
-    x_positions = np.arange(len(TIER_ORDER))
-
-    overall_coverage = {p: {'covered': 0, 'total': 0} for p in predictor_names}
-
-    for i, pred in enumerate(predictor_names):
-        coverages = []
-        for tier in TIER_ORDER:
-            tier_df = df[df[tier_col] == tier]
-            n_tier = len(tier_df)
-            if n_tier == 0:
-                coverages.append(0)
-                continue
-
-            if pred == 'EVE':
-                cov_a = tier_df.get('eve_coverage_a', pd.Series(dtype=float))
-                cov_b = tier_df.get('eve_coverage_b', pd.Series(dtype=float))
-                covered = ((cov_a.fillna(0) > 0) | (cov_b.fillna(0) > 0)).sum()
-            elif pred == 'AlphaMissense':
-                am_a = tier_df.get('protvar_am_mean_a', pd.Series(dtype=float))
-                am_b = tier_df.get('protvar_am_mean_b', pd.Series(dtype=float))
-                covered = (am_a.notna() | am_b.notna()).sum()
-            else:  # FoldX
-                fx_a = tier_df.get('protvar_foldx_mean_a', pd.Series(dtype=float))
-                fx_b = tier_df.get('protvar_foldx_mean_b', pd.Series(dtype=float))
-                covered = (fx_a.notna() | fx_b.notna()).sum()
-
-            overall_coverage[pred]['covered'] += int(covered)
-            overall_coverage[pred]['total'] += n_tier
-            coverages.append(100.0 * covered / n_tier)
-
-        bars = ax_c.bar(x_positions + i * bar_width, coverages, bar_width,
-                        color=predictor_colors[i], label=pred, edgecolor='white',
-                        linewidth=0.5, alpha=0.85)
-
-        # Annotate each bar with percentage
-        for bar_obj, cov in zip(bars, coverages):
-            if cov > 0:
-                ax_c.text(bar_obj.get_x() + bar_obj.get_width() / 2, cov + 1.5,
-                          f'{cov:.0f}%', ha='center', va='bottom', fontsize=7)
-
-    ax_c.set_xticks(x_positions + bar_width)
-    ax_c.set_xticklabels(TIER_ORDER, fontsize=FONT_AXIS_LABEL)
-    ax_c.set_ylabel('Coverage (%)', fontsize=FONT_AXIS_LABEL)
-    ax_c.set_ylim(0, 110)
-    ax_c.set_title('C: Coverage by Quality Tier', fontsize=FONT_TITLE, fontweight='bold')
-    ax_c.tick_params(labelsize=FONT_TICK)
-    ax_c.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
-
-    # Overall coverage annotation
-    overall_parts = []
-    for pred in predictor_names:
-        oc = overall_coverage[pred]
-        pct = 100.0 * oc['covered'] / oc['total'] if oc['total'] > 0 else 0
-        overall_parts.append(f'{pred}: {pct:.0f}%')
-    ax_c.text(0.5, -0.12, 'Overall: ' + '  |  '.join(overall_parts),
-              transform=ax_c.transAxes, ha='center', fontsize=FONT_TICK - 1,
-              style='italic', color='#555555')
-
-    _despine(ax_c)
-
-    figure.suptitle("Stability Predictor Cross-Validation",
-                    fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    _save_figure(figure, '17_Stability_CrossValidation.png')
-
-
-def plot_fig18_clustering_validation(df: pd.DataFrame) -> None:
-    """Fig 18: Sequence Clustering Validation (2-panel).
-
-    Panel A — Homodimer ground truth scatter (shared vs total cluster count).
-    Panel B — Shared cluster ratio by quality tier (heterodimers only).
-
-    Requires clustering columns:
-        sequence_cluster_count, shared_cluster_count, complex_type, quality_tier_v2.
-    """
-    required = ['sequence_cluster_count', 'shared_cluster_count', 'complex_type']
-    if not all(c in df.columns for c in required):
-        print("  Skipping Fig 18 — missing clustering columns")
-        return
-
-    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
-
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13, 5.5),
-                                         gridspec_kw={'width_ratios': [3, 2]})
-
-    # ── Panel A: Homodimer Ground Truth Scatter ─────────────────────
-    valid = df['sequence_cluster_count'].notna() & (df['sequence_cluster_count'] > 0)
-    valid &= df['shared_cluster_count'].notna()
-    plot_df = df[valid].copy()
-
-    seq_counts = plot_df['sequence_cluster_count'].values
-    shared_counts = plot_df['shared_cluster_count'].values
-    complex_types = plot_df['complex_type'].astype(str).str.lower().values
-
-    is_homo = complex_types == 'homodimer'
-    is_hetero = ~is_homo
-
-    # Heterodimers first (underneath)
-    if is_hetero.any():
-        ax_a.scatter(seq_counts[is_hetero], shared_counts[is_hetero],
-                     s=8, alpha=0.3, color='#95a5a6', label='Heterodimer',
-                     edgecolors='none', zorder=1)
-    # Homodimers on top
-    if is_homo.any():
-        ax_a.scatter(seq_counts[is_homo], shared_counts[is_homo],
-                     s=25, alpha=0.8, color='#e74c3c', label='Homodimer',
-                     edgecolors='black', linewidth=0.3, zorder=2)
-
-    # y = x diagonal
-    max_val = max(seq_counts.max(), shared_counts.max()) if len(seq_counts) > 0 else 10
-    ax_a.plot([0, max_val * 1.05], [0, max_val * 1.05], 'k--', alpha=0.6,
-              linewidth=1.5, zorder=0, label='y = x')
-
-    # Homodimer ground truth annotation
-    n_homo = is_homo.sum()
-    if n_homo > 0:
-        homo_seq = seq_counts[is_homo]
-        homo_shared = shared_counts[is_homo]
-        n_perfect = int(np.sum(homo_shared == homo_seq))
-        pct = 100.0 * n_perfect / n_homo if n_homo > 0 else 0
-        ax_a.text(0.05, 0.95,
-                  f'Homodimers: {n_perfect}/{n_homo} on y=x ({pct:.0f}%)',
-                  transform=ax_a.transAxes, va='top', fontsize=FONT_TICK,
-                  bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                            edgecolor='grey', alpha=0.9))
-
-    # Annotate zero-shared-cluster band
-    n_zero_shared = int((shared_counts == 0).sum())
-    if n_zero_shared > 0:
-        pct_zero = 100.0 * n_zero_shared / len(shared_counts)
-        ax_a.text(25, 2, f'No shared clusters: {n_zero_shared} ({pct_zero:.1f}%)',
-                  ha='left', va='bottom',
-                  fontsize=FONT_TICK - 1, color='#555555', style='italic')
-
-    ax_a.set_xlabel('Sequence Cluster Count', fontsize=FONT_AXIS_LABEL)
-    ax_a.set_ylabel('Shared Cluster Count', fontsize=FONT_AXIS_LABEL)
-    ax_a.set_title('A: Homodimer Ground Truth', fontsize=FONT_TITLE, fontweight='bold')
-    ax_a.tick_params(labelsize=FONT_TICK)
-    ax_a.legend(fontsize=FONT_TICK - 1, loc='lower right', framealpha=0.9)
-    _despine(ax_a)
-
-    # ── Panel B: Shared Cluster Ratio by Quality Tier ───────────────
-    hetero_df = plot_df[plot_df['complex_type'].astype(str).str.lower() == 'heterodimer'].copy()
-    hetero_df = hetero_df[hetero_df['sequence_cluster_count'] > 0]
-    hetero_df['cluster_ratio'] = (hetero_df['shared_cluster_count'] /
-                                   hetero_df['sequence_cluster_count'])
-
-    tier_data = {}
-    for tier in TIER_ORDER:
-        vals = hetero_df.loc[hetero_df[tier_col] == tier, 'cluster_ratio'].dropna().values
-        if len(vals) > 0:
-            tier_data[tier] = vals
-
-    if len(tier_data) >= 2:
-        positions = []
-        tier_labels = []
-        data_list = []
-        for i, tier in enumerate(TIER_ORDER):
-            if tier in tier_data:
-                positions.append(i)
-                data_list.append(tier_data[tier])
-                tier_labels.append(f'{tier}\n(n={len(tier_data[tier]):,})')
-
-        parts = ax_b.violinplot(data_list, positions=positions,
-                                showmeans=False, showmedians=True)
-
-        # Colour violin bodies
-        for idx, pc in enumerate(parts['bodies']):
-            tier_name = TIER_ORDER[positions[idx]] if positions[idx] < len(TIER_ORDER) else 'Medium'
-            pc.set_facecolor(TIER_COLORS.get(tier_name, '#95a5a6'))
-            pc.set_alpha(0.3)
-
-        # Strip overlay with jitter
-        rng = np.random.default_rng(42)
-        for idx, pos in enumerate(positions):
-            vals = data_list[idx]
-            jitter = rng.uniform(-0.08, 0.08, size=len(vals))
-            tier_name = TIER_ORDER[pos] if pos < len(TIER_ORDER) else 'Medium'
-            ax_b.scatter(np.full(len(vals), pos) + jitter, vals,
-                         s=3, alpha=0.25, color=TIER_COLORS.get(tier_name, '#95a5a6'),
-                         edgecolors='none', zorder=0)
-
-        ax_b.set_xticks(positions)
-        ax_b.set_xticklabels(tier_labels, fontsize=FONT_AXIS_LABEL)
-
-        # Kruskal-Wallis (all tiers) + Mann-Whitney (High vs Low)
-        try:
-            from scipy.stats import kruskal, mannwhitneyu
-            all_groups = [tier_data[t] for t in TIER_ORDER if t in tier_data]
-            if len(all_groups) >= 2:
-                h_stat, kw_p = kruskal(*all_groups)
-                kw_p_str = f'p = {kw_p:.1e}' if kw_p < 0.001 else f'p = {kw_p:.3f}'
-                stat_lines = [f'Kruskal-Wallis H = {h_stat:.1f}, {kw_p_str}']
-
-                if 'High' in tier_data and 'Low' in tier_data:
-                    _, mw_p = mannwhitneyu(tier_data['High'], tier_data['Low'],
-                                           alternative='two-sided')
-                    med_h = np.median(tier_data['High'])
-                    med_l = np.median(tier_data['Low'])
-                    mw_p_str = f'p = {mw_p:.1e}' if mw_p < 0.001 else f'p = {mw_p:.3f}'
-                    stat_lines.append(f'High vs Low: {mw_p_str}')
-                    stat_lines.append(f'High median: {med_h:.3f}')
-                    stat_lines.append(f'Low median: {med_l:.3f}')
-
-                stat_lines.append('Solid line = median')
-                ax_b.text(0.95, 0.95, '\n'.join(stat_lines),
-                          transform=ax_b.transAxes, va='top', ha='right',
-                          fontsize=FONT_TICK - 1,
-                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                                    edgecolor='grey', alpha=0.9))
-        except ImportError:
-            pass
-    else:
-        ax_b.text(0.5, 0.5, 'Insufficient tier data',
-                  transform=ax_b.transAxes, ha='center', va='center', fontsize=10)
-
-    ax_b.set_ylabel('Fraction of Clusters Shared', fontsize=FONT_AXIS_LABEL)
-    ax_b.set_title('B: Cluster Ratio by Quality Tier', fontsize=FONT_TITLE, fontweight='bold')
-    ax_b.tick_params(labelsize=FONT_TICK)
-    _despine(ax_b)
-
-    figure.suptitle("Sequence Clustering Validation",
-                    fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    _save_figure(figure, '18_Clustering_Validation.png')
-
-
-
-
-# ── Fig 19 helpers (Prediction Quality Paradox) ────────────────────
-
-# Ordered Low → Medium → High (ascending quality)
+# Ordered Low -> Medium -> High (ascending quality)
 _PARADOX_TIER_ORDER = ['Low', 'Medium', 'High']
 
-# Bonferroni correction: 4 panels × 3 pairwise = 12 tests
+# Bonferroni correction: 4 panels x 3 pairwise = 12 tests
 _PARADOX_N_TESTS = 12
 _PARADOX_BONF_THRESHOLD = 0.05 / _PARADOX_N_TESTS  # 0.00417
 
@@ -3275,10 +1004,1865 @@ def _print_paradox_table(all_rows):
     print()
 
 
-# ── Fig 19 main function (Prediction Quality Paradox) ──────────────
+# ══════════════════════════════════════════════════════════════════════
+# FIGURE FUNCTIONS — strict numerical order (1, 1b, 2-16)
+# ══════════════════════════════════════════════════════════════════════
+# -- Item 5: Structure prediction (Figs 1-9) --------------------------------
 
-def plot_fig19_prediction_quality_paradox(df: pd.DataFrame) -> None:
-    """Fig 19 — The Prediction Quality Paradox.
+
+def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: bool = False) -> None:
+    """Fig 1: Overall prediction quality landscape.
+    Colours by V2 quality tier when available, otherwise falls back to disorder-fraction colouring (RdYlGn_r colourmap).
+    When density_mode is True, KDE contour overlays are added to show where complexes concentrate.
+    """
+    use_tier_colouring = col_flags['has_v2_data']
+    n_total = len(df)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_total)
+    figure, axes = plt.subplots(figsize=(10, 8))
+    if use_tier_colouring:
+        # Plot by tier: Low first (behind), then Medium, then High on top
+        for tier in reversed(TIER_ORDER):
+            subset = df[df['quality_tier_v2'] == tier]
+            _timed_scatter(axes, subset['iptm'], subset['pdockq'], n_points=n_total, fig_label='Fig 1', c=TIER_COLORS[tier], s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=3, label=tier)
+
+        # Unclassified (missing PAE -> no tier)
+        unclassified = df[df['quality_tier_v2'].isna()]
+        if len(unclassified) > 0:
+            axes.scatter(unclassified['iptm'], unclassified['pdockq'], c='#bdc3c7', s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=2)
+    else:
+        # Fallback: disorder-fraction colouring
+        if 'plddt_below50_fraction' in df.columns:
+            disorder = df['plddt_below50_fraction'].fillna(0)
+            scatter = _timed_scatter(axes, df['iptm'], df['pdockq'], n_points=n_total, fig_label='Fig 1', c=disorder, cmap='RdYlGn_r', vmin=0, vmax=1, s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=3)
+            cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
+            cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
+        else:
+            _timed_scatter(axes, df['iptm'], df['pdockq'], n_points=n_total, fig_label='Fig 1', c='steelblue', s=pt_size, alpha=pt_alpha, edgecolors='white', linewidths=0.5, zorder=3)
+
+    # Optional density contours (--density flag)
+    if density_mode:
+        valid = df.dropna(subset=['iptm', 'pdockq'])
+        _overlay_kde_contours(axes, valid['iptm'].values, valid['pdockq'].values)
+
+    # Threshold lines
+    axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7, zorder=1)
+    axes.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7, zorder=1)
+
+    # Shaded high-quality quadrant (subtle)
+    axes.fill_between([IPTM_HIGH, 1.05], PDOCKQ_HIGH, 0.8, alpha=0.06, color='green', zorder=0)
+
+    # Build legend (tier handles only - multi-chain analysis is in Fig 9)
+    if use_tier_colouring:
+        final_handles = _build_tier_legend_handles(df)
+        axes.legend(handles=final_handles, title='Quality Tier', fontsize=FONT_TICK, title_fontsize=FONT_AXIS_LABEL, loc='lower right', framealpha=0.9)
+
+    axes.set_xlim(0.2, 1.05)
+    axes.set_ylim(-0.02, 0.8)
+    title = "AlphaFold2-Multimer: Quality Assessment (ipTM vs pDockQ)"
+    _apply_common_style(axes, title, 'ipTM', 'pDockQ')
+    _save_figure(figure, '1_Quality_Scatter.png')
+
+
+def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 1b (supplementary): Disorder-coloured scatter with density contours.
+    Each point is coloured by its disorder fraction (pLDDT < 50) using the RdYlGn_r colourmap.  KDE density contours with percentile labels are always overlaid so the reader can see where most complexes concentrate.
+    """
+    if 'plddt_below50_fraction' not in df.columns:
+        print("  Skipping Fig 1b: no disorder fraction column.")
+        return
+    disorder = df['plddt_below50_fraction'].fillna(0)
+
+    # Valid-data mask (need finite ipTM, pDockQ, and disorder)
+    mask = np.isfinite(df['iptm']) & np.isfinite(df['pdockq']) & np.isfinite(disorder)
+    x = df.loc[mask, 'iptm'].values
+    y = df.loc[mask, 'pdockq'].values
+    c = disorder[mask].values
+    n_points = len(x)
+    figure, axes = plt.subplots(figsize=(10, 8))
+
+    # Adaptive point sizing
+    pt_size, pt_alpha = _adaptive_scatter_params(n_points)
+
+    # Scatter: colour = disorder fraction
+    scatter = _timed_scatter(axes, x, y, n_points=n_points, fig_label='Fig 1b', c=c, cmap='RdYlGn_r', vmin=0, vmax=1, s=pt_size, alpha=pt_alpha, edgecolors='none', zorder=3)
+    cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
+    cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
+
+    # Density contours always shown for this figure
+    _overlay_kde_contours(axes, x, y)
+
+    # Reference lines & "confident" quadrant
+    axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    axes.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    axes.fill_between([IPTM_HIGH, 1.05], PDOCKQ_HIGH, 0.8, alpha=0.06, color='green', zorder=0)
+    axes.set_xlim(0.2, 1.05)
+    axes.set_ylim(-0.02, 0.8)
+
+    # Annotation: sample size
+    axes.text(0.02, 0.98, f'n = {n_points:,}', transform=axes.transAxes, fontsize=FONT_TICK, va='top', ha='left', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='grey', alpha=0.8))
+
+    _apply_common_style(axes, "Quality Scatter - Disorder Colouring (Supplementary)", 'ipTM', 'pDockQ')
+    _save_figure(figure, '1b_Quality_Scatter_Disorder.png')
+
+
+def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
+    """Fig 2: Is the dataset generally well-resolved?"""
+    if 'pae_mean' not in df.columns:
+        print("  Skipping Fig 2: no pae_mean column.")
+        return
+    pae_values = df['pae_mean'].dropna()
+
+    if len(pae_values) == 0:
+        print("  Skipping Fig 2: no valid PAE values.")
+        return
+
+    median_pae = pae_values.median()
+    below_threshold = (pae_values < PAE_CONFIDENT).sum()
+    figure, axes = plt.subplots(figsize=(8, 5))
+    axes.hist(pae_values, bins=30, color='#3498db', alpha=0.75, edgecolor='white', linewidth=0.5)
+
+    # Median line
+    axes.axvline(x=median_pae, color='red', linestyle='--', linewidth=1.5, label=f'Median: {median_pae:.1f} \u00c5')
+
+    # Confident guideline
+    axes.axvline(x=PAE_CONFIDENT, color='green', linestyle='--', linewidth=1.5, label=f'Confident guideline: {PAE_CONFIDENT} \u00c5')
+
+    axes.legend(fontsize=FONT_TICK, loc='upper right')
+
+    title = (f"Global PAE Health Check - {len(pae_values)} complexes, "
+             f"median {median_pae:.1f} \u00c5, {below_threshold} below {PAE_CONFIDENT} \u00c5")
+    _apply_common_style(axes, title, 'Mean PAE (\u00c5)', 'Count', grid=False)
+    _save_figure(figure, '2_PAE_Health_Check.png')
+
+
+def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
+    """Fig 3: How confident are the contacts that matter for quality assessment?"""
+    required = ['interface_pae_mean', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 3: missing required columns.")
+        return
+    plot_df = df.dropna(subset=required).copy()
+
+    if len(plot_df) == 0:
+        print("  Skipping Fig 3: no valid data after filtering.")
+        return
+
+    figure, axes = plt.subplots(figsize=(10, 6))
+
+    # Build data and positions for boxplots + strip
+    tier_data = []
+    tier_labels = []
+    tier_medians = []
+    positions = []
+    for idx, tier in enumerate(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]['interface_pae_mean']
+        if len(subset) > 0:
+            tier_data.append(subset.values)
+            tier_labels.append(f'{tier}\n(n={len(subset)})')
+            tier_medians.append(subset.median())
+            positions.append(idx)
+
+    # Boxplots
+    box_parts = axes.boxplot(tier_data, positions=positions, widths=0.5, patch_artist=True, showfliers=False, medianprops=dict(color='black', linewidth=2))
+
+    # Colour the boxes
+    for idx, patch in enumerate(box_parts['boxes']):
+        tier_name = TIER_ORDER[idx] if idx < len(TIER_ORDER) else 'High'
+        patch.set_facecolor(TIER_COLORS.get(tier_name, '#cccccc'))
+        patch.set_alpha(0.6)
+
+    # Ensure median lines render above scatter points
+    for median_line in box_parts['medians']:
+        median_line.set_zorder(10)
+
+    # Jittered strip plot behind
+    for idx, data in enumerate(tier_data):
+        jitter = np.random.normal(0, 0.06, size=len(data))
+        axes.scatter(positions[idx] + jitter, data, c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'), alpha=0.35, s=20, zorder=1, edgecolors='none')
+
+    # PAE threshold line
+    axes.axhline(y=PAE_CONFIDENT, color='red', linestyle='--', linewidth=1.5, alpha=0.7, label=f'Confident contact cutoff ({PAE_CONFIDENT} \u00c5)')
+
+    axes.set_xticks(positions)
+    axes.set_xticklabels(tier_labels, fontsize=FONT_AXIS_LABEL)
+    axes.legend(fontsize=FONT_TICK, loc='upper right')
+
+    # Subtitle with medians
+    median_text = " | ".join(
+        f"{TIER_ORDER[i]} median: {tier_medians[i]:.1f} \u00c5"
+        for i in range(len(tier_medians))
+    )
+    axes.text(0.5, -0.12, median_text, transform=axes.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
+    _apply_common_style(axes, "Interface PAE by Quality Tier", '', 'Interface PAE (\u00c5)', grid=False)
+    _save_figure(figure, '3_Interface_PAE_by_Tier.png')
+
+
+def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 4: Why should I trust the quality tier assigned?
+    Panel (a): Composite score distributions by tier (violin/boxplot).
+    Panel (b): Composite vs confident contact fraction scatter.
+    """
+    required = ['interface_confidence_score', 'quality_tier_v2', 'confident_contact_fraction']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 4: missing required columns.")
+        return
+    plot_df = df.dropna(subset=required).copy()
+
+    if len(plot_df) == 0:
+        print("  Skipping Fig 4: no valid data.")
+        return
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+
+    #-------------Panel (a): Composite score distributions--------------------------
+    tier_data_a = []
+    tier_labels_a = []
+    positions_a = []
+    for idx, tier in enumerate(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]['interface_confidence_score']
+        if len(subset) > 0:
+            tier_data_a.append(subset.values)
+            tier_labels_a.append(f'{tier}\n(n={len(subset)})')
+            positions_a.append(idx)
+
+    # Violin plots
+    if tier_data_a:
+        vp = ax_a.violinplot(tier_data_a, positions=positions_a, showmedians=True, showextrema=False)
+        for idx, body in enumerate(vp['bodies']):
+            tier_name = TIER_ORDER[idx] if idx < len(TIER_ORDER) else 'High'
+            body.set_facecolor(TIER_COLORS.get(tier_name, '#cccccc'))
+            body.set_alpha(0.6)
+        if 'cmedians' in vp:
+            vp['cmedians'].set_color('black')
+            vp['cmedians'].set_linewidth(2)
+            vp['cmedians'].set_zorder(10)
+
+    # Jittered strip overlay
+    for idx, data in enumerate(tier_data_a):
+        jitter = np.random.normal(0, 0.06, size=len(data))
+        ax_a.scatter(positions_a[idx] + jitter, data, c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
+
+    # Decision threshold lines
+    thresholds = [
+        (UPGRADE_LOW_THRESHOLD, 'Low -> High upgrade', '#e74c3c'),
+        (UPGRADE_MEDIUM_THRESHOLD, 'Medium -> High upgrade', '#f39c12'),
+        (DOWNGRADE_HIGH_THRESHOLD, 'High -> Medium downgrade', '#2ecc71'),
+    ]
+    for val, label, colour in thresholds:
+        ax_a.axhline(y=val, color=colour, linestyle=':', linewidth=1.2, alpha=0.7)
+        ax_a.text(ax_a.get_xlim()[1], val, f' {label} ({val})', va='center', fontsize=8, color=colour, alpha=0.8)
+
+    ax_a.set_xticks(positions_a)
+    ax_a.set_xticklabels(tier_labels_a, fontsize=FONT_AXIS_LABEL)
+
+    # Tier colour legend - upper-left to avoid threshold label overlap
+    tier_legend = [mpatches.Patch(color=TIER_COLORS[t], alpha=0.6, label=t) for t in TIER_ORDER]
+    ax_a.legend(handles=tier_legend, fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
+
+    _apply_common_style(ax_a, "(a) Composite Score by Tier", '', 'Interface Confidence Score', grid=False)
+
+    #--------------Panel (b): Composite vs confident contact fraction-------------------------
+    n_panel_b = len(plot_df)
+    pt_size_b, pt_alpha_b = _adaptive_scatter_params(n_panel_b)
+
+    for tier in reversed(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]
+        axes_b_kwargs = dict(c=TIER_COLORS[tier], alpha=pt_alpha_b, s=pt_size_b, edgecolors='white', linewidths=0.3, label=tier, zorder=3)
+        _timed_scatter(ax_b, subset['confident_contact_fraction'], subset['interface_confidence_score'], n_points=n_panel_b, fig_label='Fig 4b', **axes_b_kwargs)
+    ax_b.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK)
+
+    # Optional density contours
+    if density_mode:
+        valid_b = plot_df[['confident_contact_fraction', 'interface_confidence_score']].dropna()
+        _overlay_kde_contours(ax_b, valid_b['confident_contact_fraction'].values, valid_b['interface_confidence_score'].values)
+
+    # Correlation annotation
+    valid_both = plot_df[['confident_contact_fraction', 'interface_confidence_score']].dropna()
+    if len(valid_both) > 2:
+        r = valid_both['confident_contact_fraction'].corr(valid_both['interface_confidence_score'])
+        ax_b.text(0.05, 0.95, f'r = {r:.2f}', transform=ax_b.transAxes, fontsize=FONT_AXIS_LABEL, va='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    _apply_common_style(ax_b, "(b) Composite vs Confident Contact Fraction", 'Confident Contact Fraction', 'Interface Confidence Score')
+    figure.suptitle("Quality Tier Validation: Composite Score Evidence", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '4_Composite_Tier_Validation.png')
+
+
+def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 5: Are interfaces special, or do they just reflect bulk quality?"""
+    required = ['interface_plddt_combined', 'bulk_plddt_combined', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 5: missing required columns.")
+        return
+    plot_df = df.dropna(subset=required).copy()
+
+    if len(plot_df) == 0:
+        print("  Skipping Fig 5: no valid data.")
+        return
+
+    figure, axes = plt.subplots(figsize=(8, 8))
+
+    # Identify paradox complexes for special marking
+    paradox_mask = _get_paradox_mask(plot_df)
+
+    # Plot non-paradox by tier with adaptive sizing
+    non_paradox = plot_df[~paradox_mask]
+    n_non_paradox = len(non_paradox)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_non_paradox)
+
+    for tier in reversed(TIER_ORDER):
+        subset = non_paradox[non_paradox['quality_tier_v2'] == tier]
+        _timed_scatter(axes, subset['bulk_plddt_combined'],
+                       subset['interface_plddt_combined'],
+                       n_points=n_non_paradox, fig_label='Fig 5',
+                       c=TIER_COLORS[tier], s=pt_size,
+                       alpha=pt_alpha, edgecolors='white',
+                       linewidths=0.5, zorder=3, label=tier)
+
+    # Optional density contours
+    if density_mode:
+        _overlay_kde_contours(axes, non_paradox['bulk_plddt_combined'].values, non_paradox['interface_plddt_combined'].values)
+
+    # Paradox complexes - small triangles so each marker represents one complex
+    paradox_df = plot_df[paradox_mask]
+    if len(paradox_df) > 0:
+        axes.scatter(paradox_df['bulk_plddt_combined'], paradox_df['interface_plddt_combined'], c='#9b59b6', s=50, alpha=0.9, marker='^', edgecolors='black', linewidths=0.6, zorder=5, label=f'Paradox ({len(paradox_df)})')
+
+    # Diagonal y = x line
+    lims = [min(axes.get_xlim()[0], axes.get_ylim()[0]), max(axes.get_xlim()[1], axes.get_ylim()[1])]
+    axes.plot(lims, lims, 'k--', linewidth=1.2, alpha=0.6, zorder=1)
+    axes.set_xlim(lims)
+    axes.set_ylim(lims)
+
+    # Annotations
+    above_diagonal = (plot_df['interface_plddt_combined'] > plot_df['bulk_plddt_combined']).sum()
+    total = len(plot_df)
+    pct = above_diagonal / total * 100 if total > 0 else 0
+
+    axes.text(0.05, 0.95, "Interface > Bulk \u2191", transform=axes.transAxes, fontsize=FONT_TICK, va='top', ha='left', color='#27ae60', fontweight='bold')
+    axes.text(0.95, 0.05, "Bulk > Interface \u2193", transform=axes.transAxes, fontsize=FONT_TICK, va='bottom', ha='right', color='#e74c3c', fontweight='bold')
+    axes.text(0.5, 0.02, f'{above_diagonal}/{total} ({pct:.0f}%) above diagonal', transform=axes.transAxes, ha='center', fontsize=FONT_TICK, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    axes.legend(fontsize=FONT_TICK, loc='lower left', framealpha=0.9)
+    _apply_common_style(axes, "Interface vs Bulk pLDDT: Are Interfaces Special?", 'Bulk pLDDT', 'Interface pLDDT')
+    _save_figure(figure, '5_Interface_vs_Bulk.png')
+
+
+def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
+    """Fig 6: Can disordered proteins form confident interfaces?
+    3-panel comparison of paradox vs non-paradox complexes - Paradox: ipTM >= 0.75, pDockQ >= 0.5, disorder fraction >= 0.30.
+    """
+    required = ['iptm', 'pdockq', 'plddt_below50_fraction', 'interface_vs_bulk_delta', 'confident_contact_fraction', 'interface_symmetry']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 6: missing required columns.")
+        return
+
+    # Count paradox complexes before dropping rows with missing panel data so we can report how many are lost to incomplete interface metrics
+    n_paradox_before_dropna = int(_get_paradox_mask(df).sum())
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 6: no complexes with complete interface data.")
+        return
+
+    paradox_mask = _get_paradox_mask(plot_df)
+    paradox = plot_df[paradox_mask]
+    non_paradox = plot_df[~paradox_mask]
+
+    n_paradox = len(paradox)
+    n_non_paradox = len(non_paradox)
+    n_paradox_missing_data = n_paradox_before_dropna - n_paradox
+
+    if n_paradox_missing_data > 0:
+        print(f"  Note: {n_paradox_missing_data} of {n_paradox_before_dropna} paradox "
+              f"complexes excluded from Fig 6 (missing interface data)")
+
+    if n_paradox == 0:
+        print("  Skipping Fig 6: no paradox complexes found.")
+        return
+
+    colour_paradox = '#9b59b6'
+    colour_non_paradox = '#3498db'
+    figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
+    panels = [
+        (ax_a, 'interface_vs_bulk_delta', '(a) Interface vs Bulk (\u0394 pLDDT)', '\u0394 pLDDT'),
+        (ax_b, 'confident_contact_fraction', '(b) Confident Contact Fraction', 'Fraction'),
+        (ax_c, 'interface_symmetry', '(c) Interface Symmetry', 'Symmetry Score'),
+    ]
+
+    for ax, col, title, ylabel in panels:
+        data_paradox = paradox[col].dropna().values
+        data_non_paradox = non_paradox[col].dropna().values
+        if len(data_paradox) == 0 or len(data_non_paradox) == 0:
+            ax.text(0.5, 0.5, 'Insufficient data', transform=ax.transAxes, ha='center', va='center')
+            ax.set_title(title, fontsize=FONT_TITLE, fontweight='bold')
+            continue
+
+        # Box + strip for each group
+        box_data = [data_paradox, data_non_paradox]
+        positions = [0, 1]
+        bp = ax.boxplot(box_data, positions=positions, widths=0.5, patch_artist=True, showfliers=False, medianprops=dict(color='black', linewidth=2))
+        bp['boxes'][0].set_facecolor(colour_paradox)
+        bp['boxes'][0].set_alpha(0.5)
+        bp['boxes'][1].set_facecolor(colour_non_paradox)
+        bp['boxes'][1].set_alpha(0.5)
+
+        # Ensure median lines render above scatter points
+        for median_line in bp['medians']:
+            median_line.set_zorder(10)
+
+        # Jittered strip
+        for i, (data, colour) in enumerate([(data_paradox, colour_paradox), (data_non_paradox, colour_non_paradox)]):
+            jitter = np.random.normal(0, 0.06, size=len(data))
+            ax.scatter(positions[i] + jitter, data, c=colour, alpha=0.4, s=20, zorder=3, edgecolors='none')
+
+        ax.set_xticks(positions)
+        ax.set_xticklabels([f'Paradox\n(n={n_paradox})',
+                            f'Non-paradox\n(n={n_non_paradox})'], fontsize=FONT_TICK)
+        ax.set_title(title, fontsize=FONT_TITLE, fontweight='bold')
+        ax.set_ylabel(ylabel, fontsize=FONT_AXIS_LABEL)
+        ax.tick_params(labelsize=FONT_TICK)
+
+        # Median annotations
+        med_p = np.median(data_paradox)
+        med_np = np.median(data_non_paradox)
+        ax.text(0.5, -0.15, f'Medians: {med_p:.2f} vs {med_np:.2f}', transform=ax.transAxes, ha='center', fontsize=9, style='italic', color='#555555')
+
+    # Shared legend on the first panel
+    legend_handles = [
+        mpatches.Patch(color=colour_paradox, alpha=0.6, label='Paradox'),
+        mpatches.Patch(color=colour_non_paradox, alpha=0.6, label='Non-paradox'),
+    ]
+    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
+    figure.suptitle("Paradox Complexes: Confident Interfaces Despite Structural Disorder", fontsize=14, fontweight='bold', y=1.04)
+
+    subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
+                f"non-paradox complexes")
+    if n_paradox_missing_data > 0:
+        subtitle += (f" ({n_paradox_missing_data} paradox complexes excluded "
+                     f"due to incomplete interface data)")
+
+    figure.text(0.5, 0.99, subtitle, ha='center', fontsize=FONT_AXIS_LABEL, style='italic', color='#555555')
+    _save_figure(figure, '6_Paradox_Spotlight.png')
+
+
+def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
+    """Fig 7: How does prediction quality vary by complex architecture?
+    Panel (a): Stacked bar chart of tier proportions (Homo / Hetero / Multi-chain).
+    Panel (b): Interface symmetry distributions.
+    Multi-chain complexes (3+ chains) are shown as a 3rd category when the n_chains column is available, and the case-normalised complex_type column (from load_data) is used for homodimer/heterodimer classification.
+    """
+    required = ['complex_type', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 7: missing required columns.")
+        return
+
+    plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 7: no valid data.")
+        return
+
+    # Split into architecture categories - multi-chain (3+) gets its own group regardless of homodimer/heterodimer label
+    has_chain_info = 'n_chains' in plot_df.columns
+    if has_chain_info:
+        multi = plot_df[plot_df['n_chains'] >= 3]
+        dimers = plot_df[plot_df['n_chains'] < 3]
+    else:
+        multi = pd.DataFrame()
+        dimers = plot_df
+
+    homo = dimers[dimers['complex_type'] == 'homodimer']
+    hetero = dimers[dimers['complex_type'] == 'heterodimer']
+
+    # Build category list (only include non-empty groups)
+    MULTI_COLOUR = '#8e44ad'
+    categories = []
+    cat_colours = []
+    if len(homo) > 0:
+        categories.append(('Homodimer', homo))
+        cat_colours.append('#3498db')
+    if len(hetero) > 0:
+        categories.append(('Heterodimer', hetero))
+        cat_colours.append('#e67e22')
+    if len(multi) > 0:
+        categories.append(('Multi-chain', multi))
+        cat_colours.append(MULTI_COLOUR)
+
+    if len(categories) == 0:
+        print("  Skipping Fig 7: no classified complexes.")
+        return
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
+
+    #----------------Panel (a): Stacked bar chart------------------------
+    bar_positions = list(range(len(categories)))
+    bar_labels = []
+
+    for cat_idx, (label, subset) in enumerate(categories):
+        count = len(subset)
+        bottom = 0
+        for tier in TIER_ORDER:
+            tier_count = (subset['quality_tier_v2'] == tier).sum()
+            pct = tier_count / count * 100 if count > 0 else 0
+            ax_a.bar(cat_idx, pct, bottom=bottom, color=TIER_COLORS[tier], edgecolor='white', linewidth=0.5)
+            if pct > 3:  # Only label if visible
+                ax_a.text(cat_idx, bottom + pct / 2, f'{pct:.1f}%', ha='center', va='center', fontsize=9, fontweight='bold', color='white' if pct > 10 else 'black')
+            bottom += pct
+        bar_labels.append(f'{label}\n(n={count})')
+
+    ax_a.set_xticks(bar_positions)
+    ax_a.set_xticklabels(bar_labels, fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylim(0, 105)
+
+    # Legend
+    legend_handles = [mpatches.Patch(color=TIER_COLORS[t], label=t) for t in TIER_ORDER]
+    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right')
+
+    _apply_common_style(ax_a, "(a) Quality Tier Proportions", '', 'Percentage (%)', grid=False)
+
+    #---------------Panel (b): Interface symmetry distributions-------------------------
+    has_symmetry = 'interface_symmetry' in df.columns
+    if has_symmetry:
+        sym_data = []
+        sym_labels = []
+        sym_colours = []
+        for (label, subset), colour in zip(categories, cat_colours):
+            sym_values = subset['interface_symmetry'].dropna().values
+            if len(sym_values) > 0:
+                sym_data.append(sym_values)
+                sym_labels.append(f'{label}\n(n={len(sym_values)})')
+                sym_colours.append(colour)
+        if sym_data:
+            positions_b = list(range(len(sym_data)))
+            vp = ax_b.violinplot(sym_data, positions=positions_b, showmedians=True, showextrema=False)
+            for idx, body in enumerate(vp['bodies']):
+                body.set_facecolor(sym_colours[idx])
+                body.set_alpha(0.6)
+            if 'cmedians' in vp:
+                vp['cmedians'].set_color('black')
+                vp['cmedians'].set_linewidth(2)
+                vp['cmedians'].set_zorder(10)
+            ax_b.set_xticks(positions_b)
+            ax_b.set_xticklabels(sym_labels, fontsize=FONT_AXIS_LABEL)
+    else:
+        ax_b.text(0.5, 0.5, 'Interface symmetry data\nnot available', transform=ax_b.transAxes, ha='center', va='center', fontsize=FONT_AXIS_LABEL, color='grey')
+
+    _apply_common_style(ax_b, "(b) Interface Symmetry", '', 'Symmetry Score', grid=False)
+    figure.suptitle("Prediction Quality by Complex Architecture", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '7_Homo_vs_Hetero.png')
+
+
+def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 8: Why do ipTM and pDockQ disagree so systematically?"""
+    required = ['iptm', 'pdockq', 'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 8: missing required columns.")
+        return
+    plot_df = df.dropna(subset=required).copy()
+
+    figure, axes = plt.subplots(figsize=(10, 8))
+    n_plot = len(plot_df)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_plot)
+
+    for tier in reversed(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]
+        _timed_scatter(axes, subset['iptm'], subset['pdockq'],
+                       n_points=n_plot, fig_label='Fig 8',
+                       c=TIER_COLORS[tier], s=pt_size,
+                       alpha=pt_alpha, edgecolors='white',
+                       linewidths=0.5, zorder=3, label=tier)
+    axes.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK, loc='upper left')
+
+    # Optional density contours
+    if density_mode:
+        _overlay_kde_contours(axes, plot_df['iptm'].values, plot_df['pdockq'].values)
+
+    # Diagonal y = x line
+    axes.plot([0, 1.1], [0, 1.1], 'k--', linewidth=1.2, alpha=0.6, zorder=1)
+
+    # Disagreement band: region where ipTM - pDockQ > METRIC_DISAGREEMENT_GAP
+    # This is below the line y = x - gap
+    x_band = np.linspace(0, 1.1, 100)
+    y_band = x_band - METRIC_DISAGREEMENT_GAP
+    axes.fill_between(x_band, -0.1, y_band, alpha=0.08, color='#e74c3c', zorder=0)
+
+    # Count disagreement cases - intentionally one-directional (ipTM >> pDockQ) to highlight the systematic bias where pDockQ penalises disordered complexes.
+    # The flag in interface_analysis.py uses abs() for bidirectional detection.
+    disagreement_mask = (plot_df['iptm'] - plot_df['pdockq']) > METRIC_DISAGREEMENT_GAP
+    n_disagree = disagreement_mask.sum()
+    pct_disagree = n_disagree / len(plot_df) * 100 if len(plot_df) > 0 else 0
+
+    # Annotation in the disagreement zone
+    axes.text(0.85, 0.10,
+              f'{n_disagree} complexes ({pct_disagree:.0f}%)\nipTM >> pDockQ',
+              transform=axes.transAxes, ha='center', va='center',
+              fontsize=FONT_AXIS_LABEL, fontweight='bold', color='#c0392b',
+              bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
+
+    axes.text(0.85, 0.02,
+              'pDockQ penalises structural\ndisorder; ipTM does not',
+              transform=axes.transAxes, ha='center', fontsize=9,
+              style='italic', color='#777777',
+              bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.85, edgecolor='none'))
+
+    axes.set_xlim(0.2, 1.05)
+    axes.set_ylim(-0.02, 0.8)
+
+    _apply_common_style(axes, "Metric Disagreement: ipTM vs pDockQ Systematic Bias", 'ipTM', 'pDockQ')
+    _save_figure(figure, '8_Metric_Disagreement.png')
+
+
+def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 9: Item 5 -- Structure prediction.
+    Panel (a): Composite score distributions by chain count (violin + strip).
+    Panel (b): ipTM vs pDockQ coloured by chain count.
+    Requires the n_chains column which is added by the multi-chain pipeline - complexes are grouped into 2, 3, and 4+ chains.
+    """
+    required = ['n_chains', 'iptm', 'pdockq']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 9: missing required columns.")
+        return
+    plot_df = df.dropna(subset=required).copy()
+
+    if len(plot_df) == 0:
+        print("  Skipping Fig 9: no valid data.")
+        return
+
+    # Bin chain counts into interpretable groups
+    def chain_group(n):
+        if n <= 2:
+            return '2 chains'
+        elif n == 3:
+            return '3 chains'
+        else:
+            return '4+ chains'
+
+    plot_df['chain_group'] = plot_df['n_chains'].apply(chain_group)
+    group_order = ['2 chains', '3 chains', '4+ chains']
+    group_colours = {'2 chains': '#3498db', '3 chains': '#e67e22', '4+ chains': '#8e44ad'}
+
+    # Only keep groups that actually appear
+    present_groups = [g for g in group_order if (plot_df['chain_group'] == g).any()]
+    if len(present_groups) < 2:
+        print("  Skipping Fig 9: need at least 2 chain-count groups for comparison.")
+        return
+
+    has_composite = 'interface_confidence_score' in plot_df.columns
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+
+    #------------------Panel (a): Composite score or ipTM distributions by chain group---------------
+    metric_col = 'interface_confidence_score' if has_composite else 'iptm'
+    metric_label = 'Composite Score' if has_composite else 'ipTM'
+    group_data = []
+    group_labels = []
+    positions_a = []
+    for idx, group in enumerate(present_groups):
+        values = plot_df.loc[plot_df['chain_group'] == group, metric_col].dropna().values
+        if len(values) > 0:
+            group_data.append(values)
+            group_labels.append(f'{group}\n(n={len(values)})')
+            positions_a.append(idx)
+
+    if group_data:
+        vp = ax_a.violinplot(group_data, positions=positions_a, showmedians=True, showextrema=False)
+        for idx, body in enumerate(vp['bodies']):
+            grp = present_groups[idx]
+            body.set_facecolor(group_colours.get(grp, '#cccccc'))
+            body.set_alpha(0.6)
+        if 'cmedians' in vp:
+            vp['cmedians'].set_color('black')
+            vp['cmedians'].set_linewidth(2)
+            vp['cmedians'].set_zorder(10)
+
+        # Jittered strip overlay
+        for idx, data in enumerate(group_data):
+            jitter = np.random.normal(0, 0.06, size=len(data))
+            grp = present_groups[idx]
+            ax_a.scatter(positions_a[idx] + jitter, data, c=group_colours.get(grp, '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
+
+        ax_a.set_xticks(positions_a)
+        ax_a.set_xticklabels(group_labels, fontsize=FONT_AXIS_LABEL)
+
+        # Median annotation
+        medians = [np.median(d) for d in group_data]
+        median_text = " | ".join(f"{present_groups[i]}: {medians[i]:.2f}" for i in range(len(medians)))
+        ax_a.text(0.5, -0.12, median_text, transform=ax_a.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
+
+    _apply_common_style(ax_a, f"(a) {metric_label} by Chain Count", '', metric_label, grid=False)
+
+    #---------------Panel (b): ipTM vs pDockQ coloured by chain count----------------------
+    # 2-chain complexes are rendered as a translucent background context layer and multi-chain groups (3, 4+) are plotted on top at full opacity
+    n_panel_b = len(plot_df)
+    pt_size_b, _ = _adaptive_scatter_params(n_panel_b)
+
+    # Background layer: 2 chains (very low alpha)
+    if '2 chains' in present_groups:
+        subset_2 = plot_df[plot_df['chain_group'] == '2 chains']
+        _timed_scatter(ax_b, subset_2['iptm'], subset_2['pdockq'],
+                       n_points=n_panel_b, fig_label='Fig 9b',
+                       c=group_colours.get('2 chains', '#cccccc'),
+                       s=pt_size_b, alpha=0.12,
+                       edgecolors='none', linewidths=0, zorder=2,
+                       label=f'2 chains (n={len(subset_2)})')
+
+    # Foreground layer: multi-chain groups (full opacity)
+    for group in reversed([g for g in present_groups if g != '2 chains']):
+        subset = plot_df[plot_df['chain_group'] == group]
+        _timed_scatter(ax_b, subset['iptm'], subset['pdockq'],
+                       n_points=n_panel_b, fig_label='Fig 9b',
+                       c=group_colours.get(group, '#cccccc'),
+                       s=pt_size_b, alpha=1.0,
+                       edgecolors='white', linewidths=0.5, zorder=5,
+                       label=f'{group} (n={len(subset)})')
+    ax_b.legend(fontsize=FONT_TICK, loc='lower right', framealpha=0.9)
+
+    # Optional density contours
+    if density_mode:
+        _overlay_kde_contours(ax_b, plot_df['iptm'].values, plot_df['pdockq'].values)
+
+    ax_b.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    ax_b.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
+    ax_b.set_xlim(0.2, 1.05)
+    ax_b.set_ylim(-0.02, 0.8)
+
+    _apply_common_style(ax_b, "(b) Quality Landscape by Chain Count", 'ipTM', 'pDockQ')
+    figure.suptitle("Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '9_Chain_Count_Profile.png')
+# ── Item 3: Identify similar proteins/pairs (Fig 10) ───────────────
+
+
+def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
+    """Fig 10: Item 3 — Identify similar proteins/pairs.
+
+    Panel A — Homodimer ground truth scatter (shared vs total cluster count).
+    Panel B — Shared cluster ratio by quality tier (heterodimers only).
+
+    Requires clustering columns:
+        sequence_cluster_count, shared_cluster_count, complex_type, quality_tier_v2.
+    """
+    required = ['sequence_cluster_count', 'shared_cluster_count', 'complex_type']
+    if not all(c in df.columns for c in required):
+        print("  Skipping Fig 10 — missing clustering columns")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13, 5.5),
+                                         gridspec_kw={'width_ratios': [3, 2]})
+
+    # ── Panel A: Homodimer Ground Truth Scatter ─────────────────────
+    valid = df['sequence_cluster_count'].notna() & (df['sequence_cluster_count'] > 0)
+    valid &= df['shared_cluster_count'].notna()
+    plot_df = df[valid].copy()
+
+    seq_counts = plot_df['sequence_cluster_count'].values
+    shared_counts = plot_df['shared_cluster_count'].values
+    complex_types = plot_df['complex_type'].astype(str).str.lower().values
+
+    is_homo = complex_types == 'homodimer'
+    is_hetero = ~is_homo
+
+    # Heterodimers first (underneath)
+    if is_hetero.any():
+        ax_a.scatter(seq_counts[is_hetero], shared_counts[is_hetero],
+                     s=8, alpha=0.3, color='#95a5a6', label='Heterodimer',
+                     edgecolors='none', zorder=1)
+    # Homodimers on top
+    if is_homo.any():
+        ax_a.scatter(seq_counts[is_homo], shared_counts[is_homo],
+                     s=25, alpha=0.8, color='#e74c3c', label='Homodimer',
+                     edgecolors='black', linewidth=0.3, zorder=2)
+
+    # y = x diagonal
+    max_val = max(seq_counts.max(), shared_counts.max()) if len(seq_counts) > 0 else 10
+    ax_a.plot([0, max_val * 1.05], [0, max_val * 1.05], 'k--', alpha=0.6,
+              linewidth=1.5, zorder=0, label='y = x')
+
+    # Homodimer ground truth annotation
+    n_homo = is_homo.sum()
+    if n_homo > 0:
+        homo_seq = seq_counts[is_homo]
+        homo_shared = shared_counts[is_homo]
+        n_perfect = int(np.sum(homo_shared == homo_seq))
+        pct = 100.0 * n_perfect / n_homo if n_homo > 0 else 0
+        ax_a.text(0.05, 0.95,
+                  f'Homodimers: {n_perfect}/{n_homo} on y=x ({pct:.0f}%)',
+                  transform=ax_a.transAxes, va='top', fontsize=FONT_TICK,
+                  bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                            edgecolor='grey', alpha=0.9))
+
+    # Annotate zero-shared-cluster band
+    n_zero_shared = int((shared_counts == 0).sum())
+    if n_zero_shared > 0:
+        pct_zero = 100.0 * n_zero_shared / len(shared_counts)
+        ax_a.text(25, 2, f'No shared clusters: {n_zero_shared} ({pct_zero:.1f}%)',
+                  ha='left', va='bottom',
+                  fontsize=FONT_TICK - 1, color='#555555', style='italic')
+
+    ax_a.set_xlabel('Sequence Cluster Count', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylabel('Shared Cluster Count', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_title('A: Homodimer Ground Truth', fontsize=FONT_TITLE, fontweight='bold')
+    ax_a.tick_params(labelsize=FONT_TICK)
+    ax_a.legend(fontsize=FONT_TICK - 1, loc='lower right', framealpha=0.9)
+    _despine(ax_a)
+
+    # ── Panel B: Shared Cluster Ratio by Quality Tier ───────────────
+    hetero_df = plot_df[plot_df['complex_type'].astype(str).str.lower() == 'heterodimer'].copy()
+    hetero_df = hetero_df[hetero_df['sequence_cluster_count'] > 0]
+    hetero_df['cluster_ratio'] = (hetero_df['shared_cluster_count'] /
+                                   hetero_df['sequence_cluster_count'])
+
+    tier_data = {}
+    for tier in TIER_ORDER:
+        vals = hetero_df.loc[hetero_df[tier_col] == tier, 'cluster_ratio'].dropna().values
+        if len(vals) > 0:
+            tier_data[tier] = vals
+
+    if len(tier_data) >= 2:
+        positions = []
+        tier_labels = []
+        data_list = []
+        for i, tier in enumerate(TIER_ORDER):
+            if tier in tier_data:
+                positions.append(i)
+                data_list.append(tier_data[tier])
+                tier_labels.append(f'{tier}\n(n={len(tier_data[tier]):,})')
+
+        parts = ax_b.violinplot(data_list, positions=positions,
+                                showmeans=False, showmedians=True)
+
+        # Colour violin bodies
+        for idx, pc in enumerate(parts['bodies']):
+            tier_name = TIER_ORDER[positions[idx]] if positions[idx] < len(TIER_ORDER) else 'Medium'
+            pc.set_facecolor(TIER_COLORS.get(tier_name, '#95a5a6'))
+            pc.set_alpha(0.3)
+
+        # Strip overlay with jitter
+        rng = np.random.default_rng(42)
+        for idx, pos in enumerate(positions):
+            vals = data_list[idx]
+            jitter = rng.uniform(-0.08, 0.08, size=len(vals))
+            tier_name = TIER_ORDER[pos] if pos < len(TIER_ORDER) else 'Medium'
+            ax_b.scatter(np.full(len(vals), pos) + jitter, vals,
+                         s=3, alpha=0.25, color=TIER_COLORS.get(tier_name, '#95a5a6'),
+                         edgecolors='none', zorder=0)
+
+        ax_b.set_xticks(positions)
+        ax_b.set_xticklabels(tier_labels, fontsize=FONT_AXIS_LABEL)
+
+        # Kruskal-Wallis (all tiers) + Mann-Whitney (High vs Low)
+        try:
+            from scipy.stats import kruskal, mannwhitneyu
+            all_groups = [tier_data[t] for t in TIER_ORDER if t in tier_data]
+            if len(all_groups) >= 2:
+                h_stat, kw_p = kruskal(*all_groups)
+                kw_p_str = f'p = {kw_p:.1e}' if kw_p < 0.001 else f'p = {kw_p:.3f}'
+                stat_lines = [f'Kruskal-Wallis H = {h_stat:.1f}, {kw_p_str}']
+
+                if 'High' in tier_data and 'Low' in tier_data:
+                    _, mw_p = mannwhitneyu(tier_data['High'], tier_data['Low'],
+                                           alternative='two-sided')
+                    med_h = np.median(tier_data['High'])
+                    med_l = np.median(tier_data['Low'])
+                    mw_p_str = f'p = {mw_p:.1e}' if mw_p < 0.001 else f'p = {mw_p:.3f}'
+                    stat_lines.append(f'High vs Low: {mw_p_str}')
+                    stat_lines.append(f'High median: {med_h:.3f}')
+                    stat_lines.append(f'Low median: {med_l:.3f}')
+
+                stat_lines.append('Solid line = median')
+                ax_b.text(0.95, 0.95, '\n'.join(stat_lines),
+                          transform=ax_b.transAxes, va='top', ha='right',
+                          fontsize=FONT_TICK - 1,
+                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                    edgecolor='grey', alpha=0.9))
+        except ImportError:
+            pass
+    else:
+        ax_b.text(0.5, 0.5, 'Insufficient tier data',
+                  transform=ax_b.transAxes, ha='center', va='center', fontsize=10)
+
+    ax_b.set_ylabel('Fraction of Clusters Shared', fontsize=FONT_AXIS_LABEL)
+    ax_b.set_title('B: Cluster Ratio by Quality Tier', fontsize=FONT_TITLE, fontweight='bold')
+    ax_b.tick_params(labelsize=FONT_TICK)
+    _despine(ax_b)
+
+    figure.suptitle("Sequence Clustering Validation",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '10_Clustering_Validation.png')
+
+
+# ── Item 4: Mapping genome variation (Figs 11-12) ──────────────────
+
+
+def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
+    """Fig 11: Where do clinically classified variants land structurally?
+
+    Sankey (alluvial) diagram. Left nodes: clinical significance categories
+    (Unknown excluded). Right nodes: 4 structural contexts. Flow bands show
+    how many variants of each significance land in each context.
+    """
+    var_df = _aggregate_all_variants(df)
+    total_parsed = len(var_df)
+    if total_parsed < 10:
+        print("  Skipping Fig 11: fewer than 10 parsed variants.")
+        return
+
+    # Filter to classified variants only (exclude Unknown)
+    classified_sigs = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Benign']
+    classified = var_df[var_df['significance'].isin(classified_sigs)].copy()
+    n_classified = len(classified)
+    n_unknown = total_parsed - n_classified
+    pct_unknown = 100.0 * n_unknown / total_parsed if total_parsed > 0 else 0.0
+
+    if n_classified < 10:
+        print("  Skipping Fig 11: fewer than 10 classified variants after removing Unknown.")
+        return
+
+    # Cross-tabulate: significance (left) x context (right)
+    classified['significance'] = pd.Categorical(classified['significance'],
+                                                categories=classified_sigs, ordered=True)
+    classified['context'] = pd.Categorical(classified['context'],
+                                           categories=CONTEXT_ORDER, ordered=True)
+    ct = pd.crosstab(classified['significance'], classified['context'], dropna=False)
+    ct = ct.reindex(index=classified_sigs, columns=CONTEXT_ORDER, fill_value=0)
+
+    figure, ax = plt.subplots(figsize=(12, 7.5))
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.02, 1.02)
+    ax.axis('off')
+    figure.subplots_adjust(top=0.88, bottom=0.12)
+
+    bar_w = 0.12  # width of stacked bars
+    x_left = 0.15
+    x_right = 0.85
+    gap = 0.015  # vertical gap between segments
+
+    # ── Left bars (significance) ──
+    left_totals = ct.sum(axis=1).values.astype(float)
+    left_total = left_totals.sum()
+    usable_height = 1.0 - gap * (len(classified_sigs) - 1)
+    left_heights = (left_totals / left_total) * usable_height
+    left_positions = []  # (y0, y1) for each significance
+    y_cursor = 0.0
+    for i, sig in enumerate(classified_sigs):
+        h = left_heights[i]
+        y0, y1 = y_cursor, y_cursor + h
+        left_positions.append((y0, y1))
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x_left - bar_w, y0), bar_w, h,
+            boxstyle="round,pad=0.005",
+            facecolor=SIGNIFICANCE_COLORS[sig], edgecolor='white', linewidth=1))
+        # Label
+        mid_y = (y0 + y1) / 2
+        count = int(left_totals[i])
+        ax.text(x_left - bar_w - 0.02, mid_y, f'{sig}\n(n={count:,})',
+                ha='right', va='center', fontsize=9, fontweight='bold')
+        y_cursor = y1 + gap
+
+    # ── Right bars (context) ──
+    right_totals = ct.sum(axis=0).values.astype(float)
+    right_total = right_totals.sum()
+    right_heights = (right_totals / right_total) * usable_height
+    right_positions = []  # (y0, y1) for each context
+    right_label_ys = []   # raw mid_y for each label
+    y_cursor = 0.0
+    for i, ctx in enumerate(CONTEXT_ORDER):
+        h = right_heights[i]
+        y0, y1 = y_cursor, y_cursor + h
+        right_positions.append((y0, y1))
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x_right, y0), bar_w, h,
+            boxstyle="round,pad=0.005",
+            facecolor=CONTEXT_COLORS[ctx], edgecolor='white', linewidth=1))
+        right_label_ys.append((y0 + y1) / 2)
+        y_cursor = y1 + gap
+
+    # Enforce minimum vertical spacing between right-side labels to prevent overlap
+    min_label_gap = 0.05
+    adjusted_ys = list(right_label_ys)
+    for i in range(len(adjusted_ys) - 1, 0, -1):
+        if adjusted_ys[i] - adjusted_ys[i - 1] < min_label_gap:
+            adjusted_ys[i - 1] = adjusted_ys[i] - min_label_gap
+
+    for i, ctx in enumerate(CONTEXT_ORDER):
+        count = int(right_totals[i])
+        label = CONTEXT_LABELS[ctx].replace('\n', ' ')
+        fsize = 8 if right_heights[i] < 0.03 else 9
+        ax.text(x_right + bar_w + 0.02, adjusted_ys[i], f'{label}\n(n={count:,})',
+                ha='left', va='center', fontsize=fsize, fontweight='bold')
+
+    # ── Flow bands ──
+    # Track cumulative position within each bar for sub-band placement
+    left_cursors = [pos[0] for pos in left_positions]
+    right_cursors = [pos[0] for pos in right_positions]
+
+    for i, sig in enumerate(classified_sigs):
+        for j, ctx in enumerate(CONTEXT_ORDER):
+            count = ct.iloc[i, j]
+            if count == 0:
+                continue
+            # Band height proportional to count within each bar
+            left_h = (count / left_total) * usable_height
+            right_h = (count / right_total) * usable_height
+            _draw_sankey_band(ax,
+                              left_y0=left_cursors[i],
+                              left_y1=left_cursors[i] + left_h,
+                              right_y0=right_cursors[j],
+                              right_y1=right_cursors[j] + right_h,
+                              x_left=x_left, x_right=x_right,
+                              color=SIGNIFICANCE_COLORS[sig], alpha=0.35)
+            left_cursors[i] += left_h
+            right_cursors[j] += right_h
+
+    # ── Annotations ──
+    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance -> Structural Context",
+            ha='center', va='bottom', fontsize=14, fontweight='bold',
+            transform=ax.transAxes)
+    # Footer annotation (merged to avoid overlap)
+    footer_parts = [f'n = {n_classified:,} classified variants ({pct_unknown:.1f}% Unknown excluded, {n_unknown:,} variants)']
+    true_total_a = pd.to_numeric(df.get('n_variants_a', pd.Series(dtype=float)), errors='coerce').sum()
+    true_total_b = pd.to_numeric(df.get('n_variants_b', pd.Series(dtype=float)), errors='coerce').sum()
+    true_total = true_total_a + true_total_b
+    if not np.isnan(true_total) and true_total > total_parsed * 1.05:
+        footer_parts.append(f'Variant details limited to 20 per chain ({total_parsed:,} shown of ~{int(true_total):,} total)')
+    ax.text(0.50, -0.06, '\n'.join(footer_parts), ha='center', va='top',
+            fontsize=8, style='italic', color='#666666', transform=ax.transAxes)
+
+    _save_figure(figure, '11_Variant_Consequence_Flow.png')
+
+
+def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> None:
+    """Fig 12: Item 4 — Mapping genome variation.
+
+    Scatter plot of interface variant density (variants per interface residue)
+    against composite score, coloured by quality tier. Spearman and partial
+    correlations annotated. Tier-stratified median densities in text box.
+    """
+    # Compute interface variant density per complex
+    n_if_var_a = pd.to_numeric(df.get('n_interface_variants_a', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+    n_if_var_b = pd.to_numeric(df.get('n_interface_variants_b', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+    n_if_res_a = pd.to_numeric(df.get('n_interface_residues_a', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+    n_if_res_b = pd.to_numeric(df.get('n_interface_residues_b', pd.Series(dtype=float)),
+                               errors='coerce').fillna(0)
+
+    n_if_var = n_if_var_a + n_if_var_b
+    n_if_res = n_if_res_a + n_if_res_b
+    # Density: variants per interface residue (NaN where no interface residues)
+    density = np.where(n_if_res > 0, n_if_var / n_if_res, np.nan)
+    density = pd.Series(density, index=df.index)
+
+    # Choose x-axis metric
+    if 'interface_confidence_score' in df.columns:
+        x_col = 'interface_confidence_score'
+        x_label = 'Composite Score'
+    else:
+        x_col = 'iptm'
+        x_label = 'ipTM'
+
+    # Filter to valid rows
+    x_series = pd.to_numeric(df.get(x_col, pd.Series(dtype=float)), errors='coerce')
+    valid_mask = density.notna() & x_series.notna() & (n_if_res > 0)
+
+    if valid_mask.sum() < 5:
+        print("  Skipping Fig 12: fewer than 5 complexes with valid density.")
+        return
+
+    x_vals = x_series[valid_mask].values.astype(float)
+    y_vals = density[valid_mask].values.astype(float)
+    size_vals = n_if_res[valid_mask].values.astype(float)  # for partial correlation
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    figure, ax = plt.subplots(figsize=(10, 7))
+
+    # ── Scatter coloured by quality tier ──
+    base_size, base_alpha = _adaptive_scatter_params(len(x_vals))
+    colors = df.loc[valid_mask, tier_col].map(TIER_COLORS).fillna('#bdc3c7').values if tier_col in df.columns else '#3498db'
+
+    _timed_scatter(ax, x_vals, y_vals, len(x_vals), fig_label='Fig 12',
+                   c=colors, s=base_size, alpha=base_alpha,
+                   edgecolors='white', linewidths=0.3)
+
+    if density_mode:
+        _overlay_kde_contours(ax, x_vals, y_vals)
+
+    # ── Spearman correlation ──
+    stat_lines = []
+    if len(x_vals) >= 5 and np.std(x_vals) > 1e-9 and np.std(y_vals) > 1e-9:
+        rho, pval = spearmanr(x_vals, y_vals)
+        p_str = 'p < 0.001' if pval < 0.001 else f'p = {pval:.3f}'
+        stat_lines.append(f'Spearman \u03c1 = {rho:.4f}, {p_str}')
+
+        # Partial correlation controlling for interface size (rank-residual method)
+        if len(x_vals) >= 10 and np.std(size_vals) > 1e-9:
+            from scipy.stats import rankdata
+            rx = rankdata(x_vals)
+            ry = rankdata(y_vals)
+            rz = rankdata(size_vals)
+            # Regress ranks on size ranks via OLS, take residuals
+            rz_mean = rz.mean()
+            rz_centered = rz - rz_mean
+            rz_ss = np.dot(rz_centered, rz_centered)
+            if rz_ss > 1e-9:
+                beta_x = np.dot(rz_centered, rx - rx.mean()) / rz_ss
+                beta_y = np.dot(rz_centered, ry - ry.mean()) / rz_ss
+                resid_x = rx - beta_x * rz_centered
+                resid_y = ry - beta_y * rz_centered
+                if np.std(resid_x) > 1e-9 and np.std(resid_y) > 1e-9:
+                    rho_partial, pval_partial = spearmanr(resid_x, resid_y)
+                    p_str2 = 'p < 0.001' if pval_partial < 0.001 else f'p = {pval_partial:.3f}'
+                    stat_lines.append(f'Partial \u03c1 = {rho_partial:.4f}, {p_str2}  (size-controlled)')
+
+    # ── Tier-stratified medians ──
+    median_lines = []
+    if tier_col in df.columns:
+        tiers_valid = df.loc[valid_mask, tier_col].values
+        for tier in TIER_ORDER:
+            tier_vals = y_vals[tiers_valid == tier]
+            if len(tier_vals) > 0:
+                median_lines.append(f'{tier}: {np.median(tier_vals):.3f} (n={len(tier_vals)})')
+
+    # ── Annotation box ──
+    annotation_parts = []
+    if stat_lines:
+        annotation_parts.extend(stat_lines)
+    if median_lines:
+        annotation_parts.append('')
+        annotation_parts.append('Median density by tier:')
+        annotation_parts.extend(f'  {line}' for line in median_lines)
+
+    if annotation_parts:
+        ax.text(0.03, 0.72, '\n'.join(annotation_parts),
+                transform=ax.transAxes, fontsize=8, va='top', ha='left',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                          edgecolor='#cccccc', alpha=0.95),
+                family='monospace')
+
+    # ── Legend ──
+    if tier_col in df.columns:
+        legend_handles = []
+        tiers_valid = df.loc[valid_mask, tier_col].values
+        for tier in TIER_ORDER:
+            count = (tiers_valid == tier).sum()
+            if count > 0:
+                legend_handles.append(
+                    Line2D([0], [0], marker='o', color='w',
+                           markerfacecolor=TIER_COLORS[tier],
+                           markeredgecolor='white', markersize=9,
+                           label=f'{tier} (n={count})'))
+        if legend_handles:
+            ax.legend(handles=legend_handles, fontsize=FONT_TICK,
+                      loc='upper left', framealpha=0.9)
+
+    _apply_common_style(ax, '', x_label,
+                        'Variant Density (per interface residue)')
+
+    figure.suptitle("Interface Variant Density vs Composite Score",
+                    fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, '12_Variant_Density.png')
+
+
+# ── Item 6: Map stability scores (Fig 13) ──────────────────────────
+
+
+def plot_fig13_stability_crossvalidation(df: pd.DataFrame) -> None:
+    """Fig 13: Item 6 — Map stability scores.
+
+    Panel A — EVE vs AlphaMissense concordance scatter (pooled both chains).
+    Panel B — AlphaMissense vs monomeric FoldX DDG scatter (chain A).
+    Panel C — Coverage landscape grouped bar chart by quality tier.
+
+    Requires stability + ProtVar columns:
+        eve_score_mean_a/b, protvar_am_mean_a/b, protvar_foldx_mean_a/b,
+        eve_coverage_a/b, quality_tier_v2.
+    """
+    required = ['eve_score_mean_a', 'protvar_am_mean_a', 'quality_tier_v2']
+    if not all(c in df.columns for c in required):
+        print("  Skipping Fig 13 — missing stability/ProtVar columns")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
+
+    # ── Panel A: EVE vs AlphaMissense (pooled both chains) ──────────
+    eve_vals, am_vals, tier_vals_a = [], [], []
+    for _, row in df.iterrows():
+        tier = row.get(tier_col, '')
+        if tier not in TIER_ORDER:
+            continue
+        for suffix in ('a', 'b'):
+            eve = row.get(f'eve_score_mean_{suffix}', np.nan)
+            am = row.get(f'protvar_am_mean_{suffix}', np.nan)
+            if pd.notna(eve) and pd.notna(am) and eve > 0 and am > 0:
+                eve_vals.append(eve)
+                am_vals.append(am)
+                tier_vals_a.append(tier)
+
+    if len(eve_vals) >= 10:
+        eve_arr = np.array(eve_vals)
+        am_arr = np.array(am_vals)
+        colors_a = [TIER_COLORS.get(t, '#95a5a6') for t in tier_vals_a]
+        s, alpha = _adaptive_scatter_params(len(eve_arr))
+        ax_a.scatter(eve_arr, am_arr, c=colors_a, s=s, alpha=alpha, edgecolors='none')
+
+        try:
+            from scipy.stats import spearmanr
+            rho, p = spearmanr(eve_arr, am_arr)
+            p_str = f'p < 0.001' if p < 0.001 else f'p = {p:.3f}'
+            ax_a.text(0.05, 0.95, f'\u03c1 = {rho:.2f}, {p_str}\nn = {len(eve_arr):,}',
+                      transform=ax_a.transAxes, va='top', fontsize=FONT_TICK,
+                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                edgecolor='grey', alpha=0.9))
+        except ImportError:
+            pass
+
+        # Tier legend
+        for t in TIER_ORDER:
+            ax_a.scatter([], [], c=TIER_COLORS[t], s=20, label=t)
+        ax_a.legend(fontsize=FONT_TICK - 1, loc='lower right', framealpha=0.9)
+    else:
+        ax_a.text(0.5, 0.5, 'Insufficient overlap\n(< 10 pairs)',
+                  transform=ax_a.transAxes, ha='center', va='center', fontsize=10)
+
+    ax_a.set_xlabel('EVE Mean Score (higher = more pathogenic)', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylabel('AlphaMissense Mean Score (higher = more pathogenic)', fontsize=FONT_AXIS_LABEL)
+    ax_a.set_title('A: EVE vs AlphaMissense', fontsize=FONT_TITLE, fontweight='bold')
+    ax_a.tick_params(labelsize=FONT_TICK)
+    _despine(ax_a)
+
+    # ── Panel B: AlphaMissense vs FoldX (chain A only) ──────────────
+    am_b, foldx_b, tier_vals_b = [], [], []
+    for _, row in df.iterrows():
+        tier = row.get(tier_col, '')
+        if tier not in TIER_ORDER:
+            continue
+        am = row.get('protvar_am_mean_a', np.nan)
+        fx = row.get('protvar_foldx_mean_a', np.nan)
+        if pd.notna(am) and pd.notna(fx) and am > 0 and fx > 0:
+            am_b.append(am)
+            foldx_b.append(fx)
+            tier_vals_b.append(tier)
+
+    if len(am_b) >= 10:
+        am_b_arr = np.array(am_b)
+        fx_arr = np.array(foldx_b)
+        colors_b = [TIER_COLORS.get(t, '#95a5a6') for t in tier_vals_b]
+        s, alpha = _adaptive_scatter_params(len(am_b_arr))
+        ax_b.scatter(am_b_arr, fx_arr, c=colors_b, s=s, alpha=alpha, edgecolors='none')
+
+        try:
+            from scipy.stats import spearmanr
+            rho, p = spearmanr(am_b_arr, fx_arr)
+            p_str = f'p < 0.001' if p < 0.001 else f'p = {p:.3f}'
+            ax_b.text(0.05, 0.95, f'\u03c1 = {rho:.2f}, {p_str}\nn = {len(am_b_arr):,}',
+                      transform=ax_b.transAxes, va='top', fontsize=FONT_TICK,
+                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                edgecolor='grey', alpha=0.9))
+        except ImportError:
+            pass
+    else:
+        ax_b.text(0.5, 0.5, 'Insufficient overlap\n(< 10 pairs)',
+                  transform=ax_b.transAxes, ha='center', va='center', fontsize=10)
+
+    ax_b.set_xlabel('AlphaMissense Mean Score', fontsize=FONT_AXIS_LABEL)
+    ax_b.set_ylabel('Monomeric FoldX \u0394\u0394G Mean (kcal/mol, higher = destabilising)', fontsize=FONT_AXIS_LABEL)
+    ax_b.set_title('B: AlphaMissense vs FoldX', fontsize=FONT_TITLE, fontweight='bold')
+    ax_b.tick_params(labelsize=FONT_TICK)
+    _despine(ax_b)
+
+    # ── Panel C: Coverage Landscape (grouped bar) ───────────────────
+    predictor_names = ['EVE', 'AlphaMissense', 'FoldX']
+    predictor_colors = ['#3498db', '#e67e22', '#2ecc71']
+    bar_width = 0.25
+    x_positions = np.arange(len(TIER_ORDER))
+
+    overall_coverage = {p: {'covered': 0, 'total': 0} for p in predictor_names}
+
+    for i, pred in enumerate(predictor_names):
+        coverages = []
+        for tier in TIER_ORDER:
+            tier_df = df[df[tier_col] == tier]
+            n_tier = len(tier_df)
+            if n_tier == 0:
+                coverages.append(0)
+                continue
+
+            if pred == 'EVE':
+                cov_a = tier_df.get('eve_coverage_a', pd.Series(dtype=float))
+                cov_b = tier_df.get('eve_coverage_b', pd.Series(dtype=float))
+                covered = ((cov_a.fillna(0) > 0) | (cov_b.fillna(0) > 0)).sum()
+            elif pred == 'AlphaMissense':
+                am_a = tier_df.get('protvar_am_mean_a', pd.Series(dtype=float))
+                am_b = tier_df.get('protvar_am_mean_b', pd.Series(dtype=float))
+                covered = (am_a.notna() | am_b.notna()).sum()
+            else:  # FoldX
+                fx_a = tier_df.get('protvar_foldx_mean_a', pd.Series(dtype=float))
+                fx_b = tier_df.get('protvar_foldx_mean_b', pd.Series(dtype=float))
+                covered = (fx_a.notna() | fx_b.notna()).sum()
+
+            overall_coverage[pred]['covered'] += int(covered)
+            overall_coverage[pred]['total'] += n_tier
+            coverages.append(100.0 * covered / n_tier)
+
+        bars = ax_c.bar(x_positions + i * bar_width, coverages, bar_width,
+                        color=predictor_colors[i], label=pred, edgecolor='white',
+                        linewidth=0.5, alpha=0.85)
+
+        # Annotate each bar with percentage
+        for bar_obj, cov in zip(bars, coverages):
+            if cov > 0:
+                ax_c.text(bar_obj.get_x() + bar_obj.get_width() / 2, cov + 1.5,
+                          f'{cov:.0f}%', ha='center', va='bottom', fontsize=7)
+
+    ax_c.set_xticks(x_positions + bar_width)
+    ax_c.set_xticklabels(TIER_ORDER, fontsize=FONT_AXIS_LABEL)
+    ax_c.set_ylabel('Coverage (%)', fontsize=FONT_AXIS_LABEL)
+    ax_c.set_ylim(0, 110)
+    ax_c.set_title('C: Coverage by Quality Tier', fontsize=FONT_TITLE, fontweight='bold')
+    ax_c.tick_params(labelsize=FONT_TICK)
+    ax_c.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
+
+    # Overall coverage annotation
+    overall_parts = []
+    for pred in predictor_names:
+        oc = overall_coverage[pred]
+        pct = 100.0 * oc['covered'] / oc['total'] if oc['total'] > 0 else 0
+        overall_parts.append(f'{pred}: {pct:.0f}%')
+    ax_c.text(0.5, -0.12, 'Overall: ' + '  |  '.join(overall_parts),
+              transform=ax_c.transAxes, ha='center', fontsize=FONT_TICK - 1,
+              style='italic', color='#555555')
+
+    _despine(ax_c)
+
+    figure.suptitle("Stability Predictor Cross-Validation",
+                    fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    _save_figure(figure, '13_Stability_CrossValidation.png')
+
+
+# ── Disease & pathway analysis (Figs 14-15) ────────────────────────
+
+
+def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
+    """Fig 14: Disease & pathway analysis.
+
+    Two-panel figure: (A) grouped bar chart of disease prevalence by tier
+    with chi-square test and drug-target annotation box; (B) top 10 diseases
+    by frequency as horizontal stacked bars segmented by quality tier.
+
+    Requires 'n_diseases_a' column.
+    """
+    if 'n_diseases_a' not in df.columns:
+        print("  Skipping Fig 14 — no disease data available")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+    if tier_col not in df.columns:
+        print("  Skipping Fig 14 — no quality tier column")
+        return
+
+    total_diseases = df['n_diseases_a'].fillna(0).astype(int)
+    if 'n_diseases_b' in df.columns:
+        total_diseases = total_diseases + df['n_diseases_b'].fillna(0).astype(int)
+
+    has_disease = total_diseases > 0
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5.5),
+                                         gridspec_kw={'width_ratios': [2.5, 2.5]})
+
+    # ── Panel A: disease prevalence by tier ──
+    tier_stats = {}
+    for t in TIER_ORDER:
+        mask = df[tier_col] == t
+        n_tier = mask.sum()
+        n_dis = (mask & has_disease).sum()
+        tier_stats[t] = {'n_tier': n_tier, 'n_disease': n_dis,
+                         'n_no_disease': n_tier - n_dis,
+                         'pct_disease': (n_dis / n_tier * 100) if n_tier > 0 else 0,
+                         'pct_no_disease': ((n_tier - n_dis) / n_tier * 100) if n_tier > 0 else 0}
+
+    x_pos = np.arange(len(TIER_ORDER))
+    width = 0.35
+
+    pct_dis = [tier_stats[t]['pct_disease'] for t in TIER_ORDER]
+    pct_no = [tier_stats[t]['pct_no_disease'] for t in TIER_ORDER]
+    n_dis_vals = [tier_stats[t]['n_disease'] for t in TIER_ORDER]
+    n_no_vals = [tier_stats[t]['n_no_disease'] for t in TIER_ORDER]
+
+    bars_dis = ax_a.bar(x_pos - width / 2, pct_dis, width, color='#c0392b',
+                        alpha=0.7, label='Has disease', edgecolor='grey', linewidth=0.5)
+    bars_no = ax_a.bar(x_pos + width / 2, pct_no, width, color='#d5d8dc',
+                       label='No disease', edgecolor='grey', linewidth=0.5)
+
+    # Annotate counts on bars
+    for i, (bar_d, bar_n, nd, nn) in enumerate(zip(bars_dis, bars_no, n_dis_vals, n_no_vals)):
+        ax_a.text(bar_d.get_x() + bar_d.get_width() / 2, bar_d.get_height() + 1,
+                  f'{nd:,}', ha='center', va='bottom', fontsize=7, color='#555555')
+        ax_a.text(bar_n.get_x() + bar_n.get_width() / 2, bar_n.get_height() + 1,
+                  f'{nn:,}', ha='center', va='bottom', fontsize=7, color='#555555')
+
+    ax_a.set_xticks(x_pos)
+    ax_a.set_xticklabels(TIER_ORDER, fontsize=FONT_TICK)
+    ax_a.set_ylim(0, max(pct_no + pct_dis) * 1.22)
+
+    # Chi-square test
+    contingency = np.array([[tier_stats[t]['n_disease'] for t in TIER_ORDER],
+                            [tier_stats[t]['n_no_disease'] for t in TIER_ORDER]])
+    if contingency.min() >= 5:
+        chi2, p_val, dof, expected = chi2_contingency(contingency)
+        p_str = f'p < 0.001' if p_val < 0.001 else f'p = {p_val:.2e}'
+        ax_a.text(0.98, 0.95, f'\u03c7\u00b2 = {chi2:.1f}, {p_str}',
+                  transform=ax_a.transAxes, ha='right', va='top',
+                  fontsize=9, bbox=dict(boxstyle='round,pad=0.3',
+                                        facecolor='white', edgecolor='grey', alpha=0.8))
+
+    # Drug target disease prevalence — text annotation box with Fisher test
+    baseline_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
+    if 'is_drug_target_a' in df.columns:
+        drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
+        drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
+        is_drug = drug_a | drug_b
+        n_drug = is_drug.sum()
+        if n_drug >= 2:
+            drug_disease_pct = (is_drug & has_disease).sum() / n_drug * 100
+            # Fisher exact test: drug-target vs non-drug-target disease prevalence
+            n_drug_dis = int((is_drug & has_disease).sum())
+            n_drug_no = int(n_drug) - n_drug_dis
+            n_nondrug_dis = int(has_disease.sum()) - n_drug_dis
+            n_nondrug_no = int(len(df)) - n_drug_dis - n_drug_no - n_nondrug_dis
+            fisher_table = [[n_drug_dis, n_drug_no],
+                            [n_nondrug_dis, n_nondrug_no]]
+            _, fisher_p = fisher_exact(fisher_table, alternative='two-sided')
+            fisher_p_str = 'p < 0.001' if fisher_p < 0.001 else f'p = {fisher_p:.2e}'
+            ax_a.text(0.02, 0.35,
+                      f'Drug targets: {drug_disease_pct:.0f}% disease-assoc.\n'
+                      f'vs {baseline_pct:.0f}% baseline '
+                      f'(Fisher {fisher_p_str})\n'
+                      f'(n = {n_drug})',
+                      transform=ax_a.transAxes, ha='left', va='top',
+                      fontsize=8, color='#9b59b6',
+                      bbox=dict(boxstyle='round,pad=0.3', facecolor='#f4ecf7',
+                                edgecolor='#9b59b6', alpha=0.9))
+
+    ax_a.legend(fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
+    _apply_common_style(ax_a, 'Disease Prevalence by Quality Tier',
+                        'Quality Tier', '% of Tier')
+    _despine(ax_a)
+
+    # ── Panel B: top diseases by tier (stacked horizontal bars) ──
+    disease_tier_counts: dict[str, dict[str, int]] = {}
+    disease_protein_counts: dict[str, set] = {}  # unique accessions per disease
+
+    for _, row in df.iterrows():
+        tier = row.get(tier_col, '')
+        if tier not in TIER_ORDER:
+            continue
+        for suffix in ('a', 'b'):
+            details_str = row.get(f'disease_details_{suffix}', '')
+            if not isinstance(details_str, str) or not details_str.strip():
+                continue
+            accession = str(row.get(f'protein_{suffix}', ''))
+            for entry in details_str.split('|'):
+                entry = entry.strip()
+                if not entry or entry.startswith('...'):
+                    continue
+                name = _parse_disease_name(entry)
+                if not name:
+                    continue
+                disease_tier_counts.setdefault(name, {t: 0 for t in TIER_ORDER})
+                disease_tier_counts[name][tier] += 1
+                disease_protein_counts.setdefault(name, set())
+                if accession:
+                    disease_protein_counts[name].add(accession)
+
+    if disease_tier_counts:
+        # Select top 10 diseases: primary = unique protein count (desc),
+        # tiebreaker = total annotations (desc)
+        sorted_diseases = sorted(
+            disease_tier_counts.keys(),
+            key=lambda d: (len(disease_protein_counts.get(d, set())),
+                           sum(disease_tier_counts[d].values())),
+            reverse=True
+        )[:10]
+
+        y_pos = np.arange(len(sorted_diseases))
+        left = np.zeros(len(sorted_diseases))
+
+        for t in TIER_ORDER:
+            widths = np.array([disease_tier_counts[d].get(t, 0) for d in sorted_diseases], dtype=float)
+            ax_b.barh(y_pos, widths, left=left, color=TIER_COLORS[t],
+                      label=t, height=0.6, edgecolor='white', linewidth=0.5)
+            left += widths
+
+        ax_b.set_yticks(y_pos)
+
+        def _truncate_name(name, max_len=50):
+            if len(name) <= max_len:
+                return name
+            return name[:max_len].rsplit(' ', 1)[0] + '...'
+
+        ax_b.set_yticklabels([_truncate_name(name) for name in sorted_diseases], fontsize=8)
+        ax_b.invert_yaxis()
+        ax_b.set_xlim(0, max(left) * 1.30)
+
+        # Total count + unique proteins annotation at end of each bar
+        xlim_upper = max(left) * 1.30
+        for i, d in enumerate(sorted_diseases):
+            total = sum(disease_tier_counts[d].values())
+            n_prots = len(disease_protein_counts.get(d, set()))
+            label_text = f'{total} ({n_prots} proteins)'
+            label_x = left[i] + max(left) * 0.02
+            if label_x + len(label_text) * 0.35 > xlim_upper:
+                # Bar too close to boundary — place label inside in white
+                ax_b.text(left[i] - max(left) * 0.02, i, label_text,
+                          va='center', ha='right', fontsize=7, color='white',
+                          fontweight='bold')
+            else:
+                ax_b.text(label_x, i, label_text,
+                          va='center', fontsize=7, color='#555555')
+
+        ax_b.legend(fontsize=FONT_TICK - 1, loc='center right', framealpha=1.0)
+        _apply_common_style(ax_b, 'Top Disease Categories by Tier',
+                            'Annotations (unique proteins shown)', '')
+        _despine(ax_b)
+
+        # Hub-protein footnote if any top disease has few unique proteins but many annotations
+        has_hub = any(
+            len(disease_protein_counts.get(d, set())) <= 3
+            and sum(disease_tier_counts[d].values()) >= 20
+            for d in sorted_diseases
+        )
+        if has_hub:
+            ax_b.text(0.5, -0.08,
+                      '\u2020 Diseases with \u22643 unique proteins may reflect hub-protein effects.',
+                      transform=ax_b.transAxes, ha='center', va='top',
+                      fontsize=6.5, style='italic', color='#777777')
+    else:
+        ax_b.text(0.5, 0.5, 'No disease details\navailable',
+                  transform=ax_b.transAxes, ha='center', va='center',
+                  fontsize=FONT_AXIS_LABEL, color='#999999')
+        ax_b.set_axis_off()
+
+    figure.subplots_adjust(top=0.88, wspace=0.45)
+    figure.suptitle("Disease Association Enrichment Across Quality Tiers",
+                    fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
+
+    # Caption — dynamic values, no hardcoded dataset sizes
+    n_effective = len(df)
+    overall_disease_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
+    caption_14 = (
+    f'Left: Disease annotation prevalence across quality tiers (\u03c7\u00b2, n = {n_effective:,}). '
+    f'Higher prevalence in lower tiers likely reflects annotation bias toward well-studied '
+    f'disordered proteins. Right: Top diseases ranked by unique proteins, displaying total '
+    f'annotations and protein counts.'
+    )
+    figure.text(0.5, -0.01, caption_14,
+                ha='center', fontsize=7, style='italic', color='#777777')
+
+    _save_figure(figure, '14_Disease_Enrichment.png')
+
+
+# Old drug-target quality figure removed — null result (p = 0.270, n = 80);
+# drug-target disease enrichment is reported as an annotation box in Fig 14 Panel A instead.
+
+
+def plot_fig15_pathway_network(df: pd.DataFrame,
+                                max_pathways: int = 20,
+                                min_shared_complexes: int = 20,
+                                hierarchy_file: Optional[str] = 'data/pathways/ReactomePathwaysRelation.txt',
+                                filter_hierarchy: bool = True,
+                                depth_level: int = 1) -> None:
+    """Fig 15: Disease & pathway analysis.
+
+    Nodes are the top N Reactome pathways at a single hierarchy depth level.
+    Edges connect pathways that share complexes above a threshold, with
+    hierarchical parent-child links excluded. Node colour encodes
+    % High-tier complexes (RdYlGn), node size encodes complex count, edges
+    are grey with width proportional to shared complex count.
+
+    Uses kamada_kawai_layout for deterministic, reproducible layout.
+
+    Parameters
+    ----------
+    hierarchy_file : str or None
+        Path to ReactomePathwaysRelation.txt. Default searches in
+        ``data/pathways/``. Set to None to disable hierarchy filtering.
+    filter_hierarchy : bool
+        If True (default), remove parent-child edges from the network.
+    depth_level : int
+        Reactome hierarchy depth to display (0 = top-level, 1 = second-level).
+        Falls back to depth+1 if fewer than 5 pathways have data at target depth.
+
+    Requires NetworkX and 'reactome_pathways_a' column.
+    """
+    if not _HAS_NETWORKX:
+        print("  Skipping Fig 15 — NetworkX not installed")
+        return
+
+    if 'reactome_pathways_a' not in df.columns:
+        print("  Skipping Fig 15 — no pathway data available")
+        return
+
+    tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
+
+    # ── Load hierarchy for edge filtering and depth computation ──
+    hierarchy_pairs: set = set()
+    pathway_depths: dict = {}
+    hierarchy_loaded = False
+    if filter_hierarchy and hierarchy_file:
+        try:
+            from pathway_network import load_reactome_hierarchy
+            hierarchy = load_reactome_hierarchy(hierarchy_file)
+            for parent, children in hierarchy.items():
+                for child in children:
+                    hierarchy_pairs.add((parent, child))
+                    hierarchy_pairs.add((child, parent))
+            pathway_depths = _compute_reactome_depths(hierarchy)
+            hierarchy_loaded = True
+        except FileNotFoundError:
+            print(f"  Warning: hierarchy file not found ({hierarchy_file}), "
+                  f"skipping hierarchy filtering")
+        except Exception as e:
+            print(f"  Warning: could not load hierarchy file: {e}")
+
+    # ── Build pathway co-occurrence data ──
+    pathway_complexes: dict[str, list[float]] = {}
+    pathway_tiers: dict[str, list[str]] = {}  # for % High-tier colouring
+    pathway_names: dict[str, str] = {}
+    edge_data: dict[tuple, list[float]] = {}
+
+    for _, row in df.iterrows():
+        pdockq_val = row.get('pdockq')
+        if pd.isna(pdockq_val):
+            continue
+        pdockq_val = float(pdockq_val)
+        tier = str(row.get(tier_col, ''))
+
+        complex_pids = set()
+        for suffix in ('a', 'b'):
+            pathways_str = row.get(f'reactome_pathways_{suffix}', '')
+            if not pathways_str or pd.isna(pathways_str):
+                continue
+            for entry in str(pathways_str).split('|'):
+                if entry.startswith('...('):
+                    continue
+                parts = entry.split(':', 1)
+                if len(parts) == 2:
+                    pid, pname = parts
+                    complex_pids.add(pid)
+                    pathway_names[pid] = pname
+
+        for pid in complex_pids:
+            pathway_complexes.setdefault(pid, []).append(pdockq_val)
+            pathway_tiers.setdefault(pid, []).append(tier)
+
+        pid_list = sorted(complex_pids)
+        for i in range(len(pid_list)):
+            for j in range(i + 1, len(pid_list)):
+                key = (pid_list[i], pid_list[j])
+                edge_data.setdefault(key, []).append(pdockq_val)
+
+    if not pathway_complexes:
+        print("  Skipping Fig 15 — no parseable pathway data")
+        return
+
+    # ── Filter to target depth level ──
+    effective_depth = depth_level
+    if hierarchy_loaded and pathway_depths:
+        # Filter pathway_complexes to target depth
+        depth_candidates = {pid for pid in pathway_complexes
+                            if pathway_depths.get(pid) == depth_level}
+        # Fall back to depth+1 if too few pathways at target depth
+        if len(depth_candidates) < 5:
+            depth_candidates_fallback = {pid for pid in pathway_complexes
+                                          if pathway_depths.get(pid) == depth_level + 1}
+            if len(depth_candidates_fallback) >= 5:
+                depth_candidates = depth_candidates_fallback
+                effective_depth = depth_level + 1
+                print(f"  Fig 15: fell back to depth {effective_depth} "
+                      f"({len(depth_candidates)} pathways)")
+            # If still too few, use all pathways (no depth filter)
+            elif len(depth_candidates) < 5:
+                depth_candidates = set(pathway_complexes.keys())
+                effective_depth = -1  # signals no depth filtering applied
+                print("  Fig 15: too few pathways at target depth, using all depths")
+
+        # Select top N from depth-filtered candidates
+        sorted_pids = sorted(depth_candidates,
+                             key=lambda p: len(pathway_complexes[p]), reverse=True)
+    else:
+        sorted_pids = sorted(pathway_complexes.keys(),
+                             key=lambda p: len(pathway_complexes[p]), reverse=True)
+        effective_depth = -1  # no depth filtering
+
+    keep_pids = set(sorted_pids[:max_pathways])
+
+    G = nx.Graph()
+    for pid in keep_pids:
+        vals = pathway_complexes[pid]
+        tiers_list = pathway_tiers.get(pid, [])
+        frac_high = sum(1 for t in tiers_list if t == 'High') / len(tiers_list) if tiers_list else 0
+        G.add_node(pid,
+                   n_complexes=len(vals),
+                   mean_pdockq=float(np.mean(vals)),
+                   frac_high=frac_high,
+                   name=pathway_names.get(pid, pid))
+
+    # Build edges — exclude hierarchical parent-child links
+    effective_threshold = min_shared_complexes
+    for (p1, p2), vals in edge_data.items():
+        if p1 in keep_pids and p2 in keep_pids and len(vals) >= effective_threshold:
+            if hierarchy_loaded and (p1, p2) in hierarchy_pairs:
+                continue
+            G.add_edge(p1, p2, n_shared=len(vals),
+                       mean_pdockq=float(np.mean(vals)))
+
+    # Auto-raise threshold if network is too dense (> 3 edges per node)
+    n_nodes_g = G.number_of_nodes()
+    while G.number_of_edges() > 3 * n_nodes_g and effective_threshold < 10000:
+        effective_threshold *= 2
+        edges_to_remove = [(u, v) for u, v, d in G.edges(data=True)
+                           if d['n_shared'] < effective_threshold]
+        G.remove_edges_from(edges_to_remove)
+        if not edges_to_remove:
+            break  # no more edges to remove at this threshold
+
+    if G.number_of_nodes() == 0:
+        print("  Skipping Fig 15 — empty graph after filtering")
+        return
+
+    # ── Layout — shrink inward to leave margin for labels ──
+    pos = nx.kamada_kawai_layout(G)
+    pos = {k: v * 0.85 for k, v in pos.items()}
+
+    figure, ax = plt.subplots(1, 1, figsize=(14, 14))
+
+    # Colour normalisation — % High-tier (0% to dynamic max for better spread)
+    node_frac_high = [G.nodes[n]['frac_high'] for n in G.nodes()]
+    vmin = 0.0
+    vmax = max(node_frac_high) if node_frac_high and max(node_frac_high) > 0 else 0.5
+    # Round up to nearest 0.05 for clean tick labels
+    vmax = max(0.05, np.ceil(vmax * 20) / 20)
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+    cmap = plt.cm.RdYlGn
+
+    # Draw edges first (grey, beneath nodes) with data-relative scaling
+    all_shared = [d['n_shared'] for _, _, d in G.edges(data=True)] if G.number_of_edges() > 0 else [1]
+    min_s, max_s = min(all_shared), max(all_shared)
+
+    for u, v, edata in G.edges(data=True):
+        x_coords = [pos[u][0], pos[v][0]]
+        y_coords = [pos[u][1], pos[v][1]]
+        frac = (edata['n_shared'] - min_s) / max(1, max_s - min_s)
+        width = 0.5 + 4.5 * frac
+        alpha = 0.05 + 0.35 * frac  # weak edges fade, strong edges visible
+        ax.plot(x_coords, y_coords, color='#888888', linewidth=width, alpha=alpha)
+
+    # Draw nodes — data-relative sizing for visible differentiation
+    counts = [G.nodes[n]['n_complexes'] for n in G.nodes()]
+    min_c, max_c = min(counts), max(counts)
+    node_sizes = [300 + 2700 * (c - min_c) / max(1, max_c - min_c) for c in counts]
+    node_colors = [cmap(norm(G.nodes[n]['frac_high'])) for n in G.nodes()]
+    nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes,
+                           node_color=node_colors, edgecolors='black',
+                           linewidths=0.8)
+
+    # Label ALL nodes — centred inside node with collision avoidance
+    node_list = list(G.nodes())
+    node_size_map = dict(zip(node_list, node_sizes))
+    label_data = []
+    for n in node_list:
+        full_name = pathway_names.get(n, n)
+        name = full_name[:40] + '\u2026' if len(full_name) > 40 else full_name
+        wrapped = _textwrap.fill(name, width=15)
+        x, y = pos[n]
+        sz = node_size_map[n]
+        fs = 5 + 3 * (sz - 300) / max(1, 2700)
+        label_data.append({'x': x, 'y': y, 'text': wrapped, 'fontsize': fs})
+
+    # Collision nudge — sort top-to-bottom, push overlapping labels apart
+    label_data.sort(key=lambda d: -d['y'])
+    nudge = 0.03
+    for i in range(len(label_data)):
+        for j in range(i + 1, len(label_data)):
+            if (abs(label_data[i]['x'] - label_data[j]['x']) < 0.08 and
+                    abs(label_data[i]['y'] - label_data[j]['y']) < nudge):
+                label_data[j]['y'] = label_data[i]['y'] - nudge
+
+    for ld in label_data:
+        ax.text(ld['x'], ld['y'], ld['text'],
+                fontsize=ld['fontsize'], ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                          alpha=0.6, edgecolor='none'))
+
+    ax.axis('off')
+    ax.margins(0.15)
+
+    # Colourbar — % High-tier complexes
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = figure.colorbar(sm, ax=ax, shrink=0.6, pad=0.06)
+    cbar.set_label('Percentage of High-tier complexes', fontsize=12)
+    cbar.ax.tick_params(labelsize=10)
+    n_ticks = min(9, int(vmax / 0.05) + 1)
+    tick_vals = np.linspace(vmin, vmax, n_ticks)
+    cbar.set_ticks(tick_vals)
+    cbar.set_ticklabels([f'{v * 100:.0f}%' for v in tick_vals])
+
+    # Node-size legend — show min and max with explicit labels
+    ref_sizes = [min_c, max_c]
+    ref_labels = [f'{min_c:,} (smallest)', f'{max_c:,} (largest)']
+    legend_elements = []
+    for s, lbl in zip(ref_sizes, ref_labels):
+        display_size = 300 + 2700 * (s - min_c) / max(1, max_c - min_c)
+        legend_elements.append(Line2D([0], [0], marker='o', color='w',
+                                      markerfacecolor='#bdc3c7',
+                                      markeredgecolor='black', markeredgewidth=0.5,
+                                      markersize=max(4, np.sqrt(display_size) / 3),
+                                      label=lbl))
+    figure.legend(handles=legend_elements, fontsize=10,
+                  title='Pathway size (complexes)', title_fontsize=11,
+                  framealpha=1.0, borderpad=1.2, labelspacing=1.5, handletextpad=1.0,
+                  loc='upper right', bbox_to_anchor=(0.99, 0.97))
+
+    figure.suptitle("Reactome Pathway Network by Structural Quality",
+                    fontsize=FONT_TITLE + 1, fontweight='bold')
+
+    # Caption — dynamic values, no hardcoded sizes
+    n_nodes = G.number_of_nodes()
+    n_edges = G.number_of_edges()
+    hier_note = ', hierarchical parent\u2013child links excluded' if hierarchy_loaded else ''
+    depth_note = f'depth level {effective_depth}' if effective_depth >= 0 else 'all depths'
+    threshold_note = (f'\u2265{effective_threshold} shared complexes'
+                      if effective_threshold == min_shared_complexes
+                      else f'\u2265{effective_threshold} shared complexes '
+                           f'(auto-raised from {min_shared_complexes})')
+    caption_15 = (
+    f'Network of the top {n_nodes} Reactome pathways ({depth_note}, \u2265{min_c:,} complexes). '
+    f'Node size and color reflect total complex count and High-tier proportion, respectively. '
+    f'The {n_edges} edges denote pathway overlaps ({threshold_note}{hier_note}), with width '
+    f'scaling by overlap strength.'
+    )
+    figure.text(0.5, 0.01, caption_15,
+                ha='center', fontsize=7, style='italic', color='#777777')
+
+    _save_figure(figure, '15_Pathway_Network.png')
+
+
+# PTM-interface landscape figure removed — CSV lacks interface residue positions;
+# variant_details only records positions where variants exist, making PTM-interface
+# cross-referencing scientifically invalid (near-zero matches).
+
+
+# ── Synthesis (Fig 16) ──────────────────────────────────────────────
+
+
+def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
+    """Fig 16 — The Prediction Quality Paradox.
 
     Produces a 2x2 panel figure:
       Top row  — "Interface-level validation":
@@ -3306,7 +2890,7 @@ def plot_fig19_prediction_quality_paradox(df: pd.DataFrame) -> None:
     wdf['_has_path_iface'] = wdf['n_pathogenic_interface_variants'].fillna(0) > 0
 
     if len(wdf) == 0:
-        print("  Fig 19: no data after filtering — skipped.")
+        print("  Fig 16: no data after filtering — skipped.")
         return
 
     # ── Figure assembly (2x2) ────────────────────────────────────────
@@ -3407,7 +2991,7 @@ def plot_fig19_prediction_quality_paradox(df: pd.DataFrame) -> None:
     fig.suptitle("The Prediction Quality Paradox",
                  fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
-    _save_figure(fig, '19_Prediction_Quality_Paradox.png')
+    _save_figure(fig, '16_Prediction_Quality_Paradox.png')
 
     # ── Statistics table ─────────────────────────────────────────────
     all_stats = _paradox_stats_for_subset(wdf, label='All')
@@ -3424,7 +3008,9 @@ def plot_fig19_prediction_quality_paradox(df: pd.DataFrame) -> None:
             if isinstance(val, int) and val < 30 and val > 0:
                 print(f"  WARNING: Panel {r['panel']} ({r['subset']}): {tier_name} tier has only n={val} (<30)")
 
-#-----------------------------------------------Main Execution--------------------------------------------------------------------
+
+# ── CLI & Main ──────────────────────────────────────────────────────
+
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
@@ -3433,24 +3019,24 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-     # Figs 1-10 with default output directory
-    python visualise_results.py analysis_results.csv   
-                           
-     # Custom output                       
+     # Figs 1-9 with default output directory
+    python visualise_results.py analysis_results.csv
+
+     # Custom output
     python visualise_results.py results.csv --output-dir ./figures
 
-    # Add KDE contours        
-    python visualise_results.py results.csv --density 
+    # Add KDE contours
+    python visualise_results.py results.csv --density
 
-    # To generate Fig 1b as well                       
+    # To generate Fig 1b as well
     python visualise_results.py results.csv --disorder-scatter
 
-    # Generate PAE heatmaps (requires PKL files from the models directory)                
+    # Generate PAE heatmaps (requires PKL files from the models directory)
     python visualise_results.py results.csv --pae-heatmaps /path/to/models
     python visualise_results.py results.csv --pae-heatmaps /models --limit 50
     """,
 )
-    
+
     #-------------Positional: CSV path-----------------------------------
     parser.add_argument(
         'csv', type=str,
@@ -3550,110 +3136,94 @@ def main() -> None:
     print("\n--- Generating Figures ---\n")
 
     # ALWAYS generated: Fig 1 and Fig 2
-    print("Fig 1 - Quality Scatter (ipTM vs pDockQ)")
+    print("Fig 1 — Quality Scatter (ipTM vs pDockQ)")
     plot_fig1_quality_scatter(df, col_flags, density_mode=args.density)
     figures_generated += 1
 
-    print("Fig 2 - Global PAE Health Check")
+    print("Fig 2 — Global PAE Health Check")
     plot_fig2_pae_health_check(df)
     figures_generated += 1
 
     # Supplementary Fig 1b (only when --disorder-scatter AND V2 data present)
     if args.disorder_scatter and col_flags['has_v2_data']:
-        print("Fig 1b - Disorder Scatter (supplementary)")
+        print("Fig 1b — Disorder Scatter (supplementary)")
         plot_fig1b_disorder_scatter(df, density_mode=args.density)
         figures_generated += 1
 
-    # Interface figures (require V2 + interface data)
+    # Interface figures (require V2 + interface data): Figs 3-8
     if col_flags['has_v2_data'] and col_flags['has_interface_data']:
-        print("Fig 3 - Interface PAE by Tier")
+        print("Fig 3 — Interface PAE by Tier")
         plot_fig3_interface_pae_by_tier(df)
         figures_generated += 1
 
-        print("Fig 4 - Composite & Tier Validation")
+        print("Fig 4 — Composite & Tier Validation")
         plot_fig4_composite_validation(df, density_mode=args.density)
         figures_generated += 1
 
-        print("Fig 5 - Interface vs Bulk")
+        print("Fig 5 — Interface vs Bulk")
         plot_fig5_interface_vs_bulk(df, density_mode=args.density)
         figures_generated += 1
 
-        print("Fig 6 - Paradox Spotlight")
+        print("Fig 6 — Paradox Spotlight")
         plot_fig6_paradox_spotlight(df)
         figures_generated += 1
 
-        print("Fig 7 - Homo vs Hetero")
+        print("Fig 7 — Homo vs Hetero")
         plot_fig7_homo_vs_hetero(df)
         figures_generated += 1
 
-        print("Fig 8 - Metric Disagreement")
+        print("Fig 8 — Metric Disagreement")
         plot_fig8_metric_disagreement(df, density_mode=args.density)
         figures_generated += 1
-
-        print("Fig 9 - Correlation & Flags")
-        plot_fig9_correlation_flags(df)
-        figures_generated += 1
     else:
-        print("\nInterface figures (3-9) require V2 quality tiers AND interface")
+        print("\nInterface figures (3-8) require V2 quality tiers AND interface")
         print("columns in the CSV. Re-run the batch script with interface analysis")
         print("enabled to generate the full 44-column CSV.")
 
-    # Chain-count figure (requires n_chains column from multi-chain)
+    # Chain-count figure (requires n_chains column)
     if col_flags['has_chain_info']:
-        print("Fig 10 - Chain-Count Quality Profile")
-        plot_fig10_chain_count_profile(df, density_mode=args.density)
+        print("Fig 9 — Chain-Count Quality Profile")
+        plot_fig9_chain_count_profile(df, density_mode=args.density)
         figures_generated += 1
 
-    # Variant figures (require variant data from --variants)
+    # Clustering validation (requires --clustering)
+    if col_flags.get('has_clustering_data', False) and 'complex_type' in df.columns:
+        print("Fig 10 — Sequence Clustering Validation")
+        plot_fig10_clustering_validation(df)
+        figures_generated += 1
+
+    # Variant figures (require --variants)
     if col_flags['has_variant_data']:
-        print("Fig 11 - Classified Variant Sankey")
+        print("Fig 11 — Classified Variant Sankey")
         plot_fig11_variant_consequence_flow(df)
         figures_generated += 1
 
-        print("Fig 12 - Enrichment Distribution by Quality Tier")
-        plot_fig12_variant_density_heatmap(df)
+        print("Fig 12 — Interface Variant Density vs Quality")
+        plot_fig12_variant_density(df, density_mode=args.density)
         figures_generated += 1
 
-        print("Fig 13 - Interface Variant Density vs Quality")
-        plot_fig13_variant_burden(df, density_mode=args.density)
-        figures_generated += 1
-
-    # Phase E: Pathway coherence (Fig 14)
-    if col_flags.get('has_pathway_data', False):
-        print("Fig 14 - Pathway Functional Coherence")
-        plot_fig14_pathway_coherence(df)
-        figures_generated += 1
-
-    # Phase E: Disease enrichment (Fig 15)
-    if col_flags.get('has_disease_data', False):
-        print("Fig 15 - Disease Enrichment by Tier")
-        plot_fig15_disease_enrichment(df)
-        figures_generated += 1
-
-    # Fig 16 removed (null result p=0.270)
-
-    # Phase E: Pathway-level network (Fig 16)
-    if col_flags.get('has_pathway_data', False):
-        print("Fig 16 - Pathway-Level Network")
-        plot_fig16_pathway_network(df)
-        figures_generated += 1
-
-    # Phase D: Stability cross-validation (Fig 17)
+    # Stability cross-validation (requires --stability + --protvar)
     if col_flags.get('has_stability_data', False):
-        print("Fig 17 - Stability Predictor Cross-Validation")
-        plot_fig17_stability_crossvalidation(df)
+        print("Fig 13 — Stability Predictor Cross-Validation")
+        plot_fig13_stability_crossvalidation(df)
         figures_generated += 1
 
-    # Phase B: Clustering validation (Fig 18)
-    if col_flags.get('has_clustering_data', False) and 'complex_type' in df.columns:
-        print("Fig 18 - Sequence Clustering Validation")
-        plot_fig18_clustering_validation(df)
+    # Disease enrichment (requires --disease)
+    if col_flags.get('has_disease_data', False):
+        print("Fig 14 — Disease Enrichment by Tier")
+        plot_fig14_disease_enrichment(df)
         figures_generated += 1
 
-    # Prediction quality paradox (Fig 19) — requires variants + pathways
+    # Pathway-level network (requires --pathways)
+    if col_flags.get('has_pathway_data', False):
+        print("Fig 15 — Pathway-Level Network")
+        plot_fig15_pathway_network(df)
+        figures_generated += 1
+
+    # Prediction quality paradox (requires --variants + --pathways)
     if col_flags.get('has_paradox_data', False):
-        print("Fig 19 - Prediction Quality Paradox")
-        plot_fig19_prediction_quality_paradox(df)
+        print("Fig 16 — Prediction Quality Paradox")
+        plot_fig16_prediction_quality_paradox(df)
         figures_generated += 1
 
     # On-demand: Per-complex PAE heatmaps
@@ -3682,7 +3252,7 @@ def main() -> None:
                     plot_pae_matrix(pkl_path, models_dir)
             else:
                 print(f"\nNo .pkl files found in {models_dir}")
-                
+
     # Summary
     print(f"\n{'=' * 60}")
     print(f"  Generated {figures_generated} figures. Saved to {OUTPUT_DIR}")

@@ -138,7 +138,7 @@ The pipeline produces a 25-column base CSV, progressively expandable to 121 colu
 
 **toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, and resume from interruption. Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). Implements 2 quality classification schemes.
 
-**visualise_results.py** - Generates up to 19 figures with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`).
+**visualise_results.py** - Generates up to 16 figures (+ 1b supplementary) with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`).
 
 #### Database & Enrichment
 
@@ -164,7 +164,7 @@ The pipeline produces a 25-column base CSV, progressively expandable to 121 colu
 
 **disease_annotations.py** - Annotates proteins with UniProt disease associations, PTM sites (phosphorylation, ubiquitination, glycosylation, lipidation), GO terms, and drug target status (`--disease`). Offline-first via streaming XML parsing of reviewed human entries, with API fallback for missing proteins.
 
-**pathway_network.py** - Maps proteins to Reactome pathways and runs per-pathway PPI enrichment via the STRING API (`--pathways`). Builds NetworkX interaction graphs for network topology analysis (degree, centrality). Generates 3 pathway/disease visualisation figures (Figs 14-16).
+**pathway_network.py** - Maps proteins to Reactome pathways and runs per-pathway PPI enrichment via the STRING API (`--pathways`). Builds NetworkX interaction graphs for network topology analysis (degree, centrality). Generates 2 pathway/disease visualisation figures (Figs 14-15).
 
 #### Structural Visualisation
 
@@ -359,19 +359,16 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 6 | Paradox Spotlight | Violin triptych of paradox complex metrics |
 | 7 | Homo vs Hetero | Architecture comparison of homodimers and heterodimers |
 | 8 | Metric Disagreement | Scatter highlighting complexes with conflicting quality signals |
-| 9 | Correlation & Flags | Metric correlation heatmap with flag landscape |
-| 10 | Chain-Count Profile | Violin + scatter of quality by chain count |
-| 11 | Classified Variant Sankey | Alluvial flow: clinical significance -> structural context (Unknown excluded). Where do clinically significant variants land structurally? |
-| 12 | Enrichment Distribution | Histogram + KDE of interface variant enrichment by quality tier with Wilcoxon signed-rank test vs 1.0 (neutral). Are predicted interfaces under evolutionary constraint? |
-| 13 | Variant Density vs Quality | Interface variant density (per residue) vs composite score scatter with Spearman + partial correlation (size-controlled). Does the confidence metric predict variant biology? |
-| 14 | Pathway Coherence | Pathway complexity histogram + enrichment scatter with per-pathway PPI statistics |
-| 15 | Disease Enrichment | Disease prevalence by quality tier (grouped bars + chi-square) + top 10 diseases stacked bars |
-| 16 | Pathway Network | NetworkX spring layout of top Reactome pathways, coloured by % High-tier complexes |
-| 17 | Stability Cross-Validation | EVE vs AlphaMissense concordance, AlphaMissense vs FoldX DDG, coverage landscape by tier |
-| 18 | Clustering Validation | Homodimer ground truth scatter (shared = total clusters), cluster ratio by quality tier |
-| 19 | Prediction Quality Paradox | 2x2 panel: pathogenic interface variants and PPI density strengthen with quality (top row) while gene constraint and disorder fraction decline (bottom row), revealing systematic AF2-Multimer prediction bias toward ordered protein pairs |
+| 9 | Chain-Count Profile | Violin + scatter of quality by chain count |
+| 10 | Clustering Validation | Homodimer ground truth scatter (shared = total clusters), cluster ratio by quality tier |
+| 11 | Classified Variant Sankey | Alluvial flow: clinical significance → structural context. Where do clinically significant variants land structurally? |
+| 12 | Variant Density | Interface variant density (per residue) vs composite score scatter with Spearman + partial correlation (size-controlled). Does the confidence metric predict variant biology? |
+| 13 | Stability Cross-Validation | EVE vs AlphaMissense concordance, AlphaMissense vs FoldX DDG, coverage landscape by tier |
+| 14 | Disease Enrichment | Disease prevalence by quality tier (grouped bars + chi-square) + top 10 diseases stacked bars |
+| 15 | Pathway Network | NetworkX spring layout of top Reactome pathways, coloured by % High-tier complexes |
+| 16 | Prediction Quality Paradox | 2×2 panel: pathogenic interface variants and PPI density strengthen with quality (top row) while gene constraint and disorder fraction decline (bottom row), revealing systematic AF2-Multimer prediction bias toward ordered protein pairs |
 
-Figures 1-2 are generated from base CSV columns. Figures 3-9 require `--interface --pae` columns. Figure 10 requires the `n_chains` column. Figures 11-13 require variant columns from `--variants`. Figures 14 and 16 require pathway columns from `--pathways`. Figure 15 requires disease columns from `--disease`. Figure 17 requires stability + ProtVar columns from `--stability --protvar`. Figure 18 requires clustering columns from `--clustering`. Figure 19 requires variant + pathway columns from `--variants --pathways`.
+Figures 1–2 are generated from base CSV columns. Figures 3–9 require `--interface --pae` columns. Figure 10 requires clustering columns from `--clustering`. Figures 11–12 require variant columns from `--variants`. Figure 13 requires stability + ProtVar columns from `--stability --protvar`. Figures 14–15 require disease and pathway columns from `--disease --pathways`. Figure 16 requires variant + pathway columns from `--variants --pathways`.
 
 ## Acknowledgements
 Developed by Talhah Zubayer under the supervision of David Burke as part of the MSc Applied Bioinformatics programme at King's College London.
