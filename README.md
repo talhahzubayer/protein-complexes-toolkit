@@ -49,13 +49,13 @@ protein-complexes-toolkit/
 ├── Toolkit_Commands_List.md  # Full CLI command reference (all flags, defaults, examples)
 ├── requirements.txt          # Python dependencies
 ├── .gitignore
-├── data/                         # External databases (not included in repo)
-│    ├── ppi/                     # PPI databases (see "Setting Up Data")
-│    ├── clusters/                # STRING sequence clusters (see "Setting Up Data")
-│    ├── variants/                # Variant databases (see "Setting Up Data")
-│    ├── stability/               # Stability prediction data (see "Setting Up Data")
-│    ├── pathways/                # Disease & pathway databases (see "Setting Up Data")
-│    └── string_api_cache/        # STRING API response cache (auto-generated)
+└── data/                        # External databases (not included in repo)
+    ├── ppi/                     # PPI databases (see "Setting Up Data")
+    ├── clusters/                # STRING sequence clusters (see "Setting Up Data")
+    ├── variants/                # Variant databases (see "Setting Up Data")
+    ├── stability/               # Stability prediction data (see "Setting Up Data")
+    ├── pathways/                # Disease & pathway databases (see "Setting Up Data")
+    └── string_api_cache/        # STRING API response cache (auto-generated)
 ```
 
 ## Installation
