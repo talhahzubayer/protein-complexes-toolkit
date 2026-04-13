@@ -27,6 +27,7 @@ protein-complexes-toolkit/
 ├── disease_annotations.py    # UniProt disease/PTM/GO/drug-target annotation
 ├── pathway_network.py        # Reactome pathway mapping, PPI enrichment, NetworkX networks
 ├── pymol_scripts.py          # PyMOL .pml script generation and py3Dmol fallback
+├── data_registry.py          # Data dependency registry and pre-run validation
 ├── Toolkit_Commands_List.md  # Full CLI command reference (all flags, defaults, examples)
 ├── requirements.txt          # Python dependencies
 ├── .gitignore
@@ -136,7 +137,9 @@ The pipeline produces a 25-column base CSV, progressively expandable to 121 colu
 
 **interface_analysis.py** - 2-phase interface characterisation. Phase 1 derives structural geometry from PDB alone (contact count, interface fractions, symmetry, density, interface vs bulk pLDDT). Phase 2 adds PAE-aware confident contact identification, composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, and resume from interruption. Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). Implements 2 quality classification schemes.
+**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, resume from interruption and implements 2 quality classification schemes.. Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). `--full-pipeline` activates all phases with default data paths and validates all data dependencies before processing starts.
+
+**data_registry.py** - Centralises all data-file path references into a single registry of 18 entries, each recording expected path, source module, constant name, and whether the filename contains a version string. Provides `validate_data_dependencies()` for pre-run checks used by `--full-pipeline`, and a standalone CLI for dependency checking (`python data_registry.py`).
 
 **visualise_results.py** - Generates up to 16 figures (+ 1b supplementary) with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`).
 
@@ -280,7 +283,22 @@ data/
 
 ## Usage
 
-For the complete command reference - including all CLI flags, their defaults, flag dependencies, progressive flag-stacking examples and standalone module CLIs - see **[Toolkit_Commands_List.md](Toolkit_Commands_List.md)**.
+The simplest way to run the full analysis is with `--full-pipeline`, which activates every module using default data paths. It validates that all required data files exist before processing starts, so you get a clear report of anything missing up front rather than a crash mid-run.
+
+```bash
+# Full pipeline — only --dir and -w are needed
+python toolkit.py --full-pipeline --dir <MODELS_DIR> -w 8 --output results.csv
+```
+
+This is equivalent to manually specifying `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with all their default file paths.
+
+You can also check data dependencies independently before starting a run:
+
+```bash
+python data_registry.py
+```
+
+For individual flag control, progressive flag-stacking examples, and standalone module CLIs, see **[Toolkit_Commands_List.md](Toolkit_Commands_List.md)**.
 
 
 ## Input Data Format

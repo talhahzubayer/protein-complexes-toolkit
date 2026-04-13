@@ -1329,6 +1329,11 @@ Examples:
                         choices=["High", "Medium", "Low"],
                         help="Minimum quality tier for PyMOL script generation. "
                              "Default: High.")
+    parser.add_argument("--full-pipeline", action="store_true",
+                        help="Activate all pipeline phases (A-F) using default "
+                             "data paths. Only --dir and optionally --workers "
+                             "are required. Validates all data files exist "
+                             "before processing starts.")
     return parser
 
 
@@ -1336,6 +1341,38 @@ def main() -> None:
     """Run the batch processing pipeline."""
     parser = build_argument_parser()
     args = parser.parse_args()
+
+    # ── Full-pipeline expansion ──────────────────────────────────────
+    if args.full_pipeline:
+        from data_registry import validate_data_dependencies, get_default_path
+
+        # Set all phase flags to their default-path sentinels
+        args.interface = True
+        args.pae = True
+        args.enrich = get_default_path("string_aliases")
+        args.databases = str(Path(get_default_path("string_links")).parent)
+        args.clustering = args.clustering or "string"
+        if args.variants is None:
+            args.variants = "__default__"
+        if args.stability is None:
+            args.stability = "__default__"
+        if args.protvar is None:
+            args.protvar = "__default__"
+        if args.disease is None:
+            args.disease = "__default__"
+        args.pathways = True
+        args.pymol = True
+        args.checkpoint = True
+
+        # Pre-flight: validate all data files exist
+        print("Full pipeline mode: validating data dependencies...",
+              file=sys.stderr)
+        errors = validate_data_dependencies(verbose=True)
+        if errors:
+            print(f"\nError: {len(errors)} required data file(s) missing. "
+                  "Cannot start --full-pipeline.", file=sys.stderr)
+            sys.exit(1)
+        print(file=sys.stderr)
 
     # Validate flags
     if args.pae and not args.interface:

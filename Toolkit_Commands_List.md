@@ -49,6 +49,7 @@ The main analysis pipeline (`toolkit.py`) processes AlphaFold2-Multimer predicti
 | `--disease` | `--enrich` |
 | `--pathways` | `--enrich` |
 | `--pymol` | `--interface --pae` |
+| `--full-pipeline` | `--dir` only (activates all flags with default data paths) |
 
 ### Flag Defaults
 
@@ -65,6 +66,7 @@ The main analysis pipeline (`toolkit.py`) processes AlphaFold2-Multimer predicti
 | `--disease <path>` | `data/pathways/` (when `--disease` is used without a path) |
 | `--pymol-output` | `pymol_scripts/` |
 | `--pymol-min-tier` | `High` |
+| `--full-pipeline` | Activates `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with module defaults |
 
 ### Progressive Command Build-up
 
@@ -139,6 +141,9 @@ python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --e
 
 # Full pipeline: ALL features (enrichment + databases + clustering + variants + stability + protvar + disease + pathways + PyMOL)
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --enrich <ALIASES_FILE> --databases <PPI_DIR> --clustering --variants --stability --protvar --disease --pathways --pymol --export-interfaces <INTERFACES_JSONL> -w 8 --checkpoint
+
+# Full pipeline shorthand (--full-pipeline activates all flags with default data paths, validates all data files exist before starting)
+python toolkit.py --full-pipeline --dir <MODELS_DIR> -w 8 --output <OUTPUT_CSV>
 
 # Clustering without API calls (offline-only, skips STRING homology scores)
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --enrich <ALIASES_FILE> --clustering --no-api
@@ -574,3 +579,35 @@ pymol <PYMOL_OUTPUT>/A0A0B4J2C3_P24534.pml
 # Headless batch rendering (requires --pymol-render or --render)
 pymol -c <PYMOL_OUTPUT>/A0A0B4J2C3_P24534.pml
 ```
+
+---
+
+## 13. Data Dependency Validation
+
+Pre-flight check that all required data files exist before starting the pipeline. Used automatically by `--full-pipeline`, or run standalone to diagnose missing files.
+
+```bash
+# Validate all data dependencies (all groups)
+python data_registry.py
+
+# Validate specific groups only
+python data_registry.py --groups ppi-databases variant-mapping
+
+# List all files with version strings in their names (risk on data updates)
+python data_registry.py --versioned
+
+# Override project root directory
+python data_registry.py --root /path/to/project
+```
+
+### Available Groups
+
+| Group | Description |
+|---|---|
+| `ppi-databases` | STRING links/aliases, BioGRID, HuRI, HuMAP |
+| `clustering` | STRING protein clusters |
+| `variant-mapping` | UniProt variants, ClinVar, ExAC constraint |
+| `eve-stability` | EVE ID mapping + score CSVs |
+| `offline-scoring` | AlphaMissense + AFDB FoldX export |
+| `disease-pathways` | UniProt XML, Reactome mappings + hierarchy |
+| `pymol` | PyMOL output directory (auto-created) |
