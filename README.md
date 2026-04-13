@@ -6,6 +6,24 @@ MSc Applied Bioinformatics Research Project - King's College London
 
 **Student:** Talhah Zubayer | **Supervisor:** David Burke
 
+## Usage
+
+The simplest way to run the full analysis is with `--full-pipeline`, which activates every module using default data paths. It validates that all required data files exist before processing starts, so you get a clear report of anything missing up front rather than a crash mid-run.
+
+```bash
+# Full pipeline — only --dir and -w are needed
+python toolkit.py --full-pipeline --dir <MODELS_DIR> -w 8 --output results.csv
+```
+
+This is equivalent to manually specifying `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with all their default file paths.
+
+You can also check data dependencies independently before starting a run:
+
+```bash
+python data_registry.py
+```
+
+For individual flag control, progressive flag-stacking examples, and standalone module CLIs, see **[Toolkit_Commands_List.md](Toolkit_Commands_List.md)**.
 
 ## Repository Structure
 
@@ -279,26 +297,6 @@ data/
     ├── UniProt2Reactome_All_Levels.txt         # UniProt-Reactome mappings (~110 MB)
     └── ReactomePathwaysRelation.txt            # Reactome pathway hierarchy (~611 KB)
 ```
-
-
-## Usage
-
-The simplest way to run the full analysis is with `--full-pipeline`, which activates every module using default data paths. It validates that all required data files exist before processing starts, so you get a clear report of anything missing up front rather than a crash mid-run.
-
-```bash
-# Full pipeline — only --dir and -w are needed
-python toolkit.py --full-pipeline --dir <MODELS_DIR> -w 8 --output results.csv
-```
-
-This is equivalent to manually specifying `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with all their default file paths.
-
-You can also check data dependencies independently before starting a run:
-
-```bash
-python data_registry.py
-```
-
-For individual flag control, progressive flag-stacking examples, and standalone module CLIs, see **[Toolkit_Commands_List.md](Toolkit_Commands_List.md)**.
 
 
 ## Input Data Format
