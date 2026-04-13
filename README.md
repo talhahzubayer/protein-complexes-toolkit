@@ -58,6 +58,112 @@ protein-complexes-toolkit/
 │    └── string_api_cache/        # STRING API response cache (auto-generated)
 ```
 
+## Installation
+
+### Prerequisites
+
+- Python 3.13+
+- pip
+
+### Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> **Note:** JAX is **not** required. The toolkit uses module-level mocking to read AlphaFold2 PKL files without a JAX installation.
+
+
+## Setting Up Data
+
+The `data/` directory is **not included** in this repository due to the large size of external database files. These files are required for Phase A (Database Ingestion & ID Mapping) and later phases. To set up:
+
+1. Create the directory structure:
+```bash
+mkdir -p data/ppi data/clusters data/variants data/stability data/pathways
+```
+
+2. Download the following files into `data/ppi/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `9606.protein.links.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.protein.links.v12.0.txt.gz`, decompress |
+| `9606.protein.aliases.v12.0.txt` | STRING | Same page - download `9606.protein.aliases.v12.0.txt.gz`, decompress |
+| `BIOGRID-ALL-5.0.253.tab3.txt` | BioGRID | [downloads.thebiogrid.org](https://downloads.thebiogrid.org/File/BioGRID/Release-Archive/BIOGRID-5.0.253/BIOGRID-ALL-5.0.253.tab3.zip) - extract the `.tab3.txt` file from the zip |
+| `HuRI.tsv` | HuRI | [interactome-atlas.org/download](https://interactome-atlas.org/download) - download `HuRI.tsv` |
+| `humap2_ppis_ACC_20200821.pairsWprob` | HuMAP 2.0 | [humap2.proteincomplexes.org/download](https://humap2.proteincomplexes.org/download) - download "Protein Interaction Network with probability scores (Uniprot gzip)", decompress |
+
+3. Download the STRING protein clusters file into `data/clusters/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `9606.clusters.proteins.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.clusters.proteins.v12.0.txt.gz`, decompress |
+
+4. Download variant database files into `data/variants/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `homo_sapiens_variation.txt` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/variants/](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/variants/) - download `homo_sapiens_variation.txt.gz`, decompress |
+| `variant_summary.txt` | ClinVar | [ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) - download `variant_summary.txt.gz`, decompress |
+| `forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt` | ExAC/gnomAD | [gnomad.broadinstitute.org/downloads](https://gnomad.broadinstitute.org/downloads) - under "Gene constraint scores TSV", download and decompress |
+
+5. Download EVE variant effect scores and UniProt ID mapping into `data/stability/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `EVE_all_data/` (3,211 CSVs) | EVE | [evemodel.org/download/bulk](https://evemodel.org/download/bulk) - download "All variant files" CSV archive, extract into `data/stability/` |
+| `HUMAN_9606_idmapping.dat` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/) - download `HUMAN_9606_idmapping.dat.gz`, decompress into `data/stability/` |
+
+> **Note:** The EVE bulk download page offers several archives (MSAs, VCF files, PRC/ROC curves). Only the **variant files** archive is needed - the others are model training inputs or diagnostic plots not used by the pipeline. The `HUMAN_9606_idmapping.dat` file maps UniProt accessions to entry names (e.g. `P61981` -> `1433G_HUMAN`) which are used as EVE CSV filenames.
+
+6. Download AlphaMissense and AFDB monomeric FoldX data into `data/stability/` (required for `--protvar`):
+
+| File | Source | Download |
+|------|--------|----------|
+| `AlphaMissense_aa_substitutions.tsv` | Zenodo | [zenodo.org/records/10813168](https://zenodo.org/records/10813168) - download `AlphaMissense_aa_substitutions.tsv.gz`, decompress into `data/stability/` |
+| `afdb_foldx_export_20250210.csv` | EBI | [ftp.ebi.ac.uk/pub/databases/ProtVar/predictions/stability/](https://ftp.ebi.ac.uk/pub/databases/ProtVar/predictions/stability/) - Pre-computed monomeric FoldX DDG + pLDDT for all human protein positions. Download `2025.02.10_foldx_energy.csv.gz`, decompress into `data/stability/` |
+
+> **Note:** These 2 files (~14 GB total) provide offline AlphaMissense pathogenicity scores and monomeric FoldX stability predictions. They replace the previous ProtVar API dependency, eliminating the need for internet access during `--protvar` scoring.
+
+7. Download disease and pathway annotation databases into `data/pathways/`:
+
+| File | Source | Download |
+|------|--------|----------|
+| `uniprot_sprot_human.xml` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/knowledgebase/taxonomic_divisions/](https://ftp.uniprot.org/pub/databases/uniprot/knowledgebase/taxonomic_divisions/) - download `uniprot_sprot_human.xml.gz`, decompress |
+| `UniProt2Reactome_All_Levels.txt` | Reactome | [reactome.org/download/current/](https://reactome.org/download/current/) - download `UniProt2Reactome_All_Levels.txt` |
+| `ReactomePathwaysRelation.txt` | Reactome | [reactome.org/download/current/](https://reactome.org/download/current/) - download `ReactomePathwaysRelation.txt` |
+
+> **Note:** The UniProt XML file (~1.02 GB) contains all reviewed human protein entries with disease, PTM, GO, and drug target annotations. The Reactome files provide pathway-to-protein mappings (~110 MB) and pathway hierarchy (~611 KB) for network analysis.
+
+8. Verify the directory contents:
+```
+data/
+├── ppi/
+│   ├── 9606.protein.links.v12.0.txt          (~616 MB)
+│   ├── 9606.protein.aliases.v12.0.txt        (~195 MB)
+│   ├── BIOGRID-ALL-5.0.253.tab3.txt          (~1.48 GB)
+│   ├── HuRI.tsv                              (~1.6 MB)
+│   └── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
+├── clusters/
+│   └── 9606.clusters.proteins.v12.0.txt      (~40 MB)
+├── variants/
+│   ├── homo_sapiens_variation.txt             (~2.2 GB)
+│   ├── variant_summary.txt                    (~1.1 GB)
+│   └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
+├── stability/
+│   ├── HUMAN_9606_idmapping.dat               # UniProt ID mapping (~145 MB)
+│   ├── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
+│   │   ├── 1433G_HUMAN.csv
+│   │   ├── 1433Z_HUMAN.csv
+│   │   └── ...
+│   ├── AlphaMissense_aa_substitutions.tsv     # AlphaMissense pathogenicity (~6.3 GB)
+│   └── afdb_foldx_export_20250210.csv         # AFDB FoldX DDG + pLDDT (~7.7 GB)
+└─── pathways/
+    ├── uniprot_sprot_human.xml                 # UniProt reviewed human entries (~1.02 GB)
+    ├── UniProt2Reactome_All_Levels.txt         # UniProt-Reactome mappings (~110 MB)
+    └── ReactomePathwaysRelation.txt            # Reactome pathway hierarchy (~611 KB)
+```
+
 
 ## Pipeline Architecture
 
@@ -190,113 +296,6 @@ The pipeline produces a 25-column base CSV, progressively expandable to 121 colu
 #### Structural Visualisation
 
 **pymol_scripts.py** - Generates scene-managed PyMOL `.pml` scripts with layered visualisation: chain colouring (10-chain palette, homodimer transparency), pLDDT confidence bands, interface residue sticks, pathogenicity-aware variant spheres coloured by structural context, and AlphaMissense transparency overlay (`--pymol`, `--pymol-min-tier`, `--pymol-render`). Includes metadata and biological annotation comments, pre-computed interface residue lookup to avoid redundant PDB I/O, and a `py3Dmol` fallback for in-notebook rendering.
-
-
-## Installation
-
-### Prerequisites
-
-- Python 3.13+
-- pip
-
-### Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-> **Note:** JAX is **not** required. The toolkit uses module-level mocking to read AlphaFold2 PKL files without a JAX installation.
-
-
-## Setting Up Data
-
-The `data/` directory is **not included** in this repository due to the large size of external database files. These files are required for Phase A (Database Ingestion & ID Mapping) and later phases. To set up:
-
-1. Create the directory structure:
-```bash
-mkdir -p data/ppi data/clusters data/variants data/stability data/pathways
-```
-
-2. Download the following files into `data/ppi/`:
-
-| File | Source | Download |
-|------|--------|----------|
-| `9606.protein.links.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.protein.links.v12.0.txt.gz`, decompress |
-| `9606.protein.aliases.v12.0.txt` | STRING | Same page - download `9606.protein.aliases.v12.0.txt.gz`, decompress |
-| `BIOGRID-ALL-5.0.253.tab3.txt` | BioGRID | [downloads.thebiogrid.org](https://downloads.thebiogrid.org/File/BioGRID/Release-Archive/BIOGRID-5.0.253/BIOGRID-ALL-5.0.253.tab3.zip) - extract the `.tab3.txt` file from the zip |
-| `HuRI.tsv` | HuRI | [interactome-atlas.org/download](https://interactome-atlas.org/download) - download `HuRI.tsv` |
-| `humap2_ppis_ACC_20200821.pairsWprob` | HuMAP 2.0 | [humap2.proteincomplexes.org/download](https://humap2.proteincomplexes.org/download) - download "Protein Interaction Network with probability scores (Uniprot gzip)", decompress |
-
-3. Download the STRING protein clusters file into `data/clusters/`:
-
-| File | Source | Download |
-|------|--------|----------|
-| `9606.clusters.proteins.v12.0.txt` | STRING | [string-db.org/cgi/download](https://string-db.org/cgi/download?sessionId=bqpmZGj7RlXV&species_text=Homo+sapiens) - select *Homo sapiens*, download `9606.clusters.proteins.v12.0.txt.gz`, decompress |
-
-4. Download variant database files into `data/variants/`:
-
-| File | Source | Download |
-|------|--------|----------|
-| `homo_sapiens_variation.txt` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/variants/](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/variants/) - download `homo_sapiens_variation.txt.gz`, decompress |
-| `variant_summary.txt` | ClinVar | [ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) - download `variant_summary.txt.gz`, decompress |
-| `forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt` | ExAC/gnomAD | [gnomad.broadinstitute.org/downloads](https://gnomad.broadinstitute.org/downloads) - under "Gene constraint scores TSV", download and decompress |
-
-5. Download EVE variant effect scores and UniProt ID mapping into `data/stability/`:
-
-| File | Source | Download |
-|------|--------|----------|
-| `EVE_all_data/` (3,211 CSVs) | EVE | [evemodel.org/download/bulk](https://evemodel.org/download/bulk) - download "All variant files" CSV archive, extract into `data/stability/` |
-| `HUMAN_9606_idmapping.dat` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/) - download `HUMAN_9606_idmapping.dat.gz`, decompress into `data/stability/` |
-
-> **Note:** The EVE bulk download page offers several archives (MSAs, VCF files, PRC/ROC curves). Only the **variant files** archive is needed - the others are model training inputs or diagnostic plots not used by the pipeline. The `HUMAN_9606_idmapping.dat` file maps UniProt accessions to entry names (e.g. `P61981` -> `1433G_HUMAN`) which are used as EVE CSV filenames.
-
-6. Download AlphaMissense and AFDB monomeric FoldX data into `data/stability/` (required for `--protvar`):
-
-| File | Source | Download |
-|------|--------|----------|
-| `AlphaMissense_aa_substitutions.tsv` | Zenodo | [zenodo.org/records/10813168](https://zenodo.org/records/10813168) - download `AlphaMissense_aa_substitutions.tsv.gz`, decompress into `data/stability/` |
-| `afdb_foldx_export_20250210.csv` | EBI | [ftp.ebi.ac.uk/pub/databases/ProtVar/predictions/stability/](https://ftp.ebi.ac.uk/pub/databases/ProtVar/predictions/stability/) - Pre-computed monomeric FoldX DDG + pLDDT for all human protein positions. Download `2025.02.10_foldx_energy.csv.gz`, decompress into `data/stability/` |
-
-> **Note:** These 2 files (~14 GB total) provide offline AlphaMissense pathogenicity scores and monomeric FoldX stability predictions. They replace the previous ProtVar API dependency, eliminating the need for internet access during `--protvar` scoring.
-
-7. Download disease and pathway annotation databases into `data/pathways/`:
-
-| File | Source | Download |
-|------|--------|----------|
-| `uniprot_sprot_human.xml` | UniProt | [ftp.uniprot.org/pub/databases/uniprot/knowledgebase/taxonomic_divisions/](https://ftp.uniprot.org/pub/databases/uniprot/knowledgebase/taxonomic_divisions/) - download `uniprot_sprot_human.xml.gz`, decompress |
-| `UniProt2Reactome_All_Levels.txt` | Reactome | [reactome.org/download/current/](https://reactome.org/download/current/) - download `UniProt2Reactome_All_Levels.txt` |
-| `ReactomePathwaysRelation.txt` | Reactome | [reactome.org/download/current/](https://reactome.org/download/current/) - download `ReactomePathwaysRelation.txt` |
-
-> **Note:** The UniProt XML file (~1.02 GB) contains all reviewed human protein entries with disease, PTM, GO, and drug target annotations. The Reactome files provide pathway-to-protein mappings (~110 MB) and pathway hierarchy (~611 KB) for network analysis.
-
-8. Verify the directory contents:
-```
-data/
-├── ppi/
-│   ├── 9606.protein.links.v12.0.txt          (~616 MB)
-│   ├── 9606.protein.aliases.v12.0.txt        (~195 MB)
-│   ├── BIOGRID-ALL-5.0.253.tab3.txt          (~1.48 GB)
-│   ├── HuRI.tsv                              (~1.6 MB)
-│   └── humap2_ppis_ACC_20200821.pairsWprob   (~439 MB)
-├── clusters/
-│   └── 9606.clusters.proteins.v12.0.txt      (~40 MB)
-├── variants/
-│   ├── homo_sapiens_variation.txt             (~2.2 GB)
-│   ├── variant_summary.txt                    (~1.1 GB)
-│   └── forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt  (~2 MB)
-├── stability/
-│   ├── HUMAN_9606_idmapping.dat               # UniProt ID mapping (~145 MB)
-│   ├── EVE_all_data/                          # 3,211 per-protein EVE score CSVs (~10 GB)
-│   │   ├── 1433G_HUMAN.csv
-│   │   ├── 1433Z_HUMAN.csv
-│   │   └── ...
-│   ├── AlphaMissense_aa_substitutions.tsv     # AlphaMissense pathogenicity (~6.3 GB)
-│   └── afdb_foldx_export_20250210.csv         # AFDB FoldX DDG + pLDDT (~7.7 GB)
-└─── pathways/
-    ├── uniprot_sprot_human.xml                 # UniProt reviewed human entries (~1.02 GB)
-    ├── UniProt2Reactome_All_Levels.txt         # UniProt-Reactome mappings (~110 MB)
-    └── ReactomePathwaysRelation.txt            # Reactome pathway hierarchy (~611 KB)
-```
 
 
 ## Input Data Format
