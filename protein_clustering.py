@@ -379,7 +379,22 @@ def annotate_results_with_clustering(
     except ImportError:
         iterator = results
 
+    # Lazy import avoids circular dependency at module load time.
+    from toolkit import is_annotatable
+
     for row in iterator:
+        # Non-human rows: STRING clusters are human-scoped (9606), so skip
+        # the lookup and leave all clustering columns empty.
+        if not is_annotatable(row):
+            row['sequence_cluster_ids'] = ''
+            row['sequence_cluster_count'] = 0
+            row['shared_cluster_ids'] = ''
+            row['shared_cluster_count'] = 0
+            row['homologous_pairs'] = ''
+            row['n_homologous_pairs'] = 0
+            row['homology_bitscore'] = ''
+            continue
+
         # Cluster membership annotation
         annotate_pair_clusters(row, uniprot_index)
 

@@ -1007,7 +1007,24 @@ def annotate_results_with_pathways(
         if exp and exp > 0:
             global_ppi_ratio = f"{obs / exp:.2f}"
 
+    from toolkit import is_annotatable
+
     for row in results:
+        # Skip non-human rows: leave all pathway columns empty so the row
+        # stays in the CSV but carries no misleading (empty-dict-derived) values.
+        if not is_annotatable(row):
+            row["reactome_pathways_a"] = ""
+            row["reactome_pathways_b"] = ""
+            row["n_reactome_pathways_a"] = 0
+            row["n_reactome_pathways_b"] = 0
+            row["n_shared_pathways"] = 0
+            row["pathway_quality_context"] = ""
+            row["ppi_enrichment_pvalue"] = ""
+            row["ppi_enrichment_ratio"] = ""
+            row["network_degree_a"] = ""
+            row["network_degree_b"] = ""
+            continue
+
         protein_a = row.get("protein_a", "")
         protein_b = row.get("protein_b", "")
         base_a = protein_a.split("-")[0] if "-" in protein_a else protein_a

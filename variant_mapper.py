@@ -1,10 +1,7 @@
 """
 Variant mapping to AlphaFold2-predicted protein-protein complex structures.
-
-Maps genetic variants from UniProt/ClinVar/ExAC databases onto predicted
-complex structures, classifying each variant by structural context
-(interface_core, interface_rim, surface_non_interface, buried_core) and
-computing enrichment of pathogenic variants at interaction interfaces.
+Maps genetic variants from UniProt/ClinVar/ExAC databases onto predicted complex structures. 
+Classifies each variant by structural context (interface_core, interface_rim, surface_non_interface, buried_core) and computes enrichment of pathogenic variants at interaction interfaces.
 
 Architecture:
     - Offline-first: reads flat variant database files as primary data
@@ -35,7 +32,6 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Optional, Union
-
 import numpy as np
 import pandas as pd
 
@@ -52,8 +48,7 @@ try:
 except ImportError:
     _HAS_BIOTITE = False
 
-
-# ── Constants ────────────────────────────────────────────────────────
+#--------------------------------Constants---------------------------------------------
 
 # Default file paths
 DEFAULT_VARIANTS_DIR = Path(__file__).parent / "data" / "variants"
@@ -61,7 +56,7 @@ UNIPROT_VARIANTS_FILENAME = "homo_sapiens_variation.txt"
 CLINVAR_VARIANTS_FILENAME = "variant_summary.txt"
 EXAC_CONSTRAINT_FILENAME = "forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt"
 
-# UniProt file format: header at line 162 (0-indexed), separator at 163, data from 164
+# UniProt file format: header at line 162 (0-indexed), separator at 163 and data from 164
 UNIPROT_SKIP_ROWS = 164  # skip header block + column header + separator
 UNIPROT_COLUMN_NAMES = [
     'gene_name', 'accession', 'variant_aa_change', 'source_db_id',
@@ -99,7 +94,7 @@ CONTEXT_UNMAPPED = 'unmapped'
 # SASA classification threshold (relative solvent accessibility)
 SASA_BURIED_THRESHOLD = 0.25  # RSA < 25% = buried
 
-# Standard Gly-X-Gly max ASA values (Tien et al. 2013, Table 1)
+# Standard Gly-X-Gly max ASA values (Tien et al (PMC3836772), 2013 - Table 1)
 # Used for normalising absolute SASA to relative SASA
 MAX_ASA = {
     'ALA': 129.0, 'ARG': 274.0, 'ASN': 195.0, 'ASP': 193.0, 'CYS': 167.0,
@@ -110,7 +105,7 @@ MAX_ASA = {
 MAX_ASA_DEFAULT = 200.0  # fallback for non-standard residues
 
 # Chunked parsing size
-CHUNK_SIZE = 500_000
+CHUNK_SIZE = 500_000 
 
 # HGVS amino acid change pattern: p.Lys2Glu, p.Arg123Ter, p.Met1Val
 HGVS_PATTERN = re.compile(r'p\.([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2,3})')
@@ -144,25 +139,18 @@ except ImportError:
         'TER': '*',
     }
 
-
-# ── Section 1: Parsing ──────────────────────────────────────────────
+#-------------------------------------Section 1: Parsing--------------------------------------------
 
 def parse_hgvs_position(hgvs: str) -> Optional[tuple[str, int, str]]:
     """Extract amino acid change from HGVS protein notation.
-
-    Parses HGVS format like 'p.Lys2Glu' into (ref_aa_1letter, position, alt_aa_1letter).
-    Supports standard amino acids and Ter (stop codon).
-
+    Parses HGVS format like 'p.Lys2Glu' into (ref_aa_1letter, position, alt_aa_1letter). Supports standard amino acids and Ter (stop codon).
     Args:
         hgvs: HGVS protein notation string (e.g. 'p.Lys2Glu', 'p.Arg123Ter').
-
     Returns:
-        Tuple of (ref_aa, position, alt_aa) where amino acids are 1-letter codes
-        and position is the integer residue number. Returns None if unparseable.
+        Tuple of (ref_aa, position, alt_aa) where amino acids are 1-letter codes and position is the integer residue number. Returns None if unparseable.
     """
     if not hgvs or not isinstance(hgvs, str):
         return None
-
     match = HGVS_PATTERN.match(hgvs.strip())
     if not match:
         return None
@@ -185,41 +173,25 @@ def parse_hgvs_position(hgvs: str) -> Optional[tuple[str, int, str]]:
 
     return (ref_1, position, alt_1)
 
-
-def load_uniprot_variants(
-    filepath: Union[str, Path],
-    accessions: frozenset[str],
-    consequence_types: frozenset[str] = RELEVANT_CONSEQUENCES,
-    chunk_size: int = CHUNK_SIZE,
-    verbose: bool = False,
-) -> pd.DataFrame:
+def load_uniprot_variants(filepath: Union[str, Path], accessions: frozenset[str], consequence_types: frozenset[str] = RELEVANT_CONSEQUENCES, chunk_size: int = CHUNK_SIZE, verbose: bool = False) -> pd.DataFrame:
     """Load and filter UniProt variant file using chunked streaming.
-
-    Reads the large homo_sapiens_variation.txt file in chunks, retaining
-    only rows for the specified UniProt accessions and consequence types.
+    Reads the large homo_sapiens_variation.txt file in chunks, retaining only rows for the specified UniProt accessions and consequence types.
     Parses HGVS notation to extract integer positions and amino acid changes.
-
     Args:
         filepath: Path to homo_sapiens_variation.txt.
         accessions: Set of UniProt accessions to retain (e.g. {'P24534', 'A0A0B4J2C3'}).
         consequence_types: Consequence types to retain. Defaults to RELEVANT_CONSEQUENCES.
         chunk_size: Number of rows per chunk for streaming.
         verbose: Print progress to stderr.
-
     Returns:
-        DataFrame with columns: accession, position, ref_aa, alt_aa, rsid,
-        consequence, clinical_significance, phenotype, evidence.
+        DataFrame with columns: accession, position, ref_aa, alt_aa, rsid, consequence, clinical_significance, phenotype, evidence.
         Deduplicated by (accession, position, alt_aa).
     """
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"UniProt variants file not found: {filepath}")
-
     if not accessions:
-        return pd.DataFrame(columns=[
-            'accession', 'position', 'ref_aa', 'alt_aa', 'rsid',
-            'consequence', 'clinical_significance', 'phenotype', 'evidence',
-        ])
+        return pd.DataFrame(columns=['accession', 'position', 'ref_aa', 'alt_aa', 'rsid', 'consequence', 'clinical_significance', 'phenotype', 'evidence'])
 
     # Determine how many lines to skip: find the separator line (starts with ___)
     skip_rows = _detect_uniprot_header_end(filepath)
@@ -247,7 +219,6 @@ def load_uniprot_variants(
         # Filter by accession
         mask = chunk['accession'].isin(accessions)
         filtered = chunk[mask].copy()
-
         if filtered.empty:
             continue
 
@@ -271,11 +242,8 @@ def load_uniprot_variants(
               f"kept {total_rows_kept:,} matching variants", file=sys.stderr)
 
     if not chunks_collected:
-        return pd.DataFrame(columns=[
-            'accession', 'position', 'ref_aa', 'alt_aa', 'rsid',
-            'consequence', 'clinical_significance', 'phenotype', 'evidence',
-        ])
-
+        return pd.DataFrame(columns=['accession', 'position', 'ref_aa', 'alt_aa', 'rsid', 'consequence', 'clinical_significance', 'phenotype', 'evidence'])
+    
     df = pd.concat(chunks_collected, ignore_index=True)
 
     # Parse HGVS to extract position and amino acid changes
@@ -289,38 +257,25 @@ def load_uniprot_variants(
     df['alt_aa'] = parsed.apply(lambda x: x[2])
 
     # Normalise column names
-    df = df.rename(columns={
-        'source_db_id': 'rsid',
-        'consequence_type': 'consequence',
-    })
+    df = df.rename(columns={'source_db_id': 'rsid','consequence_type': 'consequence'})
 
     # Select and order output columns
-    out_cols = [
-        'accession', 'position', 'ref_aa', 'alt_aa', 'rsid',
-        'consequence', 'clinical_significance', 'phenotype', 'evidence',
-    ]
+    out_cols = ['accession', 'position', 'ref_aa', 'alt_aa', 'rsid', 'consequence', 'clinical_significance', 'phenotype', 'evidence']
     df = df[[c for c in out_cols if c in df.columns]]
 
-    # Deduplicate by (accession, position, alt_aa) — same variant from
-    # multiple Ensembl transcripts appears as duplicate rows
+    # Deduplicate by (accession, position, alt_aa) - same variant from multiple Ensembl transcripts appears as duplicate rows
     df = df.drop_duplicates(subset=['accession', 'position', 'alt_aa'], keep='first')
     df = df.reset_index(drop=True)
 
     if verbose:
         print(f"  After dedup: {len(df):,} unique variants", file=sys.stderr)
-
     return df
-
 
 def _detect_uniprot_header_end(filepath: Union[str, Path]) -> int:
     """Detect the number of header lines to skip in UniProt variants file.
-
-    Scans the first 200 lines looking for the separator line (starts with '___').
-    Data starts on the line after the separator.
-
+    Scans the first 200 lines looking for the separator line (starts with '___'). Data starts on the line after the separator.
     Args:
         filepath: Path to UniProt variants file.
-
     Returns:
         Number of lines to skip (header + column header + separator).
     """
@@ -334,26 +289,15 @@ def _detect_uniprot_header_end(filepath: Union[str, Path]) -> int:
     # Fallback for test files with shorter headers
     return UNIPROT_SKIP_ROWS
 
-
-def load_clinvar_variants(
-    filepath: Union[str, Path],
-    rsids: Optional[frozenset[str]] = None,
-    gene_symbols: Optional[frozenset[str]] = None,
-    chunk_size: int = CHUNK_SIZE,
-    verbose: bool = False,
-) -> pd.DataFrame:
+def load_clinvar_variants(filepath: Union[str, Path], rsids: Optional[frozenset[str]] = None, gene_symbols: Optional[frozenset[str]] = None, chunk_size: int = CHUNK_SIZE, verbose: bool = False) -> pd.DataFrame:
     """Load and filter ClinVar variant summary file using chunked streaming.
-
-    Reads variant_summary.txt, filters to GRCh38 assembly (avoiding doubled rows),
-    and optionally filters by rsID or gene symbol.
-
+    Reads variant_summary.txt, filters to GRCh38 assembly (avoiding doubled rows), and optionally filters by rsID or gene symbol.
     Args:
         filepath: Path to variant_summary.txt.
         rsids: Set of rsIDs to filter by (e.g. {'rs100000005'}). Optional.
         gene_symbols: Set of gene symbols to filter by. Optional.
         chunk_size: Number of rows per chunk for streaming.
         verbose: Print progress to stderr.
-
     Returns:
         DataFrame with columns: rsid, gene_symbol, clinvar_significance,
         review_status, n_submitters, phenotype_list, origin.
@@ -365,11 +309,7 @@ def load_clinvar_variants(
     if verbose:
         print(f"  Loading ClinVar from: {filepath.name}", file=sys.stderr)
 
-    use_cols = [
-        '#AlleleID', 'GeneSymbol', 'ClinicalSignificance', 'RS# (dbSNP)',
-        'ReviewStatus', 'NumberSubmitters', 'PhenotypeList', 'Origin', 'Assembly',
-    ]
-
+    use_cols = ['#AlleleID', 'GeneSymbol', 'ClinicalSignificance', 'RS# (dbSNP)', 'ReviewStatus', 'NumberSubmitters', 'PhenotypeList', 'Origin', 'Assembly']
     chunks_collected = []
     total_rows_scanned = 0
 
@@ -408,10 +348,7 @@ def load_clinvar_variants(
         chunks_collected.append(filtered)
 
     if not chunks_collected:
-        return pd.DataFrame(columns=[
-            'rsid', 'gene_symbol', 'clinvar_significance',
-            'review_status', 'n_submitters', 'phenotype_list', 'origin',
-        ])
+        return pd.DataFrame(columns=['rsid', 'gene_symbol', 'clinvar_significance', 'review_status', 'n_submitters', 'phenotype_list', 'origin'])
 
     df = pd.concat(chunks_collected, ignore_index=True)
 
@@ -431,10 +368,7 @@ def load_clinvar_variants(
     df.loc[mask_numeric, 'rsid'] = 'rs' + df.loc[mask_numeric, 'rsid']
 
     # Select output columns
-    out_cols = [
-        'rsid', 'gene_symbol', 'clinvar_significance',
-        'review_status', 'n_submitters', 'phenotype_list', 'origin',
-    ]
+    out_cols = ['rsid', 'gene_symbol', 'clinvar_significance', 'review_status', 'n_submitters', 'phenotype_list', 'origin']
     df = df[[c for c in out_cols if c in df.columns]]
 
     # Drop internal columns
@@ -444,63 +378,42 @@ def load_clinvar_variants(
     if verbose:
         print(f"  ClinVar: {len(df):,} GRCh38 variants loaded "
               f"(scanned {total_rows_scanned:,} rows)", file=sys.stderr)
-
     return df
 
-
-def load_exac_constraint(
-    filepath: Union[str, Path],
-    gene_symbols: Optional[frozenset[str]] = None,
-) -> pd.DataFrame:
+def load_exac_constraint(filepath: Union[str, Path], gene_symbols: Optional[frozenset[str]] = None) -> pd.DataFrame:
     """Load ExAC gene-level constraint scores.
-
     Reads the small ExAC pLI/mis_z file directly (not chunked).
-
     Args:
         filepath: Path to ExAC constraint file.
         gene_symbols: Optional set of gene symbols to filter by.
-
     Returns:
         DataFrame with columns: gene, pLI, mis_z, lof_z, syn_z.
     """
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"ExAC constraint file not found: {filepath}")
-
     df = pd.read_csv(filepath, sep='\t', dtype={'gene': str})
-
     if gene_symbols is not None:
         df = df[df['gene'].isin(gene_symbols)]
 
     out_cols = ['gene', 'pLI', 'mis_z', 'lof_z', 'syn_z']
     df = df[[c for c in out_cols if c in df.columns]]
     df = df.reset_index(drop=True)
-
     return df
 
-
-def build_variant_index(
-    variants_df: pd.DataFrame,
-) -> dict[str, list[dict]]:
+def build_variant_index(variants_df: pd.DataFrame) -> dict[str, list[dict]]:
     """Build a fast lookup index from parsed variants DataFrame.
-
     Groups variants by UniProt accession for O(1) per-protein lookup.
-
     Args:
         variants_df: DataFrame from load_uniprot_variants().
-
     Returns:
-        Dict mapping accession to list of variant dicts, each containing:
-        position, ref_aa, alt_aa, rsid, consequence, clinical_significance,
-        phenotype, evidence.
+        Dict mapping accession to list of variant dicts, each containing: position, ref_aa, alt_aa, rsid, consequence, clinical_significance, phenotype, evidence.
     """
     index: dict[str, list[dict]] = {}
-
     for _, row in variants_df.iterrows():
         acc = row.get('accession', '')
         if not acc:
             continue
-
         variant = {
             'position': int(row['position']),
             'ref_aa': str(row.get('ref_aa', '')),
@@ -511,25 +424,14 @@ def build_variant_index(
             'phenotype': str(row.get('phenotype', '')),
             'evidence': str(row.get('evidence', '')),
         }
-
         if acc not in index:
             index[acc] = []
         index[acc].append(variant)
-
     return index
 
-
-def enrich_with_clinvar(
-    variant_index: dict[str, list[dict]],
-    clinvar_df: pd.DataFrame,
-    verbose: bool = False,
-) -> None:
+def enrich_with_clinvar(variant_index: dict[str, list[dict]], clinvar_df: pd.DataFrame, verbose: bool = False) -> None:
     """Enrich variant index with ClinVar review details (in-place).
-
-    Merges ClinVar review_status and n_submitters onto matching variants
-    by rsID. Also upgrades clinical_significance if ClinVar provides a
-    more specific classification.
-
+    Merges ClinVar review_status and n_submitters onto matching variants by rsID. Also upgrades clinical_significance if ClinVar provides a more specific classification.
     Args:
         variant_index: Dict from build_variant_index(), modified in-place.
         clinvar_df: DataFrame from load_clinvar_variants().
@@ -550,34 +452,25 @@ def enrich_with_clinvar(
             }
 
     enriched_count = 0
-    for acc, variants in variant_index.items():
+    for _, variants in variant_index.items():
         for var in variants:
             rsid = var.get('rsid', '')
             if rsid in clinvar_lookup:
                 var.update(clinvar_lookup[rsid])
                 enriched_count += 1
-
     if verbose:
         print(f"  ClinVar enrichment: {enriched_count:,} variants matched "
               f"from {len(clinvar_lookup):,} ClinVar records", file=sys.stderr)
 
+#-------------------------------Section 2: SASA Computation----------------------------------------
 
-# ── Section 2: SASA Computation ──────────────────────────────────────
-
-def compute_residue_sasa(
-    pdb_path: Union[str, Path],
-    chain_id: str,
-) -> dict[int, float]:
+def compute_residue_sasa(pdb_path: Union[str, Path], chain_id: str) -> dict[int, float]:
     """Compute per-residue relative solvent accessibility (RSA) for a chain.
-
-    Uses biotite (Cython-accelerated) when available, falling back to
-    BioPython's Shrake-Rupley algorithm. RSA is normalised by Gly-X-Gly
-    max ASA values (Tien et al. 2013).
-
+    Uses biotite (Cython-accelerated) when available, falling back to BioPython's Shrake-Rupley algorithm. 
+    RSA is normalised by Gly-X-Gly max ASA values (Tien et al. 2013).
     Args:
         pdb_path: Path to PDB file.
         chain_id: Chain identifier (e.g. 'A', 'B').
-
     Returns:
         Dict mapping PDB residue number to RSA (0.0 = fully buried, 1.0+ = fully exposed).
     """
@@ -631,26 +524,16 @@ def compute_residue_sasa(
         abs_sasa = residue.sasa
         max_sasa = MAX_ASA.get(res_name, MAX_ASA_DEFAULT)
         sasa_map[res_num] = abs_sasa / max_sasa if max_sasa > 0 else 0.0
-
     return sasa_map
 
-
-def _compute_sasa_biotite(
-    pdb_path: Union[str, Path],
-    chain_a: str,
-    chain_b: str,
-) -> tuple[dict[int, float], dict[int, float]]:
+def _compute_sasa_biotite(pdb_path: Union[str, Path], chain_a: str, chain_b: str) -> tuple[dict[int, float], dict[int, float]]:
     """Compute per-residue RSA for both chains using biotite (Cython-accelerated).
-
     ~10x faster than BioPython's ShrakeRupley for typical protein complexes.
-    Uses 30 sphere points (r=0.991 correlation with 100-point reference) which
-    is more than sufficient for the binary buried/surface classification.
-
+    Uses 30 sphere points (r=0.991 correlation with 100-point reference) which is more than sufficient for the binary buried/surface classification.
     Args:
         pdb_path: Path to PDB file.
         chain_a: Chain identifier for protein A.
         chain_b: Chain identifier for protein B.
-
     Returns:
         Tuple of (sasa_map_a, sasa_map_b), each mapping residue number to RSA.
     """
@@ -680,25 +563,15 @@ def _compute_sasa_biotite(
             max_sasa = MAX_ASA.get(res_name, MAX_ASA_DEFAULT)
             sasa_map[int(res_num)] = abs_sasa / max_sasa if max_sasa > 0 else 0.0
         sasa_maps.append(sasa_map)
-
     return sasa_maps[0], sasa_maps[1]
 
-
-def compute_residue_sasa_both_chains(
-    pdb_path: Union[str, Path],
-    chain_a: str,
-    chain_b: str,
-) -> tuple[dict[int, float], dict[int, float]]:
+def compute_residue_sasa_both_chains(pdb_path: Union[str, Path], chain_a: str, chain_b: str) -> tuple[dict[int, float], dict[int, float]]:
     """Compute per-residue RSA for both chains in a single parse + compute.
-
-    Uses biotite (Cython-accelerated, ~10x faster) when available, with
-    BioPython ShrakeRupley as fallback.
-
+    Uses biotite (Cython-accelerated, ~10x faster) when available, with BioPython ShrakeRupley as fallback.
     Args:
         pdb_path: Path to PDB file.
         chain_a: Chain identifier for protein A (e.g. 'A').
         chain_b: Chain identifier for protein B (e.g. 'B').
-
     Returns:
         Tuple of (sasa_map_a, sasa_map_b), each mapping residue number to RSA.
     """
@@ -730,68 +603,41 @@ def compute_residue_sasa_both_chains(
             max_sasa = MAX_ASA.get(res_name, MAX_ASA_DEFAULT)
             sasa_map[res_num] = abs_sasa / max_sasa if max_sasa > 0 else 0.0
         sasa_maps.append(sasa_map)
-
     return sasa_maps[0], sasa_maps[1]
-
 
 def is_buried(rsa: float) -> bool:
     """Check if a residue is buried based on relative solvent accessibility.
-
     Args:
         rsa: Relative solvent accessibility (0.0-1.0+).
-
     Returns:
         True if RSA < SASA_BURIED_THRESHOLD (25%).
     """
     return rsa < SASA_BURIED_THRESHOLD
 
-
-def _compute_sasa_pair(
-    pdb_path: str,
-    chain_a: str,
-    chain_b: str,
-) -> tuple[dict[int, float], dict[int, float]]:
+def _compute_sasa_pair(pdb_path: str, chain_a: str, chain_b: str) -> tuple[dict[int, float], dict[int, float]]:
     """Compute SASA for both chains of a complex (picklable worker function).
-
-    Top-level function suitable for ProcessPoolExecutor.  Takes only
-    primitive/picklable arguments and returns two SASA maps.
-
+    Top-level function suitable for ProcessPoolExecutor. Takes only primitive/picklable arguments and returns two SASA maps.
     Args:
         pdb_path: Path to PDB file (as string for pickling).
         chain_a: Chain identifier for protein A.
         chain_b: Chain identifier for protein B.
-
     Returns:
-        Tuple of (sasa_map_a, sasa_map_b).  On failure returns ({}, {}).
+        Tuple of (sasa_map_a, sasa_map_b). On failure returns ({}, {}).
     """
     try:
         return compute_residue_sasa_both_chains(pdb_path, chain_a, chain_b)
     except Exception:
         return {}, {}
 
-
-def precompute_sasa_parallel(
-    results: list[dict],
-    workers: int = 4,
-    verbose: bool = False,
-) -> dict[int, tuple[dict[int, float], dict[int, float]]]:
+def precompute_sasa_parallel(results: list[dict], workers: int = 4, verbose: bool = False) -> dict[int, tuple[dict[int, float], dict[int, float]]]:
     """Pre-compute SASA maps for all complexes in parallel.
-
-    Uses ProcessPoolExecutor to parallelise the BioPython ShrakeRupley
-    SASA calculation, which is the primary performance bottleneck when
-    processing thousands of complexes (~0.1-0.5s per structure).
-
+    Uses ProcessPoolExecutor to parallelise the BioPython ShrakeRupley SASA calculation, which is the primary performance bottleneck when processing thousands of complexes (~0.1-0.5s per structure).
     Args:
-        results: List of per-complex result dicts (must contain '_pdb_path',
-            '_chain_info', 'best_chain_pair' keys).
-        workers: Number of parallel worker processes.  Set to 1 for serial
-            execution (useful for debugging or when multiprocessing overhead
-            exceeds the benefit).
+        results: List of per-complex result dicts (must contain '_pdb_path', '_chain_info', 'best_chain_pair' keys).
+        workers: Number of parallel worker processes.  Set to 1 for serial execution (useful for debugging or when multiprocessing overhead exceeds the benefit).
         verbose: Print progress to stderr.
-
     Returns:
-        Dict mapping result index → (sasa_map_a, sasa_map_b).  Complexes
-        that were skipped (no PDB path or chain info) are omitted.
+        Dict mapping result index → (sasa_map_a, sasa_map_b). Complexes that were skipped (no PDB path or chain info) are omitted.
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -846,38 +692,28 @@ def precompute_sasa_parallel(
             if verbose and completed % 100 == 0:
                 print(f"  SASA progress: {completed:,}/{len(work_items):,}",
                       file=sys.stderr)
-
     if verbose:
         print(f"  SASA pre-computation complete (parallel): "
               f"{len(sasa_cache):,} structures", file=sys.stderr)
-
     return sasa_cache
 
 
-# ── Section 3: Structural Mapping ────────────────────────────────────
+#-------------------------------Section 3: Structural Mapping----------------------------------------
 
-def compute_distance_to_interface(
-    variant_cb_coord: np.ndarray,
-    interface_cb_coords: np.ndarray,
-) -> float:
+def compute_distance_to_interface(variant_cb_coord: np.ndarray, interface_cb_coords: np.ndarray) -> float:
     """Compute minimum CB-CB distance from a variant to any interface residue.
-
     Uses vectorised numpy computation for efficiency.
-
     Args:
         variant_cb_coord: (3,) array of variant residue CB coordinates.
         interface_cb_coords: (N, 3) array of interface residue CB coordinates.
-
     Returns:
-        Minimum Euclidean distance in Angstroms. Returns float('inf') if
-        interface_cb_coords is empty.
+        Minimum Euclidean distance in Angstroms. Returns float('inf') if interface_cb_coords is empty.
     """
     if interface_cb_coords.size == 0:
         return float('inf')
 
     distances = np.linalg.norm(interface_cb_coords - variant_cb_coord, axis=1)
     return float(distances.min())
-
 
 def classify_structural_context(
     position: int,
@@ -891,7 +727,6 @@ def classify_structural_context(
     res_to_idx: Optional[dict[int, int]] = None,
 ) -> dict:
     """Classify a variant's structural context within a protein complex.
-
     Classification logic:
         1. If position is in interface_residues:
            - CB distance < 4A from cross-chain contact partner -> interface_core
@@ -900,28 +735,18 @@ def classify_structural_context(
            - RSA < 25% -> buried_core
            - RSA >= 25% -> surface_non_interface
         3. If position not found in chain -> unmapped
-
     Args:
         position: PDB residue number of the variant.
         interface_residues: Set of PDB residue numbers at the interface.
         chain_res_numbers: List of PDB residue numbers for all CB atoms in this chain.
         cb_coords: (N_cb, 3) array of CB coordinates for this chain.
         residue_sasa: Dict mapping PDB residue number to RSA from compute_residue_sasa().
-        interface_cb_coords: (M, 3) array of same-chain interface residue CB coordinates.
-            Used for distance_to_interface and nearest_interface_residue for non-interface
-            variants. If None, distance is not computed.
-        cross_chain_cb_coords: (K, 3) array of partner chain's interface residue CB
-            coordinates. Used for core/rim classification of interface variants.
-            If None, falls back to interface_rim for interface residues.
-        interface_residue_list: Resolved list of same-chain interface residue numbers
-            matching rows of interface_cb_coords. If None, sorted(interface_residues)
-            is used (may misalign if some residues are missing from chain_res_numbers).
-        res_to_idx: Pre-built {residue_number: array_index} lookup dict for O(1)
-            position lookups. If None, falls back to list.index() (O(n) per call).
-
+        interface_cb_coords: (M, 3) array of same-chain interface residue CB coordinates. Used for distance_to_interface and nearest_interface_residue for non-interface variants. If None, distance is not computed.
+        cross_chain_cb_coords: (K, 3) array of partner chain's interface residue CB coordinates. Used for core/rim classification of interface variants. If None, falls back to interface_rim for interface residues.
+        interface_residue_list: Resolved list of same-chain interface residue numbers matching rows of interface_cb_coords. If None, sorted(interface_residues) is used (may misalign if some residues are missing from chain_res_numbers).
+        res_to_idx: Pre-built {residue_number: array_index} lookup dict for O(1) position lookups. If None, falls back to list.index() (O(n) per call).
     Returns:
-        Dict with keys: context (str), distance_to_interface (float),
-        nearest_interface_residue (int or None).
+        Dict with keys: context (str), distance_to_interface (float), nearest_interface_residue (int or None).
     """
     result = {
         'context': CONTEXT_UNMAPPED,
@@ -972,35 +797,24 @@ def classify_structural_context(
             # At interface but > 8A from cross-chain partner (rare edge case)
             result['context'] = CONTEXT_INTERFACE_RIM
     else:
-        # Not at interface — check SASA for buried vs surface
+        # Not at interface - check SASA for buried vs surface
         rsa = residue_sasa.get(position, 0.5)  # default to surface if unknown
         if is_buried(rsa):
             result['context'] = CONTEXT_BURIED
         else:
             result['context'] = CONTEXT_SURFACE
-
     return result
 
-
-def _build_interface_cb_coords(
-    interface_residues: set[int],
-    chain_res_numbers: list[int],
-    cb_coords: np.ndarray,
-    res_to_idx: Optional[dict[int, int]] = None,
-) -> tuple[np.ndarray, list[int]]:
+def _build_interface_cb_coords(interface_residues: set[int], chain_res_numbers: list[int], cb_coords: np.ndarray, res_to_idx: Optional[dict[int, int]] = None) -> tuple[np.ndarray, list[int]]:
     """Extract CB coordinates for interface residues found in chain.
-
     Args:
         interface_residues: Set of interface residue PDB numbers.
         chain_res_numbers: List of PDB residue numbers for CB atoms.
         cb_coords: (N, 3) CB coordinates array.
-        res_to_idx: Pre-built {residue_number: array_index} for O(1) lookups.
-            If None, one is built from chain_res_numbers.
-
+        res_to_idx: Pre-built {residue_number: array_index} for O(1) lookups. If None, one is built from chain_res_numbers.
     Returns:
         Tuple of (interface_cb_coords array, resolved residue number list).
-        The resolved list contains only residues actually found in chain_res_numbers,
-        in sorted order, and aligns row-by-row with the returned CB array.
+        The resolved list contains only residues actually found in chain_res_numbers, in sorted order, and aligns row-by-row with the returned CB array.
     """
     if res_to_idx is None:
         res_to_idx = {r: i for i, r in enumerate(chain_res_numbers)}
@@ -1014,7 +828,6 @@ def _build_interface_cb_coords(
     if indices:
         return cb_coords[indices], resolved
     return np.empty((0, 3)), []
-
 
 def map_variants_to_complex(
     protein_id: str,
@@ -1187,7 +1000,7 @@ def annotate_results_with_variants(
     Two execution paths:
     - **Toolkit path**: Results contain ``_sasa_a``/``_sasa_b`` (pre-computed
       in worker processes by ``process_single_complex()``). No additional SASA
-      computation needed — eliminates the pickling bottleneck.
+      computation needed - eliminates the pickling bottleneck.
     - **Standalone CLI path**: Results contain ``_chain_info``/``_pdb_path``.
       SASA is computed via :func:`precompute_sasa_parallel`.
 
@@ -1218,6 +1031,10 @@ def annotate_results_with_variants(
         # Standalone CLI path: compute SASA from _chain_info/_pdb_path
         sasa_cache = precompute_sasa_parallel(results, workers=workers, verbose=verbose)
 
+    # Lazy import avoids a circular dependency at module load time
+    # (toolkit.py imports variant_mapper in multiple places).
+    from toolkit import is_annotatable
+
     annotated_count = 0
     sasa_computed_count = 0
 
@@ -1247,6 +1064,12 @@ def annotate_results_with_variants(
         row['gene_constraint_pli_b'] = ''
         row['gene_constraint_mis_z_a'] = ''
         row['gene_constraint_mis_z_b'] = ''
+
+        # Non-human rows: defaults above are correct (empty); UniProt/ClinVar/ExAC
+        # don't cover them, so skip the lookup work. TrEMBL-human rows still run
+        # the lookup because UniProt carries variants for them.
+        if not is_annotatable(row):
+            continue
 
         # Attach ExAC gene constraint scores
         gene_a = gene_symbol_lookup.get(protein_a, '')

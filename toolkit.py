@@ -18,7 +18,7 @@ Scalability features:
 Enrichment features:
     - --enrich           -> Adds gene symbols, protein names, Ensembl IDs, amino acid sequences via id_mapper.py (requires STRING aliases file)
     - --databases        -> Tags each complex with source databases (STRING, BioGRID, HuRI, HuMAP) and evidence types via database_loaders.py
-    - Base output is 46 columns and enriched output is up to 60 columns
+    - Base output is 28 columns (incl. species_a/b/status) and enriched output is up to 124 columns with all features
 
 Usage:
     # Basic (sequential, no checkpointing)
@@ -113,6 +113,7 @@ CSV_FIELDNAMES_BASE = [
     'pdockq', 'ppv', 'quality_tier',
     'has_pdb', 'has_pkl', 'plddt_source',
     'species', 'structure_source',
+    'species_a', 'species_b', 'species_status',
 ]
 
 # Enrichment columns added when --enrich is used
@@ -742,6 +743,44 @@ def write_interface_exports(results: list[dict], output_path: str, min_tier: str
             exported_count += 1
 
     return exported_count
+
+#------------------Species Annotation & Filtering-------------------------------------
+
+def annotate_species(results: list[dict], classifier) -> None:
+    """Populate species_a, species_b, species_status for each result row in-place.
+    Called before enrichment so downstream modules can gate species-dependent
+    work. Values: reviewed_human / trembl_human / non_human.
+    Args:
+        results: List of per-complex result dicts from batch processing.
+        classifier: SpeciesClassifier instance (from id_mapper).
+    """
+    from id_mapper import combine_species_statuses
+    for row in results:
+        sa = classifier.classify(row.get('protein_a', ''))
+        sb = classifier.classify(row.get('protein_b', ''))
+        row['species_a'] = sa
+        row['species_b'] = sb
+        row['species_status'] = combine_species_statuses(sa, sb)
+
+
+def get_human_mask(df) -> 'pd.Series':
+    """DataFrame mask for figure / Venn overlap filtering: reviewed_human only.
+    Used where dissertation numbers must compare like-with-like reviewed entries.
+    """
+    return df['species_status'] == 'reviewed_human'
+
+
+def is_annotatable(row: dict) -> bool:
+    """Per-row guard for annotation loops: skip only non_human rows.
+    TrEMBL-human rows still get variant/disease/cluster annotation because
+    UniProt has records for them. Rows without species_status default to
+    annotatable (back-compat for callers on pre-species CSVs).
+    """
+    status = row.get('species_status')
+    if status is None:
+        return True
+    return status != 'non_human'
+
 
 #------------------Enrichment (gene symbols, database sources)-----------------------
 
@@ -1516,6 +1555,21 @@ def main() -> None:
             resumed_results=resumed_results,
         )
 
+    # Species annotation (reviewed_human / trembl_human / non_human per chain + complex)
+    species_start = time.time()
+    from id_mapper import SpeciesClassifier
+    print("Annotating species status ...", file=sys.stderr)
+    classifier = SpeciesClassifier(verbose=args.verbose)
+    annotate_species(results, classifier)
+    n_rev = sum(1 for r in results if r.get('species_status') == 'reviewed_human')
+    n_tre = sum(1 for r in results if r.get('species_status') == 'trembl_human')
+    n_non = sum(1 for r in results if r.get('species_status') == 'non_human')
+    print(
+        f"  Species split: reviewed_human={n_rev:,}  trembl_human={n_tre:,}  "
+        f"non_human={n_non:,}  ({time.time() - species_start:.1f}s)",
+        file=sys.stderr,
+    )
+
     # Enrichment (gene symbols, database sources)
     include_enrichment = False
     if args.enrich:
@@ -1885,9 +1939,13 @@ def main() -> None:
         pathways_dir = Path(args.disease) if getattr(args, '_disease_enabled', False) \
             else DEFAULT_PATHWAYS_DIR
 
-        # Collect unique accessions from results
+        # Collect unique accessions from annotatable (human) rows only — STRING
+        # enrichment, per-pathway PPI, and network stats are species-specific
+        # so non-human accessions would only add noise.
         pathway_accessions: set[str] = set()
         for row in results:
+            if not is_annotatable(row):
+                continue
             pathway_accessions.add(row.get('protein_a', ''))
             pathway_accessions.add(row.get('protein_b', ''))
         pathway_accessions.discard('')
@@ -1918,6 +1976,8 @@ def main() -> None:
         if not args.no_api:
             gene_symbols = []
             for row in results:
+                if not is_annotatable(row):
+                    continue
                 for gs_key in ('gene_symbol_a', 'gene_symbol_b'):
                     gs = row.get(gs_key, '')
                     if gs:
@@ -1929,9 +1989,11 @@ def main() -> None:
             # Per-pathway PPI enrichment (replaces global enrichment)
             if reactome_index:
                 pathway_proteins = invert_reactome_index(reactome_index)
-                # Collect all shared pathway IDs across complexes
+                # Collect all shared pathway IDs across human complexes only
                 shared_pathway_ids: set[str] = set()
                 for row in results:
+                    if not is_annotatable(row):
+                        continue
                     pa = row.get('protein_a', '')
                     pb = row.get('protein_b', '')
                     ba = pa.split('-')[0] if '-' in pa else pa

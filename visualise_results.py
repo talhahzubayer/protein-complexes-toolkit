@@ -305,6 +305,16 @@ def _apply_common_style(axes: plt.Axes, title: str, xlabel: str, ylabel: str, gr
     if grid:
         axes.grid(True, alpha=GRID_ALPHA, linestyle='--')
 
+def _species_display(species_label: str) -> str:
+    """Human-readable suffix for figure titles that mirrors the file suffix.
+
+    '' -> '', '_human' -> ' - Human', '_nonhuman' -> ' - Non-Human'.
+    """
+    if not species_label:
+        return ''
+    mapping = {'_human': ' - Human', '_nonhuman': ' - Non-Human'}
+    return mapping.get(species_label, f' - {species_label.lstrip("_").replace("_", " ").title()}')
+
 def _save_figure(figure: plt.Figure, filename: str) -> None:
     """Save a figure to OUTPUT_DIR at standard DPI and close it.
     Prints the filename on completion with elapsed time if saving takes over 2 seconds.
@@ -548,11 +558,15 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
 
 #---------------------------------Item 5: Structure prediction (Figs 1-9)--------------------------------------------
 
-def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: bool = False) -> None:
+def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 1: Overall prediction quality landscape.
     Colours by V2 quality tier when available, otherwise falls back to disorder-fraction colouring (RdYlGn_r colourmap).
     When density_mode is True, KDE contour overlays are added to show where complexes concentrate.
     """
+    if len(df) == 0:
+        print("  Skipping Fig 1: no complexes in subset.")
+        return
+    species_suffix = _species_display(species_label)
     use_tier_colouring = col_flags['has_v2_data']
     n_total = len(df)
     pt_size, pt_alpha = _adaptive_scatter_params(n_total)
@@ -596,17 +610,18 @@ def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: b
 
     axes.set_xlim(0.2, 1.05)
     axes.set_ylim(-0.02, 0.8)
-    title = "AlphaFold2-Multimer: Quality Assessment (ipTM vs pDockQ)"
+    title = f"AlphaFold2-Multimer: Quality Assessment (ipTM vs pDockQ){species_suffix}"
     _apply_common_style(axes, title, 'ipTM', 'pDockQ')
-    _save_figure(figure, '1_Quality_Scatter.png')
+    _save_figure(figure, f'1_Quality_Scatter{species_label}.png')
 
-def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False) -> None:
+def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 1b (supplementary): Disorder-coloured scatter with density contours.
     Each point is coloured by its disorder fraction (pLDDT < 50) using the RdYlGn_r colourmap.  KDE density contours with percentile labels are always overlaid so the reader can see where most complexes concentrate.
     """
     if 'plddt_below50_fraction' not in df.columns:
         print("  Skipping Fig 1b: no disorder fraction column.")
         return
+    species_suffix = _species_display(species_label)
     disorder = df['plddt_below50_fraction'].fillna(0)
 
     # Valid-data mask (need finite ipTM, pDockQ, and disorder)
@@ -638,10 +653,10 @@ def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False) ->
     # Annotation: sample size
     axes.text(0.02, 0.98, f'n = {n_points:,}', transform=axes.transAxes, fontsize=FONT_TICK, va='top', ha='left', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='grey', alpha=0.8))
 
-    _apply_common_style(axes, "Quality Scatter - Disorder Colouring (Supplementary)", 'ipTM', 'pDockQ')
-    _save_figure(figure, '1b_Quality_Scatter_Disorder.png')
+    _apply_common_style(axes, f"Quality Scatter - Disorder Colouring (Supplementary){species_suffix}", 'ipTM', 'pDockQ')
+    _save_figure(figure, f'1b_Quality_Scatter_Disorder{species_label}.png')
 
-def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
+def plot_fig2_pae_health_check(df: pd.DataFrame, species_label: str = '') -> None:
     """Fig 2: Is the dataset generally well-resolved?"""
     if 'pae_mean' not in df.columns:
         print("  Skipping Fig 2: no pae_mean column.")
@@ -650,6 +665,7 @@ def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
     if len(pae_values) == 0:
         print("  Skipping Fig 2: no valid PAE values.")
         return
+    species_suffix = _species_display(species_label)
     median_pae = pae_values.median()
     below_threshold = (pae_values < PAE_CONFIDENT).sum()
     figure, axes = plt.subplots(figsize=(8, 5))
@@ -663,11 +679,12 @@ def plot_fig2_pae_health_check(df: pd.DataFrame) -> None:
 
     axes.legend(fontsize=FONT_TICK, loc='upper right')
     title = (f"Global PAE Health Check - {len(pae_values)} complexes, "
-             f"median {median_pae:.1f} \u00c5, {below_threshold} below {PAE_CONFIDENT} \u00c5")
+             f"median {median_pae:.1f} \u00c5, {below_threshold} below {PAE_CONFIDENT} \u00c5"
+             f"{species_suffix}")
     _apply_common_style(axes, title, 'Mean PAE (\u00c5)', 'Count', grid=False)
-    _save_figure(figure, '2_PAE_Health_Check.png')
+    _save_figure(figure, f'2_PAE_Health_Check{species_label}.png')
 
-def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
+def plot_fig3_interface_pae_by_tier(df: pd.DataFrame, species_label: str = '') -> None:
     """Fig 3: How confident are the contacts that matter for quality assessment?"""
     required = ['interface_pae_mean', 'quality_tier_v2']
     if not all(col in df.columns for col in required):
@@ -677,6 +694,7 @@ def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
     if len(plot_df) == 0:
         print("  Skipping Fig 3: no valid data after filtering.")
         return
+    species_suffix = _species_display(species_label)
     figure, axes = plt.subplots(figsize=(10, 6))
 
     # Build data and positions for boxplots + strip
@@ -723,10 +741,10 @@ def plot_fig3_interface_pae_by_tier(df: pd.DataFrame) -> None:
         for i in range(len(tier_medians))
     )
     axes.text(0.5, -0.12, median_text, transform=axes.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
-    _apply_common_style(axes, "Interface PAE by Quality Tier", '', 'Interface PAE (\u00c5)', grid=False)
-    _save_figure(figure, '3_Interface_PAE_by_Tier.png')
+    _apply_common_style(axes, f"Interface PAE by Quality Tier{species_suffix}", '', 'Interface PAE (\u00c5)', grid=False)
+    _save_figure(figure, f'3_Interface_PAE_by_Tier{species_label}.png')
 
-def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False) -> None:
+def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 4: Why should I trust the quality tier assigned?
     Panel (a): Composite score distributions by tier (violin/boxplot).
     Panel (b): Composite vs confident contact fraction scatter.
@@ -740,6 +758,7 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False)
         print("  Skipping Fig 4: no valid data.")
         return
 
+    species_suffix = _species_display(species_label)
     figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
 
     #====================================Panel (a): Composite score distributions====================================
@@ -810,10 +829,10 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False)
         ax_b.text(0.05, 0.95, f'r = {r:.2f}', transform=ax_b.transAxes, fontsize=FONT_AXIS_LABEL, va='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
     _apply_common_style(ax_b, "(b) Composite vs Confident Contact Fraction", 'Confident Contact Fraction', 'Interface Confidence Score')
-    figure.suptitle("Quality Tier Validation: Composite Score Evidence", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '4_Composite_Tier_Validation.png')
+    figure.suptitle(f"Quality Tier Validation: Composite Score Evidence{species_suffix}", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, f'4_Composite_Tier_Validation{species_label}.png')
 
-def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False) -> None:
+def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 5: Are interfaces special, or do they just reflect bulk quality?"""
     required = ['interface_plddt_combined', 'bulk_plddt_combined', 'quality_tier_v2']
     if not all(col in df.columns for col in required):
@@ -824,6 +843,7 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False) ->
         print("  Skipping Fig 5: no valid data.")
         return
 
+    species_suffix = _species_display(species_label)
     figure, axes = plt.subplots(figsize=(8, 8))
 
     # Identify paradox complexes for special marking
@@ -868,10 +888,10 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False) ->
     axes.text(0.5, 0.02, f'{above_diagonal}/{total} ({pct:.0f}%) above diagonal', transform=axes.transAxes, ha='center', fontsize=FONT_TICK, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
     axes.legend(fontsize=FONT_TICK, loc='lower left', framealpha=0.9)
-    _apply_common_style(axes, "Interface vs Bulk pLDDT: Are Interfaces Special?", 'Bulk pLDDT', 'Interface pLDDT')
-    _save_figure(figure, '5_Interface_vs_Bulk.png')
+    _apply_common_style(axes, f"Interface vs Bulk pLDDT: Are Interfaces Special?{species_suffix}", 'Bulk pLDDT', 'Interface pLDDT')
+    _save_figure(figure, f'5_Interface_vs_Bulk{species_label}.png')
 
-def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
+def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> None:
     """Fig 6: Can disordered proteins form confident interfaces?
     3-panel comparison of paradox vs non-paradox complexes - Paradox: ipTM >= 0.75, pDockQ >= 0.5, disorder fraction >= 0.30.
     """
@@ -879,6 +899,8 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 6: missing required columns.")
         return
+
+    species_suffix = _species_display(species_label)
 
     # Count paradox complexes before dropping rows with missing panel data so we can report how many are lost to incomplete interface metrics
     n_paradox_before_dropna = int(_get_paradox_mask(df).sum())
@@ -956,7 +978,7 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
         mpatches.Patch(color=colour_non_paradox, alpha=0.6, label='Non-paradox'),
     ]
     ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
-    figure.suptitle("Paradox Complexes: Confident Interfaces Despite Structural Disorder", fontsize=14, fontweight='bold', y=1.04)
+    figure.suptitle(f"Paradox Complexes: Confident Interfaces Despite Structural Disorder{species_suffix}", fontsize=14, fontweight='bold', y=1.04)
 
     subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
                 f"non-paradox complexes")
@@ -965,9 +987,9 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame) -> None:
                      f"due to incomplete interface data)")
 
     figure.text(0.5, 0.99, subtitle, ha='center', fontsize=FONT_AXIS_LABEL, style='italic', color='#555555')
-    _save_figure(figure, '6_Paradox_Spotlight.png')
+    _save_figure(figure, f'6_Paradox_Spotlight{species_label}.png')
 
-def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
+def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '') -> None:
     """Fig 7: How does prediction quality vary by complex architecture?
     Panel (a): Stacked bar chart of tier proportions (Homo / Hetero / Multi-chain).
     Panel (b): Interface symmetry distributions.
@@ -981,6 +1003,8 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
     if len(plot_df) == 0:
         print("  Skipping Fig 7: no valid data.")
         return
+
+    species_suffix = _species_display(species_label)
 
     # Split into architecture categories - multi-chain (3+) gets its own group regardless of homodimer/heterodimer label
     has_chain_info = 'n_chains' in plot_df.columns
@@ -1067,17 +1091,21 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame) -> None:
         ax_b.text(0.5, 0.5, 'Interface symmetry data\nnot available', transform=ax_b.transAxes, ha='center', va='center', fontsize=FONT_AXIS_LABEL, color='grey')
 
     _apply_common_style(ax_b, "(b) Interface Symmetry", '', 'Symmetry Score', grid=False)
-    figure.suptitle("Prediction Quality by Complex Architecture", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '7_Homo_vs_Hetero.png')
+    figure.suptitle(f"Prediction Quality by Complex Architecture{species_suffix}", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, f'7_Homo_vs_Hetero{species_label}.png')
 
-def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False) -> None:
+def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 8: Why do ipTM and pDockQ disagree so systematically?"""
     required = ['iptm', 'pdockq', 'quality_tier_v2']
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 8: missing required columns.")
         return
     plot_df = df.dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 8: no valid data.")
+        return
 
+    species_suffix = _species_display(species_label)
     figure, axes = plt.subplots(figsize=(10, 8))
     n_plot = len(plot_df)
     pt_size, pt_alpha = _adaptive_scatter_params(n_plot)
@@ -1126,10 +1154,10 @@ def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False) 
     axes.set_xlim(0.2, 1.05)
     axes.set_ylim(-0.02, 0.8)
 
-    _apply_common_style(axes, "Metric Disagreement: ipTM vs pDockQ Systematic Bias", 'ipTM', 'pDockQ')
-    _save_figure(figure, '8_Metric_Disagreement.png')
+    _apply_common_style(axes, f"Metric Disagreement: ipTM vs pDockQ Systematic Bias{species_suffix}", 'ipTM', 'pDockQ')
+    _save_figure(figure, f'8_Metric_Disagreement{species_label}.png')
 
-def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False) -> None:
+def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 9: Item 5 -- Structure prediction.
     Panel (a): Composite score distributions by chain count (violin + strip).
     Panel (b): ipTM vs pDockQ coloured by chain count.
@@ -1143,6 +1171,8 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False) 
     if len(plot_df) == 0:
         print("  Skipping Fig 9: no valid data.")
         return
+
+    species_suffix = _species_display(species_label)
 
     # Bin chain counts into interpretable groups
     def chain_group(n):
@@ -1242,8 +1272,8 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False) 
     ax_b.set_ylim(-0.02, 0.8)
 
     _apply_common_style(ax_b, "(b) Quality Landscape by Chain Count", 'ipTM', 'pDockQ')
-    figure.suptitle("Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?", fontsize=14, fontweight='bold', y=1.02)
-    _save_figure(figure, '9_Chain_Count_Profile.png')
+    figure.suptitle(f"Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?{species_suffix}", fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, f'9_Chain_Count_Profile{species_label}.png')
 
 #--------------------------------------------Item 3: Identify similar proteins/pairs (Fig 10)---------------------------------------------------
 
@@ -2837,7 +2867,36 @@ def main() -> None:
         print("No valid data found. Exiting.")
         return
 
-    # Detect available columns
+    # Structural figures (1-9) and Figs 10-12 (clustering + ClinVar variants) treat
+    # reviewed+TrEMBL as "human" since their data sources cover TrEMBL adequately
+    # (>85%). Figs 13-16 (stability / disease / Reactome pathways / PPI enrichment)
+    # stay reviewed-only via get_human_mask because those sources (EVE,
+    # AlphaMissense, UniProt diseases, Reactome) have <15% TrEMBL coverage and
+    # would dilute tier-based signals.
+    if 'species_status' in df.columns:
+        from toolkit import get_human_mask
+        reviewed_mask = get_human_mask(df)
+        trembl_mask = df['species_status'] == 'trembl_human'
+        all_human_mask = reviewed_mask | trembl_mask
+        df_all_human = df[all_human_mask].reset_index(drop=True)
+        df_nonhuman = df[~all_human_mask].reset_index(drop=True)
+        df_human = df[reviewed_mask].reset_index(drop=True)
+        species_subsets = [
+            (df_all_human, '_human',    'Human'),
+            (df_nonhuman,  '_nonhuman', 'Non-Human'),
+        ]
+        print(f"  Species split: {len(df_all_human):,} human "
+              f"({int(reviewed_mask.sum()):,} reviewed + {int(trembl_mask.sum()):,} TrEMBL), "
+              f"{len(df_nonhuman):,} non-human.")
+        if len(df_all_human) == 0 and len(df_nonhuman) == 0:
+            print("No complexes after species split. Exiting.")
+            return
+    else:
+        species_subsets = [(df, '', '')]
+        df_human = df
+        df_all_human = df
+
+    # Detect available columns (stateless over column names; same for every subset)
     col_flags = detect_columns(df)
     print(f"\nColumn detection:")
     print(f"  V2 quality tiers:  {'Yes' if col_flags['has_v2_data'] else 'No'}")
@@ -2865,97 +2924,113 @@ def main() -> None:
         print(f"\n  pLDDT source: {', '.join(source_parts)}")
 
     figures_generated = 0
-    print("\n--- Generating Figures ---\n")
+    interface_figs_skipped_warning_shown = False
 
-    # ALWAYS generated: Fig 1 and Fig 2
-    print("Fig 1 - Quality Scatter (ipTM vs pDockQ)")
-    plot_fig1_quality_scatter(df, col_flags, density_mode=args.density)
-    figures_generated += 1
+    # Structural figures (1-9) run per species subset.
+    for df_subset, suffix, display_label in species_subsets:
+        if len(df_subset) == 0:
+            print(f"\n  Skipping {display_label} figures - empty subset.")
+            continue
+        header = f" ({display_label}, n={len(df_subset):,})" if display_label else ""
+        label_suffix = f" - {display_label}" if display_label else ""
+        print(f"\n--- Generating Figures{header} ---\n")
 
-    print("Fig 2 - Global PAE Health Check")
-    plot_fig2_pae_health_check(df)
-    figures_generated += 1
-
-    # Supplementary Fig 1b (only when --disorder-scatter AND V2 data present)
-    if args.disorder_scatter and col_flags['has_v2_data']:
-        print("Fig 1b - Disorder Scatter (supplementary)")
-        plot_fig1b_disorder_scatter(df, density_mode=args.density)
+        # ALWAYS generated: Fig 1 and Fig 2
+        print(f"Fig 1 - Quality Scatter (ipTM vs pDockQ){label_suffix}")
+        plot_fig1_quality_scatter(df_subset, col_flags, density_mode=args.density, species_label=suffix)
         figures_generated += 1
 
-    # Interface figures (require V2 + interface data): Figs 3-8
-    if col_flags['has_v2_data'] and col_flags['has_interface_data']:
-        print("Fig 3 - Interface PAE by Tier")
-        plot_fig3_interface_pae_by_tier(df)
+        print(f"Fig 2 - Global PAE Health Check{label_suffix}")
+        plot_fig2_pae_health_check(df_subset, species_label=suffix)
         figures_generated += 1
 
-        print("Fig 4 - Composite & Tier Validation")
-        plot_fig4_composite_validation(df, density_mode=args.density)
-        figures_generated += 1
+        # Supplementary Fig 1b (only when --disorder-scatter AND V2 data present)
+        if args.disorder_scatter and col_flags['has_v2_data']:
+            print(f"Fig 1b - Disorder Scatter (supplementary){label_suffix}")
+            plot_fig1b_disorder_scatter(df_subset, density_mode=args.density, species_label=suffix)
+            figures_generated += 1
 
-        print("Fig 5 - Interface vs Bulk")
-        plot_fig5_interface_vs_bulk(df, density_mode=args.density)
-        figures_generated += 1
+        # Interface figures (require V2 + interface data): Figs 3-8
+        if col_flags['has_v2_data'] and col_flags['has_interface_data']:
+            print(f"Fig 3 - Interface PAE by Tier{label_suffix}")
+            plot_fig3_interface_pae_by_tier(df_subset, species_label=suffix)
+            figures_generated += 1
 
-        print("Fig 6 - Paradox Spotlight")
-        plot_fig6_paradox_spotlight(df)
-        figures_generated += 1
+            print(f"Fig 4 - Composite & Tier Validation{label_suffix}")
+            plot_fig4_composite_validation(df_subset, density_mode=args.density, species_label=suffix)
+            figures_generated += 1
 
-        print("Fig 7 - Homo vs Hetero")
-        plot_fig7_homo_vs_hetero(df)
-        figures_generated += 1
+            print(f"Fig 5 - Interface vs Bulk{label_suffix}")
+            plot_fig5_interface_vs_bulk(df_subset, density_mode=args.density, species_label=suffix)
+            figures_generated += 1
 
-        print("Fig 8 - Metric Disagreement")
-        plot_fig8_metric_disagreement(df, density_mode=args.density)
-        figures_generated += 1
-    else:
-        print("\nInterface figures (3-8) require V2 quality tiers AND interface")
-        print("columns in the CSV. Re-run the batch script with interface analysis")
-        print("enabled to generate the full 44-column CSV.")
+            print(f"Fig 6 - Paradox Spotlight{label_suffix}")
+            plot_fig6_paradox_spotlight(df_subset, species_label=suffix)
+            figures_generated += 1
 
-    # Chain-count figure (requires n_chains column)
-    if col_flags['has_chain_info']:
-        print("Fig 9 - Chain-Count Quality Profile")
-        plot_fig9_chain_count_profile(df, density_mode=args.density)
-        figures_generated += 1
+            print(f"Fig 7 - Homo vs Hetero{label_suffix}")
+            plot_fig7_homo_vs_hetero(df_subset, species_label=suffix)
+            figures_generated += 1
+
+            print(f"Fig 8 - Metric Disagreement{label_suffix}")
+            plot_fig8_metric_disagreement(df_subset, density_mode=args.density, species_label=suffix)
+            figures_generated += 1
+        elif not interface_figs_skipped_warning_shown:
+            print("\nInterface figures (3-8) require V2 quality tiers AND interface")
+            print("columns in the CSV. Re-run the batch script with interface analysis")
+            print("enabled to generate the full 44-column CSV.")
+            interface_figs_skipped_warning_shown = True
+
+        # Chain-count figure (requires n_chains column)
+        if col_flags['has_chain_info']:
+            print(f"Fig 9 - Chain-Count Quality Profile{label_suffix}")
+            plot_fig9_chain_count_profile(df_subset, density_mode=args.density, species_label=suffix)
+            figures_generated += 1
+
+    # Enrichment figures (10-16). Figs 10-12 use reviewed+TrEMBL (df_all_human)
+    # since STRING clusters and ClinVar cover TrEMBL well. Figs 13-16 use
+    # reviewed-only (df_human) because EVE/AlphaMissense/UniProt/Reactome data
+    # is sparse on TrEMBL.
+    print("\n--- Generating Enrichment Figures (Human) ---\n")
 
     # Clustering validation (requires --clustering)
-    if col_flags.get('has_clustering_data', False) and 'complex_type' in df.columns:
-        print("Fig 10 - Sequence Clustering Validation")
-        plot_fig10_clustering_validation(df)
+    if col_flags.get('has_clustering_data', False) and 'complex_type' in df_all_human.columns:
+        print("Fig 10 - Sequence Clustering Validation (reviewed + TrEMBL)")
+        plot_fig10_clustering_validation(df_all_human)
         figures_generated += 1
 
     # Variant figures (require --variants)
     if col_flags['has_variant_data']:
-        print("Fig 11 - Classified Variant Sankey")
-        plot_fig11_variant_consequence_flow(df)
+        print("Fig 11 - Classified Variant Sankey (reviewed + TrEMBL)")
+        plot_fig11_variant_consequence_flow(df_all_human)
         figures_generated += 1
 
-        print("Fig 12 - Interface Variant Density vs Quality")
-        plot_fig12_variant_density(df, density_mode=args.density)
+        print("Fig 12 - Interface Variant Density vs Quality (reviewed + TrEMBL)")
+        plot_fig12_variant_density(df_all_human, density_mode=args.density)
         figures_generated += 1
 
     # Stability cross-validation (requires --stability + --protvar)
     if col_flags.get('has_stability_data', False):
-        print("Fig 13 - Stability Predictor Cross-Validation")
-        plot_fig13_stability_crossvalidation(df)
+        print("Fig 13 - Stability Predictor Cross-Validation (reviewed only)")
+        plot_fig13_stability_crossvalidation(df_human)
         figures_generated += 1
 
     # Disease enrichment (requires --disease)
     if col_flags.get('has_disease_data', False):
-        print("Fig 14 - Disease Enrichment by Tier")
-        plot_fig14_disease_enrichment(df)
+        print("Fig 14 - Disease Enrichment by Tier (reviewed only)")
+        plot_fig14_disease_enrichment(df_human)
         figures_generated += 1
 
     # Pathway-level network (requires --pathways)
     if col_flags.get('has_pathway_data', False):
-        print("Fig 15 - Pathway-Level Network")
-        plot_fig15_pathway_network(df)
+        print("Fig 15 - Pathway-Level Network (reviewed only)")
+        plot_fig15_pathway_network(df_human)
         figures_generated += 1
 
     # Prediction quality paradox (requires --variants + --pathways)
     if col_flags.get('has_paradox_data', False):
-        print("Fig 16 - Prediction Quality Paradox")
-        plot_fig16_prediction_quality_paradox(df)
+        print("Fig 16 - Prediction Quality Paradox (reviewed only)")
+        plot_fig16_prediction_quality_paradox(df_human)
         figures_generated += 1
 
     # On-demand: Per-complex PAE heatmaps

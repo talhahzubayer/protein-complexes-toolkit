@@ -397,11 +397,28 @@ def annotate_results_with_stability(
     annotated = 0
     with_eve = 0
 
+    # Lazy import avoids circular dependency at module load time.
+    from toolkit import is_annotatable
+
     for row in results:
         protein_a = row.get('protein_a', '')
         protein_b = row.get('protein_b', '')
         details_a = row.get('variant_details_a', '')
         details_b = row.get('variant_details_b', '')
+
+        # Non-human rows: EVE covers only human proteins, so leave all EVE
+        # columns empty and skip the lookup. TrEMBL-human rows still run
+        # because EVE's canonical UniProt keys include TrEMBL accessions.
+        if not is_annotatable(row):
+            row['eve_score_mean_a'] = ''
+            row['eve_score_mean_b'] = ''
+            row['eve_n_pathogenic_a'] = 0
+            row['eve_n_pathogenic_b'] = 0
+            row['eve_coverage_a'] = ''
+            row['eve_coverage_b'] = ''
+            row['stability_details_a'] = ''
+            row['stability_details_b'] = ''
+            continue
 
         # Process chain A
         eve_stats_a = _score_chain_variants(

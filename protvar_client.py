@@ -548,7 +548,21 @@ def annotate_results_with_protvar(
     """
     annotated = 0
 
+    # Lazy import avoids circular dependency at module load time.
+    from toolkit import is_annotatable
+
     for row in results:
+        # Non-human rows: AlphaMissense and the AFDB FoldX export both cover
+        # only human proteins, so leave all protvar columns empty and skip
+        # the lookup. TrEMBL-human rows still run.
+        if not is_annotatable(row):
+            for suffix in ('a', 'b'):
+                row[f'protvar_am_mean_{suffix}'] = ''
+                row[f'protvar_foldx_mean_{suffix}'] = ''
+                row[f'protvar_am_n_pathogenic_{suffix}'] = ''
+                row[f'protvar_details_{suffix}'] = ''
+            continue
+
         for suffix in ('a', 'b'):
             acc = row.get(f'protein_{suffix}', '')
             details_str = row.get(f'variant_details_{suffix}', '')

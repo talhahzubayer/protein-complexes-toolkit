@@ -36,6 +36,7 @@ import re
 import argparse
 import csv
 import warnings
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 from collections import defaultdict
@@ -82,6 +83,22 @@ DEFAULT_ALIASES_PATH = Path(__file__).parent / "data" / "ppi" / "9606.protein.al
 CANONICAL_FIRST_CHARS = frozenset('OPQ')
 CANONICAL_ACCESSION_LENGTH = 6
 
+# Species classification status values.
+SPECIES_REVIEWED_HUMAN = 'reviewed_human'
+SPECIES_TREMBL_HUMAN   = 'trembl_human'
+SPECIES_NON_HUMAN      = 'non_human'
+
+# Priority used to combine two per-chain statuses into a per-complex status
+# (higher number = worse; non-human dominates).
+_SPECIES_PRIORITY = {
+    SPECIES_REVIEWED_HUMAN: 0,
+    SPECIES_TREMBL_HUMAN:   1,
+    SPECIES_NON_HUMAN:      2,
+}
+
+# XML namespace used in Swiss-Prot flat-file downloads (uniprot_sprot_human.xml).
+_UNIPROT_XML_NS = "{https://uniprot.org/uniprot}"
+
 
 #-----------------------ID Validation Functions------------------------------------------------
 
@@ -111,6 +128,140 @@ def split_isoform(accession: str) -> tuple[str, Optional[str]]:
             return parts[0], parts[1]
     return accession, None
 
+
+#-----------------------Species Classification-------------------------------------------------
+
+def load_sprot_reviewed_accessions(xml_path) -> set[str]:
+    """Return every <accession> element (primary + secondary) from a Swiss-Prot XML dump.
+    Uses a streaming iterparse so the 1.5GB human XML doesn't load fully into memory.
+    Args:
+        xml_path: Path or str to uniprot_sprot_human.xml.
+    Returns:
+        Set of reviewed human UniProt accessions (incl. secondary/obsolete).
+    """
+    accs: set[str] = set()
+    ns = _UNIPROT_XML_NS
+    ctx = ET.iterparse(str(xml_path), events=("end",))
+    for _, elem in ctx:
+        if elem.tag == ns + "entry":
+            for a in elem.findall(ns + "accession"):
+                if a.text:
+                    accs.add(a.text.strip())
+            elem.clear()
+    return accs
+
+
+def load_human_accessions_from_idmapping(dat_path) -> set[str]:
+    """Return all human UniProt accessions (reviewed + TrEMBL) from HUMAN_9606_idmapping.dat.
+    Each accession appears once under the UniProtKB-ID mapping-type key, so
+    filtering on column 2 == 'UniProtKB-ID' yields exactly one row per accession.
+    Args:
+        dat_path: Path or str to HUMAN_9606_idmapping.dat.
+    Returns:
+        Set of all human UniProt accessions (both Swiss-Prot and TrEMBL).
+    """
+    human: set[str] = set()
+    with open(dat_path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2 and parts[1] == "UniProtKB-ID":
+                human.add(parts[0])
+    return human
+
+
+def combine_species_statuses(status_a: str, status_b: str) -> str:
+    """Combine two per-chain statuses into a per-complex status (worst-of-two).
+    non_human dominates trembl_human dominates reviewed_human. Unrecognised
+    strings are treated as non_human.
+    Args:
+        status_a: Status of chain A (reviewed_human / trembl_human / non_human).
+        status_b: Status of chain B (same vocabulary).
+    Returns:
+        The higher-priority status of the two.
+    """
+    non_human = _SPECIES_PRIORITY[SPECIES_NON_HUMAN]
+    pa = _SPECIES_PRIORITY.get(status_a, non_human)
+    pb = _SPECIES_PRIORITY.get(status_b, non_human)
+    worst = max(pa, pb)
+    if worst == _SPECIES_PRIORITY[SPECIES_NON_HUMAN]:
+        return SPECIES_NON_HUMAN
+    if worst == _SPECIES_PRIORITY[SPECIES_TREMBL_HUMAN]:
+        return SPECIES_TREMBL_HUMAN
+    return SPECIES_REVIEWED_HUMAN
+
+
+class SpeciesClassifier:
+    """Classify UniProt accessions as reviewed_human / trembl_human / non_human.
+
+    Reference sets are loaded lazily on the first classify() call so the
+    ~15s one-time load cost is only paid when the classifier is actually used.
+    Isoform suffixes (e.g. '-2') are stripped before lookup — the reference
+    sets only contain canonical accessions.
+    """
+
+    def __init__(
+        self,
+        sprot_xml_path: Optional[str] = None,
+        idmapping_path: Optional[str] = None,
+        verbose: bool = False,
+    ) -> None:
+        self._sprot_xml_path = sprot_xml_path
+        self._idmapping_path = idmapping_path
+        self._verbose = verbose
+        self._sprot_reviewed: Optional[set[str]] = None
+        self._human_all: Optional[set[str]] = None
+
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        # Import here to avoid any circular-import risk with data_registry.
+        from data_registry import get_default_path
+        xml = Path(self._sprot_xml_path) if self._sprot_xml_path \
+            else Path(get_default_path('uniprot_xml'))
+        dat = Path(self._idmapping_path) if self._idmapping_path \
+            else Path(get_default_path('eve_idmapping'))
+        return xml, dat
+
+    def _ensure_loaded(self) -> None:
+        if self._sprot_reviewed is not None and self._human_all is not None:
+            return
+        xml_path, dat_path = self._resolve_paths()
+        if not xml_path.is_file():
+            raise FileNotFoundError(
+                f"Swiss-Prot XML not found at {xml_path}. "
+                f"Run 'python data_registry.py' to check data dependencies."
+            )
+        if not dat_path.is_file():
+            raise FileNotFoundError(
+                f"idmapping file not found at {dat_path}. "
+                f"Run 'python data_registry.py' to check data dependencies."
+            )
+        if self._verbose:
+            print(f"  Loading reviewed Swiss-Prot accessions from {xml_path.name} ...",
+                  file=sys.stderr)
+        self._sprot_reviewed = load_sprot_reviewed_accessions(xml_path)
+        if self._verbose:
+            print(f"  Loaded {len(self._sprot_reviewed):,} reviewed accessions",
+                  file=sys.stderr)
+            print(f"  Loading human idmapping from {dat_path.name} ...",
+                  file=sys.stderr)
+        self._human_all = load_human_accessions_from_idmapping(dat_path)
+        if self._verbose:
+            print(f"  Loaded {len(self._human_all):,} total human accessions",
+                  file=sys.stderr)
+
+    def classify(self, accession: str) -> str:
+        """Classify a UniProt accession. Empty/None returns non_human."""
+        if not accession:
+            return SPECIES_NON_HUMAN
+        self._ensure_loaded()
+        base, _ = split_isoform(accession.strip())
+        if base in self._sprot_reviewed:
+            return SPECIES_REVIEWED_HUMAN
+        if base in self._human_all:
+            return SPECIES_TREMBL_HUMAN
+        return SPECIES_NON_HUMAN
+
+
+#-----------------------ID Type Detection-----------------------------------------------------
 
 def detect_id_type(identifier: str) -> str:
     """Detect the type of a protein/gene identifier.

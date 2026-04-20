@@ -251,7 +251,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 ### Script Descriptions
 
-The pipeline produces a 25-column base CSV, progressively expandable to 121 columns by stacking optional flags (`--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI.
+The pipeline produces a 28-column base CSV, progressively expandable to 124 columns by stacking optional flags (`--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI.
 
 #### Core Analysis
 
@@ -265,13 +265,13 @@ The pipeline produces a 25-column base CSV, progressively expandable to 121 colu
 
 **data_registry.py** - Centralises all data-file path references into a single registry of 18 entries, each recording expected path, source module, constant name, and whether the filename contains a version string. Provides `validate_data_dependencies()` for pre-run checks used by `--full-pipeline`, and a standalone CLI for dependency checking (`python data_registry.py`).
 
-**visualise_results.py** - Generates up to 16 figures (+ 1b supplementary) with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`).
+**visualise_results.py** - Generates up to 16 figures (+ 1b supplementary) with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`). When `species_status` is present, structural figures (1–9) are emitted per species subset (`<n>_<name>_human.png`, `<n>_<name>_nonhuman.png`); enrichment figures use reviewed+TrEMBL (Figs 10–12) or reviewed-only (Figs 13–16) depending on database coverage.
 
 #### Database & Enrichment
 
 **database_loaders.py** - Parsers for STRING, BioGRID, HuRI, and HuMAP protein interaction databases. All return standardised DataFrames (`protein_a`, `protein_b`, `source`, `confidence_score`, `evidence_type`) with optional API spot-check validation.
 
-**id_mapper.py** - Isoform-aware protein identifier cross-referencing (ENSP, ENSG, UniProt, gene symbol) using STRING aliases as a single source of truth. Resolves any identifier type to a target namespace with automatic API fallback for local misses.
+**id_mapper.py** - Isoform-aware protein identifier cross-referencing (ENSP, ENSG, UniProt, gene symbol) using STRING aliases as a single source of truth. Resolves any identifier type to a target namespace with automatic API fallback for local misses. Also provides `SpeciesClassifier`, which tags each accession as `reviewed_human`, `trembl_human`, or `non_human` using Swiss-Prot and `HUMAN_9606_idmapping.dat`; the toolkit uses this to skip human-only database lookups on non-human rows.
 
 **overlap_analysis.py** - Computes pairwise interaction overlaps across databases with UpSet-style visualisation. Supports dual-level analysis (isoform-specific and base-accession) via `--base-level` and report generation via `--report`.
 
@@ -334,13 +334,13 @@ The toolkit also handles homodimer, isoform, and multi-chain naming patterns.
 
 ## Output
 
-### CSV (25 base columns, up to 121 with all features)
+### CSV (28 base columns, up to 124 with all features)
 
 The main output CSV groups columns into:
 
 | Category | Key Columns |
 |----------|-------------|
-| **Identity** | complex_name, protein_a, protein_b, complex_type, n_chains, species, structure_source |
+| **Identity** | complex_name, protein_a, protein_b, complex_type, n_chains, species, structure_source, species_a, species_b, species_status (per-chain and complex-level tag: `reviewed_human` / `trembl_human` / `non_human`) |
 | **Core Metrics** | ipTM, pTM, ranking_confidence, pDockQ, ppv |
 | **pLDDT Statistics** | plddt_mean, plddt_median, plddt_min, plddt_max, plddt_below50/70_fraction |
 | **Interface Geometry** | n_interface_contacts, n_interface_residues_a/b, interface_residues_a/b, interface_fraction_a/b, interface_symmetry, contacts_per_interface_residue |
@@ -384,6 +384,8 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 16 | Prediction Quality Paradox | 2×2 panel: pathogenic interface variants and PPI density strengthen with quality (top row) while gene constraint and disorder fraction decline (bottom row), revealing systematic AF2-Multimer prediction bias toward ordered protein pairs |
 
 Figures 1–2 are generated from base CSV columns. Figures 3–9 require `--interface --pae` columns. Figure 10 requires clustering columns from `--clustering`. Figures 11–12 require variant columns from `--variants`. Figure 13 requires stability + ProtVar columns from `--stability --protvar`. Figures 14–15 require disease and pathway columns from `--disease --pathways`. Figure 16 requires variant + pathway columns from `--variants --pathways`.
+
+When the CSV contains `species_status`, Figs 1–9 are emitted per species subset (e.g. `1_Quality_Scatter_human.png`, `1_Quality_Scatter_nonhuman.png`). Figs 10–12 use the reviewed+TrEMBL human subset; Figs 13–16 use the reviewed-only subset (the databases behind them cover reviewed human entries best).
 
 ## Acknowledgements
 Developed by Talhah Zubayer under the supervision of David Burke as part of the MSc Applied Bioinformatics programme at King's College London.

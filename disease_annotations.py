@@ -566,9 +566,32 @@ def annotate_results_with_disease(
     api_cache: dict[str, dict] = {}
     api_misses = 0
 
+    # Lazy import avoids circular dependency at module load time.
+    from toolkit import is_annotatable
+
     for i, row in enumerate(results):
         protein_a = row.get("protein_a", "")
         protein_b = row.get("protein_b", "")
+
+        # Non-human rows: leave all disease columns empty and skip UniProt
+        # XML / API lookups (they'd return nothing anyway). TrEMBL-human rows
+        # still run lookup because the XML/API carries records for them.
+        if not is_annotatable(row):
+            row["n_diseases_a"] = 0
+            row["n_diseases_b"] = 0
+            row["disease_details_a"] = ""
+            row["disease_details_b"] = ""
+            row["is_drug_target_a"] = False
+            row["is_drug_target_b"] = False
+            row["n_ptm_sites_a"] = 0
+            row["n_ptm_sites_b"] = 0
+            row["ptm_details_a"] = ""
+            row["ptm_details_b"] = ""
+            row["go_biological_process_a"] = ""
+            row["go_biological_process_b"] = ""
+            row["go_molecular_function_a"] = ""
+            row["go_molecular_function_b"] = ""
+            continue
 
         ann_a = _lookup_annotation(protein_a, annotation_index,
                                    api_fallback, api_cache)
