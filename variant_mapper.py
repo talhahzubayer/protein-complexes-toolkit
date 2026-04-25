@@ -1125,6 +1125,18 @@ def annotate_results_with_variants(
         interface_a = set(conf_res_a) if conf_res_a else set()
         interface_b = set(conf_res_b) if conf_res_b else set()
 
+        # Note: `interface_a` / `interface_b` above are the CONFIDENT interface residue
+        # sets produced by identify_confident_interface_residues() in interface_analysis.py,
+        # not the full pdockq contact residue sets. The 2026-04-24 composite-score
+        # methodology revision switched the confidence filter to bidirectional PAE
+        # (max(forward, reverse)), which is strictly stricter than the previous one-
+        # directional indexing - so roughly 42 percent of complexes ended up with a
+        # smaller confident-residue set post-revision, which cascades here into fewer
+        # interface_core/interface_rim variant classifications and lower
+        # interface_variant_enrichment values. This tightening is intended: a variant
+        # only counts as "at the interface" when AF2 is bidirectionally confident
+        # about the underlying residue's interface status.
+
         # Build cross-chain interface CB coords for core/rim classification
         cross_cb_for_a, _ = _build_interface_cb_coords(interface_b, res_numbers_b, cb_coords_b)
         cross_cb_for_b, _ = _build_interface_cb_coords(interface_a, res_numbers_a, cb_coords_a)

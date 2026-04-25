@@ -10,9 +10,28 @@ Features (structural):
     - Paradox complex detection (high interface confidence + global disorder)
 
 Additional features (PAE-aware, requires PKL data):
-    - Interface PAE mapping and statistics
-    - Confident contact identification (PAE < 5Å AND pLDDT > 70)
+    - Interface PAE mapping and statistics (bidirectional max over PAE[A,B]/PAE[B,A])
+    - PAE-only confident contacts (PAE < 5Å) and strict confident contacts (PAE < 5Å AND both pLDDT >= 70)
     - Computational hot-spot residue extraction
+
+Composite interface confidence score (heuristic, not calibrated):
+    score = WEIGHT_PLDDT * f(interface_plddt_combined)
+          + WEIGHT_PAE   * strict_confident_contact_fraction
+          + WEIGHT_SYMMETRY * interface_symmetry
+          + WEIGHT_DENSITY  * min(contacts_per_interface_residue / DENSITY_NORMALIZATION, 1.0)
+
+    The composite is a screening heuristic, NOT a calibrated estimate of interface correctness.
+    Weights are expert-chosen, partially informed by the 9,573-complex dataset distribution,
+    but have NOT been fitted against DockQ, pDockQ2, or any benchmarked ground truth.
+
+    - pLDDT and strict-confident-contact fraction are the confidence-bearing components.
+    - Interface symmetry is a geometric plausibility feature, not a confidence feature.
+      Asymmetric interfaces can be biologically real (enzyme-substrate, peptide-domain,
+      antibody-antigen, hub proteins binding short linear motifs), so low symmetry
+      should not be read as low confidence.
+    - Contact density is a packing plausibility feature, not a confidence feature.
+      Dense interfaces can still be misdocked; sparse interfaces can be biologically real
+      for transient or motif-mediated binding.
 
 Usage (standalone):
     python interface_analysis.py --pdb structure.pdb
@@ -41,7 +60,13 @@ from pdockq import (
     find_best_chain_pair_New as find_best_chain_pair,
     ContactResult_New as ContactResult,
     DEFAULT_CONTACT_THRESHOLD_New as DEFAULT_CONTACT_THRESHOLD,
+    PairContactResult,
+    compute_all_chain_pairs,
+    calc_pdockq_whole_complex,
+    ChainInfo_New,
 )
+
+from dataclasses import dataclass, field, asdict
 
 #----------------------------Constants-------------------------------------
 
@@ -65,10 +90,19 @@ SUBSTANTIAL_DISORDER_FRACTION = 0.3  # >30% residues below pLDDT 50
 PLDDT_DISORDER_THRESHOLD = 50
 
 # Composite score normalisation (calibrated from 9,573-complex dataset)
+# Density is a packing plausibility feature, not a confidence feature:
+# dense interfaces can still be misdocked and sparse interfaces can be biologically real.
 DENSITY_NORMALIZATION = 2.0          # density / 2.0, capped at 1.0 (95th percentile density = 1.70; rounded up to 2.0)
 
-# Composite score weights - biological importance ordering:
-# Interface pLDDT + confident contacts are the strongest indicators - symmetry and density are supporting evidence.
+# Composite score weights - HEURISTIC, not fitted against DockQ/pDockQ2 or any benchmarked
+# ground truth. Ordering is expert-chosen, partially informed by the 9,573-complex dataset:
+#   - interface pLDDT and strict confident-contact fraction are treated as the
+#     confidence-bearing components
+#   - interface symmetry is a geometric plausibility feature (asymmetric interfaces can be
+#     biologically real - e.g. enzyme-substrate, peptide-domain, antibody-antigen, hub-motif)
+#   - contacts-per-interface-residue density is a packing plausibility feature
+# Any claim about calibrated correctness would require benchmarking against DockQ, pDockQ2,
+# or known positive/negative PPIs and is out of scope for this toolkit.
 WEIGHT_PLDDT = 0.35
 WEIGHT_PAE = 0.35
 WEIGHT_SYMMETRY = 0.15
@@ -83,6 +117,52 @@ PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.50 # below -> likely artefactual (calibra
 # Metric disagreement threshold (ipTM vs pDockQ)
 # All disagreement cases in 9,573-complex dataset are ipTM >> pDockQ, confirming pDockQ is systematically more stringent - often penalising genuine interfaces in disordered complexes.
 METRIC_DISAGREEMENT_THRESHOLD = 0.52  # 90th percentile of |iptm - pdockq| distribution
+
+# Bidirectional PAE handling
+# PAE is a directional quantity: pae[i, j] is the expected position error at residue i when the
+# predicted and actual structures are aligned on residue j. For an inter-chain contact (a, b)
+# we take the elementwise max of pae[a, b] and pae[b, a] so that a contact is only considered
+# confidently placed if BOTH directional alignments agree.
+USE_BIDIRECTIONAL_PAE = True
+
+# pLDDT component floor for the composite score
+# Prevents complexes with very-low-pLDDT interfaces from collapsing the pLDDT term to 0,
+# which would hide information carried by the PAE / symmetry / density components.
+PLDDT_COMPONENT_FLOOR = 0.05
+
+
+def normalise_interface_plddt(plddt: Optional[float]) -> Optional[float]:
+    """Map interface pLDDT to a 0-1 confidence component for the composite score.
+
+    Continuous, band-aware transform anchored on AlphaFold confidence conventions:
+        - pLDDT <= 50      -> floor (PLDDT_COMPONENT_FLOOR = 0.05); AlphaFold's "very low
+                              confidence" region is compressed to the floor, not given
+                              proportional credit.
+        - 50 <  pLDDT < 90 -> linear ramp from floor up to 1.0 across the low/high bands.
+        - pLDDT >= 90      -> 1.0; "very high confidence" region saturates.
+
+    The function is continuous in pLDDT (pLDDT itself is continuous, so the normaliser
+    should be too - a residue moving from pLDDT 49.9 to 50.1 should not produce a score jump).
+
+    Shape reference:
+        pLDDT = 50  -> 0.05 (floor)
+        pLDDT = 52  -> 0.05 (still floored; raw = 0.05 clips to floor)
+        pLDDT = 60  -> 0.25
+        pLDDT = 70  -> 0.50
+        pLDDT = 80  -> 0.75
+        pLDDT = 90  -> 1.00
+        pLDDT = 100 -> 1.00 (capped)
+
+    Args:
+        plddt: Interface pLDDT on the AlphaFold 0-100 scale. None is passed through.
+
+    Returns:
+        A float in [PLDDT_COMPONENT_FLOOR, 1.0], or None if plddt is None.
+    """
+    if plddt is None:
+        return None
+    raw = (plddt - 50.0) / 40.0
+    return round(float(np.clip(raw, PLDDT_COMPONENT_FLOOR, 1.0)), 4)
 
 
 #-----------------Interface Contact Identification----------------------------
@@ -243,23 +323,16 @@ def compute_interface_plddt(contact_result: ContactResult) -> dict:
 
 #-----------------Interface PAE Mapping------------------------------------------
 
-def extract_interface_pae(contact_result: ContactResult, pae_matrix: np.ndarray, chain_lengths: Optional[tuple[int, int]] = None, *,
+def _compute_interface_pae_indices(contact_result: ContactResult, pae_matrix: np.ndarray, chain_lengths: Optional[tuple[int, int]] = None, *,
     chain_offsets: Optional[tuple[int, int]] = None,
-    cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None) -> Optional[np.ndarray]:
-    """Map interface contacts to the PAE matrix and extract inter-chain PAE values.
-    The PAE matrix from AlphaFold2 has shape (N_total, N_total) where N_total is the sum of residues across ALL chains.  
-    This function handles:
-      - Multi-chain complexes: chain_offsets specify where each chain starts in the PAE matrix, rather than assuming a simple dimer layout.
-      - CB mismatch: cb_to_ca_maps translate CB-based contact indices into full-residue (CA-based) indices matching the PAE matrix.
-    For backward compatibility, the original chain_lengths parameter is still accepted and works correctly for standard dimers where CB count == CA count.
-    Args:
-        contact_result: ContactResult with interface contact indices.
-        pae_matrix: Full PAE matrix from the PKL file, shape (N, N).
-        chain_lengths: DEPRECATED for multi-chain use. Tuple of (n_residues_chain_A, n_residues_chain_B) for the dimer case. Used only as fallback when chain_offsets is not provided.
-        chain_offsets: Tuple of (offset_A, offset_B) - the starting row/column index of each chain in the PAE matrix. For a dimer this is (0, len_A); for multi-chain complexes, computed by compute_pae_chain_offsets().
-        cb_to_ca_maps: Tuple of (map_A, map_B) where map_A[i] gives the full-residue (CA) index of CB-array position i for chain A. When None, direct (identity) mapping is assumed.
-    Returns:
-        1D array of PAE values at each interface contact, or None if the PAE matrix dimensions don't match or mapping fails.
+    cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Map interface contacts to (row, col) indices in the PAE matrix.
+
+    Internal helper shared by extract_interface_pae() and compute_interface_pae_features()
+    so that bidirectional PAE lookup does not duplicate the index-mapping logic.
+
+    Returns (pae_row_indices, pae_col_indices) both as 1D int arrays, or None if the
+    PAE matrix dimensions don't match or mapping fails or there are no contacts.
     """
     if contact_result.n_interface_contacts == 0:
         return None
@@ -304,14 +377,68 @@ def extract_interface_pae(contact_result: ContactResult, pae_matrix: np.ndarray,
             or np.any(pae_row_indices < 0) or np.any(pae_col_indices < 0)):
         return None
 
-    interface_pae_values = pae_matrix[pae_row_indices, pae_col_indices]
-    return interface_pae_values
+    return pae_row_indices, pae_col_indices
+
+
+def extract_interface_pae(contact_result: ContactResult, pae_matrix: np.ndarray, chain_lengths: Optional[tuple[int, int]] = None, *,
+    chain_offsets: Optional[tuple[int, int]] = None,
+    cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None) -> Optional[np.ndarray]:
+    """Map interface contacts to the PAE matrix and extract inter-chain PAE values.
+
+    PAE is directional: pae[i, j] is the expected position error at residue i when the
+    predicted and actual structures are aligned on residue j. When USE_BIDIRECTIONAL_PAE is
+    True (default), this function returns the elementwise maximum of pae[a, b] and pae[b, a]
+    so that a contact is only considered confidently placed if BOTH directional alignments
+    agree. Use compute_interface_pae_features() if you need the forward and reverse arrays
+    separately.
+
+    The PAE matrix from AlphaFold2 has shape (N_total, N_total) where N_total is the sum of
+    residues across ALL chains. This function handles:
+      - Multi-chain complexes: chain_offsets specify where each chain starts in the PAE matrix.
+      - CB mismatch: cb_to_ca_maps translate CB-based contact indices into full-residue (CA-based)
+        indices matching the PAE matrix.
+
+    Args:
+        contact_result: ContactResult with interface contact indices.
+        pae_matrix: Full PAE matrix from the PKL file, shape (N, N).
+        chain_lengths: DEPRECATED for multi-chain use. Tuple of (n_residues_chain_A, n_residues_chain_B) for the dimer case. Used only as fallback when chain_offsets is not provided.
+        chain_offsets: Tuple of (offset_A, offset_B) - the starting row/column index of each chain in the PAE matrix. For a dimer this is (0, len_A); for multi-chain complexes, computed by compute_pae_chain_offsets().
+        cb_to_ca_maps: Tuple of (map_A, map_B) where map_A[i] gives the full-residue (CA) index of CB-array position i for chain A. When None, direct (identity) mapping is assumed.
+    Returns:
+        1D array of PAE values at each interface contact (bidirectional max when
+        USE_BIDIRECTIONAL_PAE is True, otherwise forward only), or None if the PAE matrix
+        dimensions don't match or mapping fails.
+    """
+    indices = _compute_interface_pae_indices(contact_result, pae_matrix, chain_lengths,
+                                             chain_offsets=chain_offsets, cb_to_ca_maps=cb_to_ca_maps)
+    if indices is None:
+        return None
+    pae_row_indices, pae_col_indices = indices
+    forward = pae_matrix[pae_row_indices, pae_col_indices]
+    if not USE_BIDIRECTIONAL_PAE:
+        return forward
+    reverse = pae_matrix[pae_col_indices, pae_row_indices]
+    return np.maximum(forward, reverse)
 
 def compute_interface_pae_features(contact_result: ContactResult, pae_matrix: np.ndarray, chain_lengths: Optional[tuple[int, int]] = None, *,
-    chain_offsets: Optional[tuple[int, int]] = None, 
+    chain_offsets: Optional[tuple[int, int]] = None,
     cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None) -> dict:
     """Compute PAE-derived interface quality features.
-    These features complement pLDDT-based analysis by assessing the predicted relative positioning between residue pairs, not just per-residue confidence.
+
+    These features complement pLDDT-based analysis by assessing the predicted relative
+    positioning between residue pairs, not just per-residue confidence.
+
+    Two confident-contact fractions are returned:
+      - pae_confident_contact_fraction: PAE < 5A only (fraction of contacts whose inter-chain
+        positioning is confident). Historical metric; used by paradox-detection thresholds
+        that were calibrated against this definition.
+      - strict_confident_contact_fraction: PAE < 5A AND both residue pLDDT >= 70. Stricter
+        definition used by the composite interface confidence score.
+
+    Directional diagnostics (not part of the composite score; reported for the methods
+    section): forward_mean is the mean of pae[a_idx, b_idx], reverse_mean is the mean of
+    pae[b_idx, a_idx], directional_delta_mean / _max summarise abs(forward - reverse).
+
     Args:
         contact_result: ContactResult from identify_interface_contacts().
         pae_matrix: Full PAE matrix from the PKL file.
@@ -320,27 +447,46 @@ def compute_interface_pae_features(contact_result: ContactResult, pae_matrix: np
         cb_to_ca_maps: Tuple of (map_A, map_B) for CB->CA index translation.
     Returns:
         Dictionary with keys:
-            interface_pae_mean: Mean PAE across interface contacts.
-            interface_pae_median: Median PAE across interface contacts.
-            interface_pae_min: Minimum PAE at the interface.
-            interface_pae_max: Maximum PAE at the interface.
-            n_confident_contacts: Contacts with PAE < 5Å.
-            confident_contact_fraction: Fraction of contacts that are confident.
-            cross_chain_pae_mean: Mean of the full cross-chain PAE block (not just contacts - captures overall chain-chain relative positioning).
+            interface_pae_mean, interface_pae_median, interface_pae_min, interface_pae_max:
+                Stats over the combined (bidirectional-max) per-contact PAE array.
+            n_pae_confident_contacts, pae_confident_contact_fraction:
+                PAE-only confident contacts (combined PAE < 5A).
+            n_strict_confident_contacts, strict_confident_contact_fraction:
+                Strict confident contacts (combined PAE < 5A AND both pLDDT >= 70).
+            cross_chain_pae_mean: Mean of the full cross-chain PAE block (not just contacts -
+                captures overall chain-chain relative positioning).
+            interface_pae_forward_mean, interface_pae_reverse_mean: Mean PAE in each direction.
+            interface_pae_directional_delta_mean, interface_pae_directional_delta_max:
+                abs(forward - reverse) stats - diagnostic for directional disagreement.
     """
     empty = {
         'interface_pae_mean': None,
         'interface_pae_median': None,
         'interface_pae_min': None,
         'interface_pae_max': None,
-        'n_confident_contacts': None,
-        'confident_contact_fraction': None,
+        'n_pae_confident_contacts': None,
+        'pae_confident_contact_fraction': None,
+        'n_strict_confident_contacts': None,
+        'strict_confident_contact_fraction': None,
         'cross_chain_pae_mean': None,
+        'interface_pae_forward_mean': None,
+        'interface_pae_reverse_mean': None,
+        'interface_pae_directional_delta_mean': None,
+        'interface_pae_directional_delta_max': None,
     }
 
-    interface_pae = extract_interface_pae(contact_result, pae_matrix, chain_lengths, chain_offsets=chain_offsets, cb_to_ca_maps=cb_to_ca_maps)
-    if interface_pae is None or len(interface_pae) == 0:
+    indices = _compute_interface_pae_indices(contact_result, pae_matrix, chain_lengths,
+                                             chain_offsets=chain_offsets, cb_to_ca_maps=cb_to_ca_maps)
+    if indices is None:
         return empty
+    pae_row_indices, pae_col_indices = indices
+    if len(pae_row_indices) == 0:
+        return empty
+
+    # Directional PAE lookups
+    forward = pae_matrix[pae_row_indices, pae_col_indices]
+    reverse = pae_matrix[pae_col_indices, pae_row_indices]
+    combined = np.maximum(forward, reverse) if USE_BIDIRECTIONAL_PAE else forward
 
     # Determine offsets for cross-chain PAE block extraction
     if chain_offsets is not None:
@@ -352,9 +498,6 @@ def compute_interface_pae_features(contact_result: ContactResult, pae_matrix: np
 
     # Determine chain extents in the PAE matrix for cross-chain block
     if cb_to_ca_maps is not None:
-        # Use the CA counts for the correct block size
-        # The chain extent in PAE is from its offset to the next chain's offset
-        # We need CA counts, which we can infer from the cb_to_ca_map max index + 1
         ca_len_a = max(cb_to_ca_maps[0]) + 1 if cb_to_ca_maps[0] else contact_result.n_residues_a
         ca_len_b = max(cb_to_ca_maps[1]) + 1 if cb_to_ca_maps[1] else contact_result.n_residues_b
     elif chain_lengths is not None:
@@ -367,17 +510,38 @@ def compute_interface_pae_features(contact_result: ContactResult, pae_matrix: np
     cross_chain_block = pae_matrix[off_a:off_a + ca_len_a, off_b:off_b + ca_len_b]
     cross_chain_mean = float(np.mean(cross_chain_block))
 
-    n_confident = int(np.sum(interface_pae < PAE_CONFIDENT_THRESHOLD))
-    n_total = len(interface_pae)
+    # PAE-only confident contacts (uses combined PAE)
+    n_confident = int(np.sum(combined < PAE_CONFIDENT_THRESHOLD))
+    n_total = len(combined)
+
+    # Strict confident contacts (combined PAE AND both pLDDT >= threshold)
+    contacts = contact_result.contacts
+    plddt_a_vals = contact_result.plddt_a[contacts[:, 0]]
+    plddt_b_vals = contact_result.plddt_b[contacts[:, 1]]
+    strict_mask = (
+        (combined < PAE_CONFIDENT_THRESHOLD)
+        & (plddt_a_vals >= INTERFACE_PLDDT_HIGH)
+        & (plddt_b_vals >= INTERFACE_PLDDT_HIGH)
+    )
+    n_strict = int(np.sum(strict_mask))
+
+    # Directional disagreement diagnostics
+    directional_abs_delta = np.abs(forward - reverse)
 
     return {
-        'interface_pae_mean': round(float(np.mean(interface_pae)), 2),
-        'interface_pae_median': round(float(np.median(interface_pae)), 2),
-        'interface_pae_min': round(float(np.min(interface_pae)), 2),
-        'interface_pae_max': round(float(np.max(interface_pae)), 2),
-        'n_confident_contacts': n_confident,
-        'confident_contact_fraction': round(n_confident / n_total, 4),
+        'interface_pae_mean': round(float(np.mean(combined)), 2),
+        'interface_pae_median': round(float(np.median(combined)), 2),
+        'interface_pae_min': round(float(np.min(combined)), 2),
+        'interface_pae_max': round(float(np.max(combined)), 2),
+        'n_pae_confident_contacts': n_confident,
+        'pae_confident_contact_fraction': round(n_confident / n_total, 4),
+        'n_strict_confident_contacts': n_strict,
+        'strict_confident_contact_fraction': round(n_strict / n_total, 4),
         'cross_chain_pae_mean': round(cross_chain_mean, 2),
+        'interface_pae_forward_mean': round(float(np.mean(forward)), 2),
+        'interface_pae_reverse_mean': round(float(np.mean(reverse)), 2),
+        'interface_pae_directional_delta_mean': round(float(np.mean(directional_abs_delta)), 2),
+        'interface_pae_directional_delta_max': round(float(np.max(directional_abs_delta)), 2),
     }
 
 #-----------------Confident Interface Residues (Computational Hot Spots)------------
@@ -479,6 +643,256 @@ def identify_confident_interface_residues(contact_result: ContactResult, pae_mat
         'confident_residue_numbers_b': res_nums_b,
         'confident_contacts': confident_contact_details,
     }
+
+#---------------All-Pairs Metrics (Multimer Refactor Phase 3)---------------------
+
+@dataclass
+class PairMetricRecord:
+    """JSON-serialisable per-pair record — geometry + PAE + symmetry combined.
+
+    Produced by ``compute_all_pair_metrics``; one record per unique chain pair
+    (including pairs with zero inter-chain contacts). This is what lands in the
+    ``pair_metrics`` CSV column via ``asdict`` + ``json.dumps``.
+
+    PAE fields distinguish "PAE unavailable" (None) from "PAE available, no
+    confident contacts" (0.0). Interface residue sets are converted to sorted
+    lists so the JSON round-trip is stable.
+    """
+    chain_i: str
+    chain_j: str
+    accession_i: str
+    accession_j: str
+    n_contacts: int
+    interface_plddt: Optional[float]
+    pdockq: float
+    ppv: Optional[float]
+    symmetry: Optional[float]
+    pae_confident_fraction: Optional[float]
+    strict_confident_fraction: Optional[float]
+    interface_residues_i: list = field(default_factory=list)
+    interface_residues_j: list = field(default_factory=list)
+
+
+def _compute_pair_symmetry(pair: PairContactResult) -> Optional[float]:
+    """Compute interface symmetry for a single pair (min/max of interface fractions).
+
+    Returns None for zero-contact pairs: symmetry is undefined without an interface.
+    Matches the dimer formula in ``compute_interface_geometry`` so N=2 metric
+    identity holds.
+    """
+    raw = pair._raw
+    if raw is None or raw.n_interface_contacts == 0:
+        return None
+    n_if_a = len(raw.interface_residues_a)
+    n_if_b = len(raw.interface_residues_b)
+    n_res_a = raw.n_residues_a
+    n_res_b = raw.n_residues_b
+    frac_a = n_if_a / n_res_a if n_res_a > 0 else 0.0
+    frac_b = n_if_b / n_res_b if n_res_b > 0 else 0.0
+    max_frac = max(frac_a, frac_b)
+    if max_frac == 0.0:
+        return None
+    return round(min(frac_a, frac_b) / max_frac, 4)
+
+
+def _compute_pair_pae_fractions(
+    pair: PairContactResult,
+    pae_matrix: Optional[np.ndarray],
+    chain_offsets: Optional[dict[str, int]],
+    cb_to_ca_map: Optional[dict[str, list[int]]],
+) -> tuple[Optional[float], Optional[float]]:
+    """Compute (pae_confident_fraction, strict_confident_fraction) for one pair.
+
+    Returns (None, None) when the PAE matrix is unavailable — distinct from
+    (0.0, 0.0) which would mean "PAE available, no confident contacts". The
+    caller in ``aggregate_pair_metrics`` relies on this distinction for
+    contact-weighted means.
+    """
+    if pae_matrix is None or chain_offsets is None:
+        return None, None
+    raw = pair._raw
+    if raw is None or raw.n_interface_contacts == 0:
+        return (0.0, 0.0) if pae_matrix is not None else (None, None)
+
+    off_i = chain_offsets.get(pair.chain_i)
+    off_j = chain_offsets.get(pair.chain_j)
+    if off_i is None or off_j is None:
+        return None, None
+
+    cb_maps = None
+    if cb_to_ca_map is not None:
+        map_i = cb_to_ca_map.get(pair.chain_i)
+        map_j = cb_to_ca_map.get(pair.chain_j)
+        if map_i and map_j:
+            cb_maps = (map_i, map_j)
+
+    indices = _compute_interface_pae_indices(
+        raw, pae_matrix, chain_lengths=None,
+        chain_offsets=(off_i, off_j), cb_to_ca_maps=cb_maps,
+    )
+    if indices is None:
+        return None, None
+    rows, cols = indices
+    if len(rows) == 0:
+        return 0.0, 0.0
+
+    forward = pae_matrix[rows, cols]
+    reverse = pae_matrix[cols, rows]
+    combined = np.maximum(forward, reverse) if USE_BIDIRECTIONAL_PAE else forward
+
+    contacts = raw.contacts
+    plddt_a = raw.plddt_a[contacts[:, 0]]
+    plddt_b = raw.plddt_b[contacts[:, 1]]
+    strict_mask = (
+        (combined < PAE_CONFIDENT_THRESHOLD)
+        & (plddt_a >= INTERFACE_PLDDT_HIGH)
+        & (plddt_b >= INTERFACE_PLDDT_HIGH)
+    )
+
+    n_total = len(combined)
+    n_confident = int(np.sum(combined < PAE_CONFIDENT_THRESHOLD))
+    n_strict = int(np.sum(strict_mask))
+    return round(n_confident / n_total, 4), round(n_strict / n_total, 4)
+
+
+def compute_all_pair_metrics(
+    pair_results: list[PairContactResult],
+    pae_matrix: Optional[np.ndarray] = None,
+    chain_offsets: Optional[dict[str, int]] = None,
+    cb_to_ca_map: Optional[dict[str, list[int]]] = None,
+) -> list[PairMetricRecord]:
+    """Combine per-pair geometry, PAE, and symmetry into JSON-safe records.
+
+    Args:
+        pair_results: Output of ``pdockq.compute_all_chain_pairs``.
+        pae_matrix: Full PAE matrix; None when PKL is unavailable.
+        chain_offsets: Chain -> starting PAE row/column offset (dict, not tuple,
+            because we have N>2 chains). When None, PAE fields are None.
+        cb_to_ca_map: Chain -> CB->CA index list (from ``ChainInfo_New``).
+
+    Returns:
+        One ``PairMetricRecord`` per input pair, preserving order. Zero-contact
+        pairs emit the record with null score-bearing fields so
+        ``aggregate_pair_metrics`` can surface dangling chains via ``pdockq_min``.
+    """
+    records: list[PairMetricRecord] = []
+    for pair in pair_results:
+        symmetry = _compute_pair_symmetry(pair)
+        pae_conf, strict_conf = _compute_pair_pae_fractions(
+            pair, pae_matrix, chain_offsets, cb_to_ca_map,
+        )
+        records.append(PairMetricRecord(
+            chain_i=pair.chain_i,
+            chain_j=pair.chain_j,
+            accession_i=pair.accession_i,
+            accession_j=pair.accession_j,
+            n_contacts=pair.n_contacts,
+            interface_plddt=round(pair.interface_plddt, 2) if pair.interface_plddt is not None else None,
+            pdockq=round(pair.pdockq, 4),
+            ppv=round(pair.ppv, 4) if pair.ppv is not None else None,
+            symmetry=symmetry,
+            pae_confident_fraction=pae_conf,
+            strict_confident_fraction=strict_conf,
+            interface_residues_i=sorted(int(r) for r in pair.interface_residues_i),
+            interface_residues_j=sorted(int(r) for r in pair.interface_residues_j),
+        ))
+    return records
+
+
+def aggregate_pair_metrics(records: list[PairMetricRecord]) -> dict:
+    """Roll per-pair records up into the per-complex aggregate scalars.
+
+    Aggregation policy (from the dissertation-safe plan):
+        pdockq_mean                    unweighted mean across all pairs (zero-contact pairs contribute 0.0)
+        pdockq_min                     min across all pairs (includes zero-contact)
+        contact_count_total            sum across pairs
+        symmetry_mean                  contact-weighted; skip zero-contact pairs
+        symmetry_min                   min across pairs with at least one contact
+        interface_plddt_mean           contact-weighted; skip zero-contact pairs
+        pae_confident_fraction_mean    contact-weighted; None if PAE unavailable on any contact-bearing pair
+        strict_confident_fraction_mean contact-weighted; None if PAE unavailable on any contact-bearing pair
+
+    None vs 0.0: a contact-bearing pair with ``pae_confident_fraction is None``
+    means PAE was not available. In that case the aggregate is None, not a partial
+    average, because silently dropping pairs would understate PAE unavailability.
+    Pairs with ``n_contacts == 0`` are excluded from PAE aggregation entirely
+    (no contacts → no fraction to weight).
+    """
+    n = len(records)
+    if n == 0:
+        return {
+            'pdockq_mean': None,
+            'pdockq_min': None,
+            'contact_count_total': 0,
+            'symmetry_mean': None,
+            'symmetry_min': None,
+            'interface_plddt_mean': None,
+            'pae_confident_fraction_mean': None,
+            'strict_confident_fraction_mean': None,
+        }
+
+    pdockqs = [r.pdockq for r in records]
+    pdockq_mean = round(float(np.mean(pdockqs)), 4)
+    pdockq_min = round(float(np.min(pdockqs)), 4)
+    contact_count_total = int(sum(r.n_contacts for r in records))
+
+    with_contacts = [r for r in records if r.n_contacts > 0]
+
+    # Contact-weighted mean over pairs that have contacts; None if all pairs zero.
+    def _weighted_mean(attr: str) -> Optional[float]:
+        num = 0.0
+        denom = 0
+        for r in with_contacts:
+            val = getattr(r, attr)
+            if val is None:
+                continue
+            num += val * r.n_contacts
+            denom += r.n_contacts
+        if denom == 0:
+            return None
+        return round(num / denom, 4)
+
+    symmetry_mean = _weighted_mean('symmetry')
+    interface_plddt_mean = _weighted_mean('interface_plddt')
+    symmetries_nonzero = [r.symmetry for r in with_contacts if r.symmetry is not None]
+    symmetry_min = round(float(np.min(symmetries_nonzero)), 4) if symmetries_nonzero else None
+
+    # PAE aggregates: None if any contact-bearing pair reports None (i.e. PAE
+    # genuinely unavailable). 0.0 on a pair is valid data and included.
+    def _pae_weighted_mean(attr: str) -> Optional[float]:
+        if not with_contacts:
+            return None
+        num = 0.0
+        denom = 0
+        for r in with_contacts:
+            val = getattr(r, attr)
+            if val is None:
+                return None
+            num += val * r.n_contacts
+            denom += r.n_contacts
+        if denom == 0:
+            return None
+        return round(num / denom, 4)
+
+    pae_confident_fraction_mean = _pae_weighted_mean('pae_confident_fraction')
+    strict_confident_fraction_mean = _pae_weighted_mean('strict_confident_fraction')
+
+    return {
+        'pdockq_mean': pdockq_mean,
+        'pdockq_min': pdockq_min,
+        'contact_count_total': contact_count_total,
+        'symmetry_mean': symmetry_mean,
+        'symmetry_min': symmetry_min,
+        'interface_plddt_mean': interface_plddt_mean,
+        'pae_confident_fraction_mean': pae_confident_fraction_mean,
+        'strict_confident_fraction_mean': strict_confident_fraction_mean,
+    }
+
+
+def serialise_pair_metrics(records: list[PairMetricRecord]) -> str:
+    """Serialise pair records to a compact JSON string for the CSV column."""
+    return json.dumps([asdict(r) for r in records], separators=(',', ':'))
+
 
 #------------------Main Analysis Functions (Module Interface)-------------------------------------
 
@@ -677,7 +1091,10 @@ def _compute_flags(features: dict) -> list[str]:
         flags.append('interface_better_than_bulk')
 
     # PAE flags
-    confident_fraction = features.get('confident_contact_fraction')
+    # Keep pointing at the PAE-only fraction (pae_confident_contact_fraction), not the strict
+    # fraction: the 0.2 threshold was calibrated against the PAE-only definition. Any
+    # recalibration should happen alongside the paradox and quality-tier thresholds.
+    confident_fraction = features.get('pae_confident_contact_fraction')
     if confident_fraction is not None:
         if confident_fraction < 0.2:
             flags.append('low_interface_confidence')
@@ -688,21 +1105,37 @@ def _compute_flags(features: dict) -> list[str]:
 #---------------Composite Interface Confidence Score-----------------------
 
 def compute_interface_confidence(metrics: dict) -> Optional[float]:
-    """Combine interface-level quality indicators into a single confidence score.
-    The score captures overall interface reliability by weighting 4 normalised components: 
-    1. Interface pLDDT (local structural confidence)
-    2. Confident contact fraction (PAE-validated positioning)
-    3. Interface symmetry (both chains contribute)
-    4. Contact density (tightly packed)
-    Weights reflect biological importance: interface pLDDT and confident contacts are the strongest indicators of genuine binding, while symmetry and density provide supporting evidence.
-    Requires PAE data (confident_contact_fraction). Returns None when PAE features are unavailable.
+    """Combine interface-level quality indicators into a single heuristic screening score.
+
+    The score is a WEIGHTED AGGREGATION of four normalised components, NOT a calibrated
+    estimate of interface correctness:
+        1. Interface pLDDT, transformed by normalise_interface_plddt() (local structural
+           confidence on AlphaFold's 0-100 scale, band-aware mapping to [0.05, 1.0])
+        2. Strict confident contact fraction (PAE < 5A AND both residue pLDDT >= 70) - the
+           strictest available confidence-bearing feature for inter-chain positioning
+        3. Interface symmetry (geometric plausibility, not confidence - asymmetric
+           interfaces can be biologically real)
+        4. Contact density (packing plausibility, not confidence - sparse interfaces can be
+           biologically real for transient/motif-mediated binding)
+
+    Components 1 and 2 carry confidence information; components 3 and 4 are plausibility
+    features retained because they correlate with typical binding geometries but should not
+    be read as confidence in their own right. Weights are expert-chosen, partially informed
+    by the 9,573-complex distribution, and have NOT been fitted against DockQ, pDockQ2, or
+    any benchmarked ground truth. Treat the composite as a screening/aggregation heuristic.
+
+    Requires PAE data (strict_confident_contact_fraction). Returns None when PAE features
+    are unavailable.
+
     Args:
-        metrics: Dictionary containing at minimum - interface_plddt_combined, confident_contact_fraction, interface_symmetry and contacts_per_interface_residue.
+        metrics: Dictionary containing at minimum - interface_plddt_combined,
+            strict_confident_contact_fraction, interface_symmetry and
+            contacts_per_interface_residue.
     Returns:
-        Score in range 0.0 (no confidence) to 1.0 (highly confident) or None if required metrics are missing.
+        Score in range 0.0 to 1.0 or None if required metrics are missing.
     """
     if_plddt = metrics.get('interface_plddt_combined')
-    conf_frac = metrics.get('confident_contact_fraction')
+    conf_frac = metrics.get('strict_confident_contact_fraction')
     symmetry = metrics.get('interface_symmetry')
     density = metrics.get('contacts_per_interface_residue')
 
@@ -710,7 +1143,7 @@ def compute_interface_confidence(metrics: dict) -> Optional[float]:
     if any(v is None for v in [if_plddt, conf_frac, symmetry, density]):
         return None
 
-    plddt_component = if_plddt / 100.0
+    plddt_component = normalise_interface_plddt(if_plddt)
     pae_component = conf_frac                                   # already 0-1
     symmetry_component = symmetry                               # already 0-1
     density_component = min(density / DENSITY_NORMALIZATION, 1.0)
@@ -743,7 +1176,11 @@ def compute_extended_flags(interface_features: dict, iptm: Optional[float] = Non
             and pdockq >= PARADOX_PDOCKQ_THRESHOLD
             and disorder_fraction > SUBSTANTIAL_DISORDER_FRACTION):
 
-        conf_frac = interface_features.get('confident_contact_fraction')
+        # Keep pointing at the PAE-only fraction: the GENUINE (0.73) and ARTEFACT (0.50)
+        # thresholds were calibrated against 138 paradox complexes scored with the
+        # PAE-only definition. Any recalibration to the strict definition is deferred
+        # to a future pass alongside quality_tier_v2 threshold recalibration.
+        conf_frac = interface_features.get('pae_confident_contact_fraction')
 
         if conf_frac is not None and conf_frac > PARADOX_CONFIDENT_CONTACT_GENUINE:
             flags.append('paradox_confident_disorder')
@@ -768,7 +1205,8 @@ def build_interface_export_record(complex_name: str, protein_a: str, protein_b: 
     iptm: Optional[float] = None,
     pdockq: Optional[float] = None,
     n_interface_contacts: Optional[int] = None,
-    confident_contact_fraction: Optional[float] = None,
+    pae_confident_contact_fraction: Optional[float] = None,
+    strict_confident_contact_fraction: Optional[float] = None,
     interface_plddt_combined: Optional[float] = None) -> dict:
     """Build a structured record for interface residue export.
     Produces a JSON-serialisable dictionary suitable for JSONL output.
@@ -786,7 +1224,9 @@ def build_interface_export_record(complex_name: str, protein_a: str, protein_b: 
         iptm: Interface pTM score (optional, for context).
         pdockq: pDockQ score (optional, for context).
         n_interface_contacts: Total interface contacts (optional).
-        confident_contact_fraction: Fraction of confident contacts (optional).
+        pae_confident_contact_fraction: Fraction of contacts with PAE < 5A only (optional).
+        strict_confident_contact_fraction: Fraction of contacts with PAE < 5A AND both
+            pLDDT >= 70 - the fraction consumed by the composite score (optional).
         interface_plddt_combined: Mean interface pLDDT (optional).
     Returns:
         Dictionary with all fields needed for the JSONL export.
@@ -800,7 +1240,8 @@ def build_interface_export_record(complex_name: str, protein_a: str, protein_b: 
         'iptm': iptm,
         'pdockq': pdockq,
         'n_interface_contacts': n_interface_contacts,
-        'confident_contact_fraction': confident_contact_fraction,
+        'pae_confident_contact_fraction': pae_confident_contact_fraction,
+        'strict_confident_contact_fraction': strict_confident_contact_fraction,
         'interface_plddt_combined': interface_plddt_combined,
         'confident_interface_residues_a': confident_residue_numbers_a,
         'confident_interface_residues_b': confident_residue_numbers_b,
@@ -884,10 +1325,13 @@ Usage (as importable module):
         # PAE
         if result.get('interface_pae_mean') is not None:
             print(f"\n  Interface PAE:")
-            print(f"    Mean:              {result['interface_pae_mean']}")
-            print(f"    Confident contacts: {result.get('n_confident_contacts', 0)} / "
+            print(f"    Mean (bidirectional max): {result['interface_pae_mean']}")
+            print(f"    PAE-only confident:   {result.get('n_pae_confident_contacts', 0)} / "
                   f"{result.get('n_interface_contacts', 0)} "
-                  f"({result.get('confident_contact_fraction', 0):.1%})")
+                  f"({result.get('pae_confident_contact_fraction', 0):.1%})")
+            print(f"    Strict confident:     {result.get('n_strict_confident_contacts', 0)} / "
+                  f"{result.get('n_interface_contacts', 0)} "
+                  f"({result.get('strict_confident_contact_fraction', 0):.1%})")
             print(f"    Confident residues: A={result.get('n_confident_residues_a', 0)}, "
                   f"B={result.get('n_confident_residues_b', 0)}")
 

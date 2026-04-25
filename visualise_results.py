@@ -151,7 +151,95 @@ SIGNIFICANCE_COLORS = {
     'Unknown': '#bdc3c7',
 }
 
+# Multimer refactor (Phase 5): scope labels + dissertation-safe filter.
+TIER_SCOPE_DIMER = 'dimer_validated'
+TIER_SCOPE_MULTIMER = 'multimer_provisional'
+DIMER_STOICHIOMETRIES = ('A2', 'AB')
+# Caption policy: every figure must advertise its scope as one of these literals.
+CAPTION_SCOPE_DIMER = 'dimer-validated'
+CAPTION_SCOPE_ALL_N = 'all-N descriptive'
+CAPTION_SCOPE_MULTIMER = 'multimer exploratory'
+
 #-----------------------------------------------Infrastructure helpers--------------------------------------------------------
+
+_LEGACY_CSV_WARNED = False
+
+
+def _derive_tier_scope(df: pd.DataFrame) -> pd.Series:
+    """Derive tier_scope for rows loaded from pre-refactor CSVs.
+    Pre-refactor CSVs lack `tier_scope` and `schema_version`. Legacy rows with
+    `n_chains == 2` are treated as dimer_validated; everything else as
+    multimer_provisional. Emits a one-time warning the first time this is invoked.
+    """
+    global _LEGACY_CSV_WARNED
+    if not _LEGACY_CSV_WARNED:
+        print("  Warning: loaded CSV lacks schema_version/tier_scope (pre-multimer_v1). "
+              "Deriving tier_scope from n_chains for backward compatibility.")
+        _LEGACY_CSV_WARNED = True
+    if 'n_chains' in df.columns:
+        n_chains = pd.to_numeric(df['n_chains'], errors='coerce')
+        return np.where(n_chains == 2, TIER_SCOPE_DIMER, TIER_SCOPE_MULTIMER)
+    return np.full(len(df), TIER_SCOPE_DIMER)
+
+
+def _filter_dimer_validated(df: pd.DataFrame) -> pd.DataFrame:
+    """Return rows with tier_scope == 'dimer_validated'.
+    Dissertation-safe default for every figure whose thresholds were calibrated
+    against dimers (Figs 4, 5, 6, 8, 13 and Fig 7 primary panel).
+    """
+    if 'tier_scope' not in df.columns:
+        return df
+    return df[df['tier_scope'] == TIER_SCOPE_DIMER].reset_index(drop=True)
+
+
+def _boolish(series: pd.Series) -> pd.Series:
+    """Map CSV-stringified booleans to real bools. Non-matching values become NaN.
+    Use anywhere a boolean column round-tripped through CSV may arrive as the
+    strings "True"/"False"/"0"/"1"/"yes"/"no" — `.astype(bool)` would coerce
+    "False" to True (non-empty string is truthy).
+    """
+    return series.astype(str).str.strip().str.lower().map({
+        "true": True, "false": False,
+        "1": True, "0": False,
+        "yes": True, "no": False,
+    })
+
+
+def _phantom_row_mask(df: pd.DataFrame, required_cols: list[str]) -> pd.Series:
+    """Return a boolean Series flagging rows that should be excluded from a
+    figure: any required column is null, OR `geometry_available == False`.
+    Equivalent to "rows whose tier classification is unsafe to display".
+    """
+    if df is None or len(df) == 0:
+        return pd.Series([], dtype=bool)
+    present_cols = [c for c in required_cols if c in df.columns]
+    if present_cols:
+        missing = df[present_cols].isna().any(axis=1)
+    else:
+        missing = pd.Series([False] * len(df), index=df.index)
+    if 'geometry_available' in df.columns:
+        geometry_missing = (
+            df['geometry_available'].astype(str).str.strip().str.lower().eq('false')
+        )
+        return missing | geometry_missing
+    return missing
+
+
+def warn_missing_required_rows(df: pd.DataFrame, required_cols: list[str],
+                               fig_label: str, reason: str) -> None:
+    """Print one warning if rows would be dropped from <fig_label>.
+    `reason` is appended verbatim, so callers can distinguish score-derived
+    figures (e.g. Fig 1) from interface-geometry figures (Figs 4/6/8/9). When
+    the CSV carries `geometry_available`, rows with that flag False are also
+    counted toward the drop - surfaces PKL-only complexes alongside genuine
+    column-missing rows under one warning.
+    """
+    if df is None or len(df) == 0:
+        return
+    dropped = int(_phantom_row_mask(df, required_cols).sum())
+    if dropped:
+        print(f"  Warning: {dropped} rows excluded from {fig_label} due to {reason}.")
+
 
 def _adaptive_scatter_params(n: int) -> Tuple[float, float]:
     """Return (point_size, alpha) scaled to dataset size.
@@ -213,7 +301,7 @@ def detect_columns(df: pd.DataFrame) -> dict:
         'has_pathway_data': 'reactome_pathways_a' in columns,
         'has_stability_data': 'eve_score_mean_a' in columns and 'protvar_am_mean_a' in columns,
         'has_clustering_data': 'sequence_cluster_count' in columns and 'shared_cluster_count' in columns,
-        'has_paradox_data': ('quality_tier_v2' in columns and 'n_pathogenic_interface_variants' in columns and 'ppi_enrichment_ratio' in columns and 'gene_constraint_pli_a' in columns and 'plddt_below50_fraction' in columns),
+        'has_paradox_data': ('quality_tier_v2' in columns and 'n_pathogenic_interface_variants' in columns and 'ppi_enrichment_ratio' in columns and 'gene_constraint_pli_a' in columns and 'gene_constraint_pli_b' in columns and 'plddt_below50_fraction' in columns),
     }
 
 def load_data(csv_path: str) -> pd.DataFrame:
@@ -233,10 +321,15 @@ def load_data(csv_path: str) -> pd.DataFrame:
     numeric_candidates = [
         'iptm', 'pdockq', 'pae_mean', 'plddt_below50_fraction',
         'plddt_below70_fraction', 'interface_pae_mean',
-        'interface_confidence_score', 'confident_contact_fraction',
+        'interface_confidence_score',
+        'pae_confident_contact_fraction', 'strict_confident_contact_fraction',
         'interface_plddt_combined', 'bulk_plddt_combined',
         'interface_vs_bulk_delta', 'interface_symmetry',
         'n_interface_contacts', 'contacts_per_interface_residue', 'n_chains',
+        'pdockq_mean', 'pdockq_min', 'pdockq_whole_complex',
+        'contact_count_total', 'interface_plddt_mean',
+        'symmetry_mean', 'symmetry_min',
+        'pae_confident_fraction_mean', 'strict_confident_fraction_mean',
     ]
     for col in numeric_candidates:
         if col in df.columns:
@@ -284,6 +377,11 @@ def load_data(csv_path: str) -> pd.DataFrame:
         flags_series = df['interface_flags'].fillna('').astype(str)
         for flag_name in ALL_KNOWN_FLAGS:
             df[flag_name] = flags_series.str.contains(flag_name, regex=False)
+
+    # Multimer refactor (Phase 5): derive tier_scope for pre-refactor CSVs.
+    # Post-refactor CSVs (schema_version == "multimer_v1") already ship tier_scope.
+    if 'tier_scope' not in df.columns:
+        df['tier_scope'] = _derive_tier_scope(df)
 
     return df.reset_index(drop=True)
 
@@ -352,19 +450,31 @@ def _build_tier_legend_handles(df: pd.DataFrame) -> list:
             Line2D([0], [0], marker='o', color='w', markerfacecolor='#bdc3c7', markeredgecolor='white', markersize=9, label=f'Unclassified ({missing_count})'))
     return handles
 
-def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray, color: str = '#333333', linewidth: float = 0.9, alpha: float = 0.6) -> None:
+def _overlay_kde_contours(axes: plt.Axes, x: np.ndarray, y: np.ndarray, color: str = '#333333', linewidth: float = 0.9, alpha: float = 0.6, max_kde_points: int = 50_000) -> None:
     """Overlay KDE density contours with percentile labels on a scatter axes.
     Contour levels are percentile-based (10th, 30th, 50th, 70th, 90th of probability mass).
     The innermost ring encloses the top 10% density region and the outermost encloses 90% of all points - fails silently if too few points or if KDE encounters a singular matrix.
+    Non-finite values are stripped, and inputs above `max_kde_points` are deterministically downsampled (seed=42) so HPC-scale runs do not stall.
     Args:
         axes: Matplotlib axes with scatter data already plotted.
         x, y: 1D arrays of scatter coordinates.
         color: Line colour for contours.
         linewidth: Contour line width.
         alpha: Contour line alpha.
+        max_kde_points: Cap on points fed to gaussian_kde; larger inputs are downsampled.
     """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
     if len(x) < 20: # Too few points for KDE to be meaningful - skip contours
         return
+    if len(x) > max_kde_points:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(x), size=max_kde_points, replace=False)
+        x = x[idx]
+        y = y[idx]
     try:
         kde = gaussian_kde(np.vstack([x, y]), bw_method='scott')
         x_grid = np.linspace(x.min() - 0.02, x.max() + 0.02, 120)
@@ -566,6 +676,17 @@ def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: b
     if len(df) == 0:
         print("  Skipping Fig 1: no complexes in subset.")
         return
+    # Filter out rows that can't be plotted (missing iptm/pdockq or
+    # geometry_available=False). Without this filter, NaN-pdockq rows are
+    # silently classified as Low by classify_prediction_quality (since
+    # `NaN >= threshold` evaluates False) and inflate the Low legend count
+    # while remaining invisible on the scatter (matplotlib drops NaN coords).
+    warn_missing_required_rows(df, ['iptm', 'pdockq'], 'Fig 1',
+                               'missing required score metrics')
+    df = df.loc[~_phantom_row_mask(df, ['iptm', 'pdockq'])]
+    if len(df) == 0:
+        print("  Skipping Fig 1: no plottable complexes after geometry filter.")
+        return
     species_suffix = _species_display(species_label)
     use_tier_colouring = col_flags['has_v2_data']
     n_total = len(df)
@@ -615,20 +736,26 @@ def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: b
     _save_figure(figure, f'1_Quality_Scatter{species_label}.png')
 
 def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
-    """Fig 1b (supplementary): Disorder-coloured scatter with density contours.
-    Each point is coloured by its disorder fraction (pLDDT < 50) using the RdYlGn_r colourmap.  KDE density contours with percentile labels are always overlaid so the reader can see where most complexes concentrate.
+    """Fig 1b (supplementary): Disorder-coloured scatter with optional density contours.
+    Each point is coloured by its disorder fraction (pLDDT < 50) using the RdYlGn_r colourmap.  KDE density contours with percentile labels are overlaid when ``density_mode`` is True; the shared helper deterministically downsamples >50K-point inputs so HPC-scale runs do not stall.
     """
     if 'plddt_below50_fraction' not in df.columns:
         print("  Skipping Fig 1b: no disorder fraction column.")
         return
     species_suffix = _species_display(species_label)
-    disorder = df['plddt_below50_fraction'].fillna(0)
 
-    # Valid-data mask (need finite ipTM, pDockQ, and disorder)
-    mask = np.isfinite(df['iptm']) & np.isfinite(df['pdockq']) & np.isfinite(disorder)
-    x = df.loc[mask, 'iptm'].values
-    y = df.loc[mask, 'pdockq'].values
-    c = disorder[mask].values
+    required = ['iptm', 'pdockq', 'plddt_below50_fraction']
+    warn_missing_required_rows(df, required, 'Fig 1b',
+                               'missing score/disorder metrics or geometry')
+    plot_df = df.loc[~_phantom_row_mask(df, required)].copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 1b: no plottable complexes after geometry filter.")
+        return
+
+    disorder = plot_df['plddt_below50_fraction'].fillna(0)
+    x = plot_df['iptm'].values
+    y = plot_df['pdockq'].values
+    c = disorder.values
     n_points = len(x)
     figure, axes = plt.subplots(figsize=(10, 8))
 
@@ -640,8 +767,9 @@ def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False, sp
     cbar = figure.colorbar(scatter, ax=axes, shrink=0.8)
     cbar.set_label('Disorder Fraction (pLDDT < 50)', fontsize=FONT_TICK)
 
-    # Density contours always shown for this figure
-    _overlay_kde_contours(axes, x, y)
+    # Density contours respect --density flag (helper handles HPC-safe downsampling)
+    if density_mode:
+        _overlay_kde_contours(axes, x, y)
 
     # Reference lines & "confident" quadrant
     axes.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
@@ -690,7 +818,7 @@ def plot_fig3_interface_pae_by_tier(df: pd.DataFrame, species_label: str = '') -
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 3: missing required columns.")
         return
-    plot_df = df.dropna(subset=required).copy()
+    plot_df = _filter_dimer_validated(df).dropna(subset=required).copy()
     if len(plot_df) == 0:
         print("  Skipping Fig 3: no valid data after filtering.")
         return
@@ -741,21 +869,27 @@ def plot_fig3_interface_pae_by_tier(df: pd.DataFrame, species_label: str = '') -
         for i in range(len(tier_medians))
     )
     axes.text(0.5, -0.12, median_text, transform=axes.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
-    _apply_common_style(axes, f"Interface PAE by Quality Tier{species_suffix}", '', 'Interface PAE (\u00c5)', grid=False)
+    _apply_common_style(axes, f"Interface PAE by Quality Tier [dimer-validated]{species_suffix}", '', 'Interface PAE (\u00c5)', grid=False)
     _save_figure(figure, f'3_Interface_PAE_by_Tier{species_label}.png')
 
 def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 4: Why should I trust the quality tier assigned?
     Panel (a): Composite score distributions by tier (violin/boxplot).
-    Panel (b): Composite vs confident contact fraction scatter.
+    Panel (b): Composite vs STRICT confident contact fraction scatter - the fraction
+    actually consumed by the composite score (PAE < 5A AND both residue pLDDT >= 70).
+    Plotting the PAE-only fraction here would be circular w.r.t. the composite definition,
+    since the composite uses the strict fraction post-revision.
     """
-    required = ['interface_confidence_score', 'quality_tier_v2', 'confident_contact_fraction']
+    required = ['interface_confidence_score', 'quality_tier_v2', 'strict_confident_contact_fraction']
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 4: missing required columns.")
         return
-    plot_df = df.dropna(subset=required).copy()
+    warn_missing_required_rows(df, required, 'Fig 4',
+                               'missing interface geometry / pair metrics')
+    # Dissertation-safe: composite is calibrated only for dimers (Phase 4).
+    plot_df = _filter_dimer_validated(df).dropna(subset=required).copy()
     if len(plot_df) == 0:
-        print("  Skipping Fig 4: no valid data.")
+        print("  Skipping Fig 4: no dimer-validated complexes with complete composite data.")
         return
 
     species_suffix = _species_display(species_label)
@@ -807,30 +941,88 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False,
     ax_a.legend(handles=tier_legend, fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
     _apply_common_style(ax_a, "(a) Composite Score by Tier", '', 'Interface Confidence Score', grid=False)
 
-    #====================================Panel (b): Composite vs confident contact fraction====================================
+    #====================================Panel (b): Composite vs strict confident contact fraction====================================
     n_panel_b = len(plot_df)
     pt_size_b, pt_alpha_b = _adaptive_scatter_params(n_panel_b)
 
     for tier in reversed(TIER_ORDER):
         subset = plot_df[plot_df['quality_tier_v2'] == tier]
         axes_b_kwargs = dict(c=TIER_COLORS[tier], alpha=pt_alpha_b, s=pt_size_b, edgecolors='white', linewidths=0.3, label=tier, zorder=3)
-        _timed_scatter(ax_b, subset['confident_contact_fraction'], subset['interface_confidence_score'], n_points=n_panel_b, fig_label='Fig 4b', **axes_b_kwargs)
+        _timed_scatter(ax_b, subset['strict_confident_contact_fraction'], subset['interface_confidence_score'], n_points=n_panel_b, fig_label='Fig 4b', **axes_b_kwargs)
     ax_b.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK)
 
     # Optional density contours
     if density_mode:
-        valid_b = plot_df[['confident_contact_fraction', 'interface_confidence_score']].dropna()
-        _overlay_kde_contours(ax_b, valid_b['confident_contact_fraction'].values, valid_b['interface_confidence_score'].values)
+        valid_b = plot_df[['strict_confident_contact_fraction', 'interface_confidence_score']].dropna()
+        _overlay_kde_contours(ax_b, valid_b['strict_confident_contact_fraction'].values, valid_b['interface_confidence_score'].values)
 
     # Correlation annotation
-    valid_both = plot_df[['confident_contact_fraction', 'interface_confidence_score']].dropna()
+    valid_both = plot_df[['strict_confident_contact_fraction', 'interface_confidence_score']].dropna()
     if len(valid_both) > 2:
-        r = valid_both['confident_contact_fraction'].corr(valid_both['interface_confidence_score'])
+        r = valid_both['strict_confident_contact_fraction'].corr(valid_both['interface_confidence_score'])
         ax_b.text(0.05, 0.95, f'r = {r:.2f}', transform=ax_b.transAxes, fontsize=FONT_AXIS_LABEL, va='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-    _apply_common_style(ax_b, "(b) Composite vs Confident Contact Fraction", 'Confident Contact Fraction', 'Interface Confidence Score')
-    figure.suptitle(f"Quality Tier Validation: Composite Score Evidence{species_suffix}", fontsize=14, fontweight='bold', y=1.02)
+    _apply_common_style(ax_b, "(b) Composite vs Strict Confident Contact Fraction", 'Strict Confident Contact Fraction (PAE<5A & pLDDT>=70)', 'Interface Confidence Score')
+    figure.suptitle(
+        f"Quality Tier Validation: Composite Score Evidence "
+        f"[{CAPTION_SCOPE_DIMER}]{species_suffix}",
+        fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, f'4_Composite_Tier_Validation{species_label}.png')
+
+
+def plot_fig4_supp_strict_vs_pae_only(df: pd.DataFrame, species_label: str = '') -> None:
+    """Fig 4 supplementary: strict confident-contact fraction vs PAE-only fraction.
+
+    Shows how much stricter the revised definition is: every point lies on or below the
+    y = x line, and the cloud's vertical offset quantifies the contribution of the pLDDT
+    >= 70 filter (i.e. how many PAE-confident contacts had low-pLDDT residues).
+
+    Useful for the dissertation methods section: it is the evidence image for the revised
+    composite. Renders only when both columns are present.
+    """
+    required = ['pae_confident_contact_fraction', 'strict_confident_contact_fraction',
+                'quality_tier_v2']
+    if not all(col in df.columns for col in required):
+        print("  Skipping Fig 4 supp: missing required columns.")
+        return
+    plot_df = _filter_dimer_validated(df).dropna(subset=required).copy()
+    if len(plot_df) == 0:
+        print("  Skipping Fig 4 supp: no valid data.")
+        return
+
+    species_suffix = _species_display(species_label)
+    figure, axes = plt.subplots(figsize=(8, 8))
+    n_points = len(plot_df)
+    pt_size, pt_alpha = _adaptive_scatter_params(n_points)
+
+    for tier in reversed(TIER_ORDER):
+        subset = plot_df[plot_df['quality_tier_v2'] == tier]
+        if len(subset) == 0:
+            continue
+        axes.scatter(subset['pae_confident_contact_fraction'],
+                     subset['strict_confident_contact_fraction'],
+                     c=TIER_COLORS[tier], alpha=pt_alpha, s=pt_size,
+                     edgecolors='white', linewidths=0.3, label=tier, zorder=3)
+
+    # y = x reference line: strict can never exceed PAE-only
+    axes.plot([0, 1], [0, 1], color='#555555', linestyle='--', linewidth=1.0, alpha=0.7, label='y = x (upper bound)')
+
+    # Summary stats annotation
+    delta = (plot_df['pae_confident_contact_fraction']
+             - plot_df['strict_confident_contact_fraction'])
+    axes.text(0.05, 0.95,
+              f"n = {len(plot_df)}\n"
+              f"mean delta = {delta.mean():.3f}\n"
+              f"median delta = {delta.median():.3f}",
+              transform=axes.transAxes, fontsize=FONT_AXIS_LABEL, va='top',
+              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    axes.legend(fontsize=FONT_TICK, title='Tier', title_fontsize=FONT_TICK, loc='lower right')
+    _apply_common_style(axes,
+                        f"Strict vs PAE-only Confident Contact Fraction [dimer-validated]{species_suffix}",
+                        'PAE-only Confident Contact Fraction (PAE<5A)',
+                        'Strict Confident Contact Fraction (PAE<5A & pLDDT>=70)')
+    _save_figure(figure, f'4_supp_Strict_vs_PAE_Only_Fraction{species_label}.png')
 
 def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 5: Are interfaces special, or do they just reflect bulk quality?"""
@@ -838,9 +1030,10 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False, sp
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 5: missing required columns.")
         return
-    plot_df = df.dropna(subset=required).copy()
+    # Dissertation-safe: bulk/interface pLDDT best-pair semantics are dimer-validated.
+    plot_df = _filter_dimer_validated(df).dropna(subset=required).copy()
     if len(plot_df) == 0:
-        print("  Skipping Fig 5: no valid data.")
+        print("  Skipping Fig 5: no dimer-validated complexes.")
         return
 
     species_suffix = _species_display(species_label)
@@ -888,24 +1081,33 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False, sp
     axes.text(0.5, 0.02, f'{above_diagonal}/{total} ({pct:.0f}%) above diagonal', transform=axes.transAxes, ha='center', fontsize=FONT_TICK, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
     axes.legend(fontsize=FONT_TICK, loc='lower left', framealpha=0.9)
-    _apply_common_style(axes, f"Interface vs Bulk pLDDT: Are Interfaces Special?{species_suffix}", 'Bulk pLDDT', 'Interface pLDDT')
+    _apply_common_style(
+        axes,
+        f"Interface vs Bulk pLDDT: Are Interfaces Special? "
+        f"[{CAPTION_SCOPE_DIMER}]{species_suffix}",
+        'Bulk pLDDT', 'Interface pLDDT')
     _save_figure(figure, f'5_Interface_vs_Bulk{species_label}.png')
 
 def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> None:
     """Fig 6: Can disordered proteins form confident interfaces?
     3-panel comparison of paradox vs non-paradox complexes - Paradox: ipTM >= 0.75, pDockQ >= 0.5, disorder fraction >= 0.30.
     """
-    required = ['iptm', 'pdockq', 'plddt_below50_fraction', 'interface_vs_bulk_delta', 'confident_contact_fraction', 'interface_symmetry']
+    required = ['iptm', 'pdockq', 'plddt_below50_fraction', 'interface_vs_bulk_delta', 'pae_confident_contact_fraction', 'interface_symmetry']
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 6: missing required columns.")
         return
+    warn_missing_required_rows(df, required, 'Fig 6',
+                               'missing interface geometry / pair metrics')
 
     species_suffix = _species_display(species_label)
 
-    # Count paradox complexes before dropping rows with missing panel data so we can report how many are lost to incomplete interface metrics
-    n_paradox_before_dropna = int(_get_paradox_mask(df).sum())
+    # Dissertation-safe: paradox detection uses dimer-calibrated thresholds.
+    scoped_df = _filter_dimer_validated(df)
 
-    plot_df = df.dropna(subset=required).copy()
+    # Count paradox complexes before dropping rows with missing panel data so we can report how many are lost to incomplete interface metrics
+    n_paradox_before_dropna = int(_get_paradox_mask(scoped_df).sum())
+
+    plot_df = scoped_df.dropna(subset=required).copy()
     if len(plot_df) == 0:
         print("  Skipping Fig 6: no complexes with complete interface data.")
         return
@@ -930,7 +1132,10 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> No
     figure, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(16, 5))
     panels = [
         (ax_a, 'interface_vs_bulk_delta', '(a) Interface vs Bulk (\u0394 pLDDT)', '\u0394 pLDDT'),
-        (ax_b, 'confident_contact_fraction', '(b) Confident Contact Fraction', 'Fraction'),
+        # Uses PAE-only fraction (matches paradox-detection semantics and thresholds at
+        # PARADOX_CONFIDENT_CONTACT_GENUINE/_ARTEFACT); the stricter fraction is exposed in
+        # Fig 4 supplementary for methodological comparison.
+        (ax_b, 'pae_confident_contact_fraction', '(b) PAE-only Confident Contact Fraction', 'Fraction'),
         (ax_c, 'interface_symmetry', '(c) Interface Symmetry', 'Symmetry Score'),
     ]
 
@@ -978,7 +1183,10 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> No
         mpatches.Patch(color=colour_non_paradox, alpha=0.6, label='Non-paradox'),
     ]
     ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
-    figure.suptitle(f"Paradox Complexes: Confident Interfaces Despite Structural Disorder{species_suffix}", fontsize=14, fontweight='bold', y=1.04)
+    figure.suptitle(
+        f"Paradox Complexes: Confident Interfaces Despite Structural Disorder "
+        f"[{CAPTION_SCOPE_DIMER}]{species_suffix}",
+        fontsize=14, fontweight='bold', y=1.04)
 
     subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
                 f"non-paradox complexes")
@@ -989,66 +1197,62 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> No
     figure.text(0.5, 0.99, subtitle, ha='center', fontsize=FONT_AXIS_LABEL, style='italic', color='#555555')
     _save_figure(figure, f'6_Paradox_Spotlight{species_label}.png')
 
-def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '') -> None:
+def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '',
+                             multimer_supplement: bool = False) -> None:
     """Fig 7: How does prediction quality vary by complex architecture?
-    Panel (a): Stacked bar chart of tier proportions (Homo / Hetero / Multi-chain).
-    Panel (b): Interface symmetry distributions.
-    Multi-chain complexes (3+ chains) are shown as a 3rd category when the n_chains column is available, and the case-normalised complex_type column (from load_data) is used for homodimer/heterodimer classification.
+    Primary (dimer-validated): tier_scope == 'dimer_validated' AND
+    stoichiometry in {A2, AB}. Tier thresholds are calibrated against dimers, so
+    the primary panel uses only dimers.
+    Supplementary (multimer exploratory): rendered only when
+    multimer_supplement=True - separate panels for A2B/ABC/A2B2/ABCD/other.
+    Fig is skipped entirely when the required multimer-safe columns are absent.
     """
-    required = ['complex_type', 'quality_tier_v2']
-    if not all(col in df.columns for col in required):
-        print("  Skipping Fig 7: missing required columns.")
+    required = ['complex_type', 'quality_tier_v2', 'stoichiometry', 'tier_scope']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"  Skipping Fig 7: missing required columns {missing}.")
         return
-    plot_df = df.dropna(subset=required).copy()
+    plot_df = df.dropna(subset=['quality_tier_v2', 'stoichiometry', 'tier_scope']).copy()
     if len(plot_df) == 0:
         print("  Skipping Fig 7: no valid data.")
         return
 
     species_suffix = _species_display(species_label)
 
-    # Split into architecture categories - multi-chain (3+) gets its own group regardless of homodimer/heterodimer label
-    has_chain_info = 'n_chains' in plot_df.columns
-    if has_chain_info:
-        multi = plot_df[plot_df['n_chains'] >= 3]
-        dimers = plot_df[plot_df['n_chains'] < 3]
-    else:
-        multi = pd.DataFrame()
-        dimers = plot_df
-
-    homo = dimers[dimers['complex_type'] == 'homodimer']
-    hetero = dimers[dimers['complex_type'] == 'heterodimer']
-
-    # Build category list (only include non-empty groups)
-    MULTI_COLOUR = '#8e44ad'
-    categories = []
-    cat_colours = []
-    if len(homo) > 0:
-        categories.append(('Homodimer', homo))
-        cat_colours.append('#3498db')
-    if len(hetero) > 0:
-        categories.append(('Heterodimer', hetero))
-        cat_colours.append('#e67e22')
-    if len(multi) > 0:
-        categories.append(('Multi-chain', multi))
-        cat_colours.append(MULTI_COLOUR)
-
-    if len(categories) == 0:
-        print("  Skipping Fig 7: no classified complexes.")
+    # Primary panel (dissertation-safe): dimer_validated scope, A2 or AB only.
+    primary_df = plot_df[
+        (plot_df['tier_scope'] == TIER_SCOPE_DIMER)
+        & (plot_df['stoichiometry'].isin(DIMER_STOICHIOMETRIES))
+    ]
+    if len(primary_df) == 0:
+        print("  Skipping Fig 7: no dimer-validated complexes (stoichiometry A2/AB).")
         return
+
+    homo = primary_df[primary_df['stoichiometry'] == 'A2']
+    hetero = primary_df[primary_df['stoichiometry'] == 'AB']
+
+    primary_categories = []
+    primary_cat_colours = []
+    if len(homo) > 0:
+        primary_categories.append(('Homodimer (A2)', homo))
+        primary_cat_colours.append('#3498db')
+    if len(hetero) > 0:
+        primary_categories.append(('Heterodimer (AB)', hetero))
+        primary_cat_colours.append('#e67e22')
 
     figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
 
     #=======================================Panel (a): Stacked bar chart=======================================
-    bar_positions = list(range(len(categories)))
+    bar_positions = list(range(len(primary_categories)))
     bar_labels = []
-    for cat_idx, (label, subset) in enumerate(categories):
+    for cat_idx, (label, subset) in enumerate(primary_categories):
         count = len(subset)
         bottom = 0
         for tier in TIER_ORDER:
             tier_count = (subset['quality_tier_v2'] == tier).sum()
             pct = tier_count / count * 100 if count > 0 else 0
             ax_a.bar(cat_idx, pct, bottom=bottom, color=TIER_COLORS[tier], edgecolor='white', linewidth=0.5)
-            if pct > 3:  # Only label if visible
+            if pct > 3:
                 ax_a.text(cat_idx, bottom + pct / 2, f'{pct:.1f}%', ha='center', va='center', fontsize=9, fontweight='bold', color='white' if pct > 10 else 'black')
             bottom += pct
         bar_labels.append(f'{label}\n(n={count})')
@@ -1057,11 +1261,10 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '') -> None:
     ax_a.set_xticklabels(bar_labels, fontsize=FONT_AXIS_LABEL)
     ax_a.set_ylim(0, 105)
 
-    # Legend
     legend_handles = [mpatches.Patch(color=TIER_COLORS[t], label=t) for t in TIER_ORDER]
     ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right')
 
-    _apply_common_style(ax_a, "(a) Quality Tier Proportions", '', 'Percentage (%)', grid=False)
+    _apply_common_style(ax_a, "(a) Quality Tier Proportions (dimer-validated)", '', 'Percentage (%)', grid=False)
 
     #=======================================Panel (b): Interface symmetry distributions=======================================
     has_symmetry = 'interface_symmetry' in df.columns
@@ -1069,7 +1272,7 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '') -> None:
         sym_data = []
         sym_labels = []
         sym_colours = []
-        for (label, subset), colour in zip(categories, cat_colours):
+        for (label, subset), colour in zip(primary_categories, primary_cat_colours):
             sym_values = subset['interface_symmetry'].dropna().values
             if len(sym_values) > 0:
                 sym_data.append(sym_values)
@@ -1087,12 +1290,112 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '') -> None:
                 vp['cmedians'].set_zorder(10)
             ax_b.set_xticks(positions_b)
             ax_b.set_xticklabels(sym_labels, fontsize=FONT_AXIS_LABEL)
+        else:
+            ax_b.text(0.5, 0.5, 'No valid interface-symmetry values',
+                      transform=ax_b.transAxes, ha='center', va='center',
+                      fontsize=FONT_AXIS_LABEL, color='grey')
     else:
         ax_b.text(0.5, 0.5, 'Interface symmetry data\nnot available', transform=ax_b.transAxes, ha='center', va='center', fontsize=FONT_AXIS_LABEL, color='grey')
 
-    _apply_common_style(ax_b, "(b) Interface Symmetry", '', 'Symmetry Score', grid=False)
-    figure.suptitle(f"Prediction Quality by Complex Architecture{species_suffix}", fontsize=14, fontweight='bold', y=1.02)
+    _apply_common_style(ax_b, "(b) Interface Symmetry (dimer-validated)", '', 'Symmetry Score', grid=False)
+    figure.suptitle(
+        f"Prediction Quality by Complex Architecture [{CAPTION_SCOPE_DIMER}]"
+        f"{species_suffix}",
+        fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, f'7_Homo_vs_Hetero{species_label}.png')
+
+    if multimer_supplement:
+        _plot_fig7_multimer_supplement(plot_df, species_label=species_label)
+
+
+def _plot_fig7_multimer_supplement(plot_df: pd.DataFrame, species_label: str = '') -> None:
+    """Fig 7 supplementary: tier proportions and symmetry by multimer stoichiometry.
+    Shows multimer_provisional rows bucketed into A2B, ABC, A2B2, ABCD, and
+    'Other' (anything else with n_chains > 2). Gated by --multimer-supplement
+    - these are exploratory, not dissertation claims.
+    """
+    multimer_df = plot_df[plot_df['tier_scope'] == TIER_SCOPE_MULTIMER]
+    if len(multimer_df) == 0:
+        print("  Fig 7 supp: no multimer_provisional rows - skipping supplement.")
+        return
+
+    species_suffix = _species_display(species_label)
+    known_buckets = ['A2B', 'ABC', 'A2B2', 'ABCD']
+    bucket_colours = {
+        'A2B': '#8e44ad',
+        'ABC': '#16a085',
+        'A2B2': '#d35400',
+        'ABCD': '#2c3e50',
+        'Other': '#7f8c8d',
+    }
+
+    def _bucket(label: str) -> str:
+        return label if label in known_buckets else 'Other'
+
+    multimer_df = multimer_df.assign(_bucket=multimer_df['stoichiometry'].map(_bucket))
+    present = [b for b in known_buckets + ['Other']
+               if (multimer_df['_bucket'] == b).any()]
+    if not present:
+        print("  Fig 7 supp: no supported multimer buckets present.")
+        return
+
+    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
+
+    bar_positions = list(range(len(present)))
+    bar_labels = []
+    for cat_idx, bucket in enumerate(present):
+        subset = multimer_df[multimer_df['_bucket'] == bucket]
+        count = len(subset)
+        bottom = 0
+        for tier in TIER_ORDER:
+            tier_count = (subset['quality_tier_v2'] == tier).sum()
+            pct = tier_count / count * 100 if count > 0 else 0
+            ax_a.bar(cat_idx, pct, bottom=bottom, color=TIER_COLORS[tier], edgecolor='white', linewidth=0.5)
+            if pct > 3:
+                ax_a.text(cat_idx, bottom + pct / 2, f'{pct:.1f}%', ha='center', va='center', fontsize=9, fontweight='bold', color='white' if pct > 10 else 'black')
+            bottom += pct
+        bar_labels.append(f'{bucket}\n(n={count})')
+
+    ax_a.set_xticks(bar_positions)
+    ax_a.set_xticklabels(bar_labels, fontsize=FONT_AXIS_LABEL)
+    ax_a.set_ylim(0, 105)
+    legend_handles = [mpatches.Patch(color=TIER_COLORS[t], label=t) for t in TIER_ORDER]
+    ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right')
+    _apply_common_style(ax_a, "(a) Tier Proportions by Stoichiometry", '', 'Percentage (%)', grid=False)
+
+    if 'interface_symmetry' in multimer_df.columns:
+        sym_data, sym_labels, sym_colours = [], [], []
+        for bucket in present:
+            vals = multimer_df.loc[multimer_df['_bucket'] == bucket, 'interface_symmetry'].dropna().values
+            if len(vals) > 0:
+                sym_data.append(vals)
+                sym_labels.append(f'{bucket}\n(n={len(vals)})')
+                sym_colours.append(bucket_colours[bucket])
+        if sym_data:
+            positions_b = list(range(len(sym_data)))
+            vp = ax_b.violinplot(sym_data, positions=positions_b, showmedians=True, showextrema=False)
+            for idx, body in enumerate(vp['bodies']):
+                body.set_facecolor(sym_colours[idx])
+                body.set_alpha(0.6)
+            if 'cmedians' in vp:
+                vp['cmedians'].set_color('black')
+                vp['cmedians'].set_linewidth(2)
+                vp['cmedians'].set_zorder(10)
+            ax_b.set_xticks(positions_b)
+            ax_b.set_xticklabels(sym_labels, fontsize=FONT_AXIS_LABEL)
+        else:
+            ax_b.text(0.5, 0.5, 'No valid interface-symmetry values',
+                      transform=ax_b.transAxes, ha='center', va='center',
+                      fontsize=FONT_AXIS_LABEL, color='grey')
+    else:
+        ax_b.text(0.5, 0.5, 'Interface symmetry data\nnot available', transform=ax_b.transAxes, ha='center', va='center', fontsize=FONT_AXIS_LABEL, color='grey')
+
+    _apply_common_style(ax_b, "(b) Best-pair Interface Symmetry", '', 'Symmetry Score', grid=False)
+    figure.suptitle(
+        f"Multimer Architecture Supplement [{CAPTION_SCOPE_MULTIMER}]"
+        f"{species_suffix}",
+        fontsize=14, fontweight='bold', y=1.02)
+    _save_figure(figure, f'7_supp_Multimer_Stoichiometry{species_label}.png')
 
 def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 8: Why do ipTM and pDockQ disagree so systematically?"""
@@ -1100,9 +1403,12 @@ def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False, 
     if not all(col in df.columns for col in required):
         print("  Skipping Fig 8: missing required columns.")
         return
-    plot_df = df.dropna(subset=required).copy()
+    warn_missing_required_rows(df, required, 'Fig 8',
+                               'missing interface geometry / pair metrics')
+    # Dissertation-safe: the disagreement threshold is calibrated on dimers.
+    plot_df = _filter_dimer_validated(df).dropna(subset=required).copy()
     if len(plot_df) == 0:
-        print("  Skipping Fig 8: no valid data.")
+        print("  Skipping Fig 8: no dimer-validated complexes.")
         return
 
     species_suffix = _species_display(species_label)
@@ -1146,7 +1452,7 @@ def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False, 
               bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
 
     axes.text(0.85, 0.02,
-              'pDockQ penalises structural\ndisorder; ipTM does not',
+              'pDockQ is contact/interface-confidence\nsensitive; ipTM can remain high',
               transform=axes.transAxes, ha='center', fontsize=9,
               style='italic', color='#777777',
               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.85, edgecolor='none'))
@@ -1154,27 +1460,45 @@ def plot_fig8_metric_disagreement(df: pd.DataFrame, density_mode: bool = False, 
     axes.set_xlim(0.2, 1.05)
     axes.set_ylim(-0.02, 0.8)
 
-    _apply_common_style(axes, f"Metric Disagreement: ipTM vs pDockQ Systematic Bias{species_suffix}", 'ipTM', 'pDockQ')
+    _apply_common_style(
+        axes,
+        f"Metric Disagreement: ipTM vs pDockQ Systematic Bias "
+        f"[{CAPTION_SCOPE_DIMER}]{species_suffix}",
+        'ipTM', 'pDockQ')
     _save_figure(figure, f'8_Metric_Disagreement{species_label}.png')
 
 def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
-    """Fig 9: Item 5 -- Structure prediction.
-    Panel (a): Composite score distributions by chain count (violin + strip).
-    Panel (b): ipTM vs pDockQ coloured by chain count.
-    Requires the n_chains column which is added by the multi-chain pipeline - complexes are grouped into 2, 3, and 4+ chains.
+    """Fig 9: Chain-count profile - exposes order-statistic bias honestly.
+    Four violin panels by n_chains group (2, 3, 4+):
+        (a) pdockq (best pair) - order-statistic biased upward for large N.
+        (b) pdockq_mean        - unbiased aggregate across all inter-chain pairs.
+        (c) pdockq_min         - worst-pair lower bound; surfaces dangling chains.
+        (d) coherence gap (pdockq - pdockq_min) - 0 for every N=2 row by construction.
+    The figure is descriptive across all N (CAPTION_SCOPE_ALL_N). Requires the
+    multimer-safe aggregates added in Phase 3; falls back gracefully otherwise.
     """
-    required = ['n_chains', 'iptm', 'pdockq']
-    if not all(col in df.columns for col in required):
+    base_required = ['n_chains', 'pdockq']
+    if not all(col in df.columns for col in base_required):
         print("  Skipping Fig 9: missing required columns.")
         return
-    plot_df = df.dropna(subset=required).copy()
+
+    aggregate_cols = ['pdockq_mean', 'pdockq_min']
+    if not all(col in df.columns for col in aggregate_cols):
+        print("  Skipping Fig 9: aggregate columns (pdockq_mean/pdockq_min) missing. "
+              "Regenerate with the multimer_v1 schema (Phase 3 of the refactor).")
+        return
+
+    fig9_required = base_required + aggregate_cols
+    warn_missing_required_rows(df, fig9_required, 'Fig 9',
+                               'missing interface geometry / pair metrics')
+    plot_df = df.loc[~_phantom_row_mask(df, fig9_required)].copy()
+    plot_df = plot_df.dropna(subset=fig9_required).copy()
     if len(plot_df) == 0:
-        print("  Skipping Fig 9: no valid data.")
+        print("  Skipping Fig 9: no complete all-pairs chain-count data.")
         return
 
     species_suffix = _species_display(species_label)
 
-    # Bin chain counts into interpretable groups
     def chain_group(n):
         if n <= 2:
             return '2 chains'
@@ -1184,95 +1508,60 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, 
             return '4+ chains'
 
     plot_df['chain_group'] = plot_df['n_chains'].apply(chain_group)
+    plot_df['coherence_gap'] = plot_df['pdockq'] - plot_df['pdockq_min']
+
     group_order = ['2 chains', '3 chains', '4+ chains']
     group_colours = {'2 chains': '#3498db', '3 chains': '#e67e22', '4+ chains': '#8e44ad'}
-
-    # Only keep groups that actually appear
     present_groups = [g for g in group_order if (plot_df['chain_group'] == g).any()]
-    if len(present_groups) < 2:
-        print("  Skipping Fig 9: need at least 2 chain-count groups for comparison.")
+    if len(present_groups) == 0:
+        print("  Skipping Fig 9: no recognised chain-count groups.")
         return
 
-    has_composite = 'interface_confidence_score' in plot_df.columns
-    figure, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6))
+    panels = [
+        ('pdockq', '(a) pDockQ (best pair)', 'pDockQ'),
+        ('pdockq_mean', '(b) pDockQ mean (all pairs)', 'pDockQ mean'),
+        ('pdockq_min', '(c) pDockQ min (worst pair)', 'pDockQ min'),
+        ('coherence_gap', '(d) Coherence gap (best - min)', 'pDockQ - pDockQ_min'),
+    ]
 
-    #====================================Panel (a): Composite score or ipTM distributions by chain group====================================
-    metric_col = 'interface_confidence_score' if has_composite else 'iptm'
-    metric_label = 'Composite Score' if has_composite else 'ipTM'
-    group_data = []
-    group_labels = []
-    positions_a = []
-    for idx, group in enumerate(present_groups):
-        values = plot_df.loc[plot_df['chain_group'] == group, metric_col].dropna().values
-        if len(values) > 0:
-            group_data.append(values)
-            group_labels.append(f'{group}\n(n={len(values)})')
-            positions_a.append(idx)
+    figure, axes = plt.subplots(1, 4, figsize=(20, 5))
 
-    if group_data:
-        vp = ax_a.violinplot(group_data, positions=positions_a, showmedians=True, showextrema=False)
-        for idx, body in enumerate(vp['bodies']):
-            grp = present_groups[idx]
-            body.set_facecolor(group_colours.get(grp, '#cccccc'))
-            body.set_alpha(0.6)
-        if 'cmedians' in vp:
-            vp['cmedians'].set_color('black')
-            vp['cmedians'].set_linewidth(2)
-            vp['cmedians'].set_zorder(10)
+    for ax, (col, title, ylabel) in zip(axes, panels):
+        group_data, group_labels, positions = [], [], []
+        for idx, group in enumerate(present_groups):
+            values = plot_df.loc[plot_df['chain_group'] == group, col].values
+            if len(values) > 0:
+                group_data.append(values)
+                group_labels.append(f'{group}\n(n={len(values)})')
+                positions.append(idx)
 
-        # Jittered strip overlay
-        for idx, data in enumerate(group_data):
-            jitter = np.random.normal(0, 0.06, size=len(data))
-            grp = present_groups[idx]
-            ax_a.scatter(positions_a[idx] + jitter, data, c=group_colours.get(grp, '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
+        if group_data:
+            vp = ax.violinplot(group_data, positions=positions, showmedians=True, showextrema=False)
+            for idx, body in enumerate(vp['bodies']):
+                grp = present_groups[positions[idx]]
+                body.set_facecolor(group_colours.get(grp, '#cccccc'))
+                body.set_alpha(0.6)
+            if 'cmedians' in vp:
+                vp['cmedians'].set_color('black')
+                vp['cmedians'].set_linewidth(2)
+                vp['cmedians'].set_zorder(10)
 
-        ax_a.set_xticks(positions_a)
-        ax_a.set_xticklabels(group_labels, fontsize=FONT_AXIS_LABEL)
+            for idx, data in enumerate(group_data):
+                jitter = np.random.normal(0, 0.06, size=len(data))
+                grp = present_groups[positions[idx]]
+                ax.scatter(positions[idx] + jitter, data,
+                           c=group_colours.get(grp, '#cccccc'),
+                           alpha=0.3, s=15, zorder=3, edgecolors='none')
 
-        # Median annotation
-        medians = [np.median(d) for d in group_data]
-        median_text = " | ".join(f"{present_groups[i]}: {medians[i]:.2f}" for i in range(len(medians)))
-        ax_a.text(0.5, -0.12, median_text, transform=ax_a.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
+            ax.set_xticks(positions)
+            ax.set_xticklabels(group_labels, fontsize=FONT_TICK)
 
-    _apply_common_style(ax_a, f"(a) {metric_label} by Chain Count", '', metric_label, grid=False)
+        _apply_common_style(ax, title, '', ylabel, grid=False)
 
-    #=============================================Panel (b): ipTM vs pDockQ coloured by chain count====================================
-    # 2-chain complexes are rendered as a translucent background context layer and multi-chain groups (3, 4+) are plotted on top at full opacity
-    n_panel_b = len(plot_df)
-    pt_size_b, _ = _adaptive_scatter_params(n_panel_b)
-
-    # Background layer: 2 chains (very low alpha)
-    if '2 chains' in present_groups:
-        subset_2 = plot_df[plot_df['chain_group'] == '2 chains']
-        _timed_scatter(ax_b, subset_2['iptm'], subset_2['pdockq'],
-                       n_points=n_panel_b, fig_label='Fig 9b',
-                       c=group_colours.get('2 chains', '#cccccc'),
-                       s=pt_size_b, alpha=0.12,
-                       edgecolors='none', linewidths=0, zorder=2,
-                       label=f'2 chains (n={len(subset_2)})')
-
-    # Foreground layer: multi-chain groups (full opacity)
-    for group in reversed([g for g in present_groups if g != '2 chains']):
-        subset = plot_df[plot_df['chain_group'] == group]
-        _timed_scatter(ax_b, subset['iptm'], subset['pdockq'],
-                       n_points=n_panel_b, fig_label='Fig 9b',
-                       c=group_colours.get(group, '#cccccc'),
-                       s=pt_size_b, alpha=1.0,
-                       edgecolors='white', linewidths=0.5, zorder=5,
-                       label=f'{group} (n={len(subset)})')
-    ax_b.legend(fontsize=FONT_TICK, loc='lower right', framealpha=0.9)
-
-    # Optional density contours
-    if density_mode:
-        _overlay_kde_contours(ax_b, plot_df['iptm'].values, plot_df['pdockq'].values)
-
-    ax_b.axvline(x=IPTM_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
-    ax_b.axhline(y=PDOCKQ_HIGH, color='grey', linestyle='--', linewidth=1, alpha=0.7)
-    ax_b.set_xlim(0.2, 1.05)
-    ax_b.set_ylim(-0.02, 0.8)
-
-    _apply_common_style(ax_b, "(b) Quality Landscape by Chain Count", 'ipTM', 'pDockQ')
-    figure.suptitle(f"Chain-Count Quality Profile: Do Multi-Chain Predictions Suffer?{species_suffix}", fontsize=14, fontweight='bold', y=1.02)
+    figure.suptitle(
+        f"Chain-Count Quality Profile: Order-Statistic Bias by N "
+        f"[{CAPTION_SCOPE_ALL_N}]{species_suffix}",
+        fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, f'9_Chain_Count_Profile{species_label}.png')
 
 #--------------------------------------------Item 3: Identify similar proteins/pairs (Fig 10)---------------------------------------------------
@@ -1296,12 +1585,33 @@ def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
     valid &= df['shared_cluster_count'].notna()
     plot_df = df[valid].copy()
 
+    if {'tier_scope', 'stoichiometry'}.issubset(plot_df.columns):
+        plot_df = plot_df[
+            (plot_df['tier_scope'] == TIER_SCOPE_DIMER)
+            & (plot_df['stoichiometry'].isin(DIMER_STOICHIOMETRIES))
+        ].copy()
+        if len(plot_df) == 0:
+            print("  Skipping Fig 10: no dimer-validated A2/AB complexes.")
+            return
+        plot_df['_architecture'] = np.where(
+            plot_df['stoichiometry'] == 'A2',
+            'homodimer',
+            'heterodimer',
+        )
+    else:
+        complex_types_series = plot_df['complex_type'].astype(str).str.lower()
+        keep = complex_types_series.isin(['homodimer', 'heterodimer'])
+        plot_df = plot_df.loc[keep].copy()
+        if len(plot_df) == 0:
+            print("  Skipping Fig 10: no homodimer/heterodimer rows in legacy fallback.")
+            return
+        plot_df['_architecture'] = plot_df['complex_type'].astype(str).str.lower()
+
+    is_homo = (plot_df['_architecture'] == 'homodimer').values
+    is_hetero = (plot_df['_architecture'] == 'heterodimer').values
+
     seq_counts = plot_df['sequence_cluster_count'].values
     shared_counts = plot_df['shared_cluster_count'].values
-    complex_types = plot_df['complex_type'].astype(str).str.lower().values
-
-    is_homo = complex_types == 'homodimer'
-    is_hetero = ~is_homo
 
     # Heterodimers first (underneath)
     if is_hetero.any():
@@ -1344,7 +1654,7 @@ def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
     _despine(ax_a)
 
     #==========================Panel B: Shared Cluster Ratio by Quality Tier=================================
-    hetero_df = plot_df[plot_df['complex_type'].astype(str).str.lower() == 'heterodimer'].copy()
+    hetero_df = plot_df[plot_df['_architecture'] == 'heterodimer'].copy()
     hetero_df = hetero_df[hetero_df['sequence_cluster_count'] > 0]
     hetero_df['cluster_ratio'] = hetero_df['shared_cluster_count'] / hetero_df['sequence_cluster_count']
 
@@ -1514,6 +1824,7 @@ def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
     Right nodes: 4 structural contexts. 
     Flow bands show how many variants of each significance land in each context.
     """
+    df = _filter_dimer_validated(df)
     var_df = _aggregate_all_variants(df)
     total_parsed = len(var_df)
     if total_parsed < 10:
@@ -1619,7 +1930,7 @@ def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
             right_cursors[j] += right_h
 
     #================================================Annotations=======================================================
-    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance -> Structural Context", ha='center', va='bottom', fontsize=14, fontweight='bold', transform=ax.transAxes)
+    ax.text(0.50, 1.06, "Classified Variant Flow: Clinical Significance -> Structural Context [dimer-validated]", ha='center', va='bottom', fontsize=14, fontweight='bold', transform=ax.transAxes)
 
     # Footer annotation (merged to avoid overlap)
     footer_parts = [f'n = {n_classified:,} classified variants ({pct_unknown:.1f}% Unknown excluded, {n_unknown:,} variants)']
@@ -1633,9 +1944,10 @@ def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
 
 def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> None:
     """Fig 12: Item 4 - Mapping genome variation.
-    Scatter plot of interface variant density (variants per interface residue) against composite score, coloured by quality tier. 
+    Scatter plot of interface variant density (variants per interface residue) against composite score, coloured by quality tier.
     Spearman and partial correlations annotated. Tier-stratified median densities in text box.
     """
+    df = _filter_dimer_validated(df)
     # Compute interface variant density per complex
     n_if_var_a = pd.to_numeric(df.get('n_interface_variants_a', pd.Series(dtype=float)), errors='coerce').fillna(0)
     n_if_var_b = pd.to_numeric(df.get('n_interface_variants_b', pd.Series(dtype=float)), errors='coerce').fillna(0)
@@ -1749,7 +2061,7 @@ def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> 
             ax.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
 
     _apply_common_style(ax, '', x_label, 'Variant Density (per interface residue)')
-    figure.suptitle("Interface Variant Density vs Composite Score", fontsize=14, fontweight='bold', y=1.02)
+    figure.suptitle("Interface Variant Density vs Composite Score [dimer-validated]", fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, '12_Variant_Density.png')
 
 #--------------------------------------Item 6: Map stability scores (Fig 13)-----------------------------------------------
@@ -1764,6 +2076,12 @@ def plot_fig13_stability_crossvalidation(df: pd.DataFrame) -> None:
     required = ['eve_score_mean_a', 'protvar_am_mean_a', 'quality_tier_v2']
     if not all(c in df.columns for c in required):
         print("  Skipping Fig 13 - missing stability/ProtVar columns")
+        return
+
+    # Dissertation-safe: stability comparisons use dimer-calibrated quality tiers.
+    df = _filter_dimer_validated(df)
+    if len(df) == 0:
+        print("  Skipping Fig 13 - no dimer-validated complexes.")
         return
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
@@ -1912,7 +2230,9 @@ def plot_fig13_stability_crossvalidation(df: pd.DataFrame) -> None:
         overall_parts.append(f'{pred}: {pct:.0f}%')
     ax_c.text(0.5, -0.12, 'Overall: ' + '  |  '.join(overall_parts), transform=ax_c.transAxes, ha='center', fontsize=FONT_TICK - 1, style='italic', color='#555555')
     _despine(ax_c)
-    figure.suptitle("Stability Predictor Cross-Validation", fontsize=14, fontweight='bold', y=1.02)
+    figure.suptitle(
+        f"Stability Predictor Cross-Validation [{CAPTION_SCOPE_DIMER}]",
+        fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
     _save_figure(figure, '13_Stability_CrossValidation.png')
 
@@ -1952,6 +2272,11 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
     if tier_col not in df.columns:
         print("  Skipping Fig 14 - no quality tier column")
+        return
+
+    df = _filter_dimer_validated(df)
+    if len(df) == 0:
+        print("  Skipping Fig 14 - no dimer-validated rows")
         return
 
     total_diseases = df['n_diseases_a'].fillna(0).astype(int)
@@ -2008,8 +2333,8 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
     # Drug target disease prevalence - text annotation box with Fisher test
     baseline_pct = has_disease.sum() / len(df) * 100 if len(df) > 0 else 0
     if 'is_drug_target_a' in df.columns:
-        drug_a = df['is_drug_target_a'].fillna(False).astype(bool)
-        drug_b = df['is_drug_target_b'].fillna(False).astype(bool) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
+        drug_a = _boolish(df['is_drug_target_a']).fillna(False)
+        drug_b = _boolish(df['is_drug_target_b']).fillna(False) if 'is_drug_target_b' in df.columns else pd.Series(False, index=df.index)
         is_drug = drug_a | drug_b
         n_drug = is_drug.sum()
         if n_drug >= 2:
@@ -2117,7 +2442,7 @@ def plot_fig14_disease_enrichment(df: pd.DataFrame) -> None:
         ax_b.set_axis_off()
 
     figure.subplots_adjust(top=0.88, wspace=0.45)
-    figure.suptitle("Disease Association Enrichment Across Quality Tiers", fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
+    figure.suptitle("Disease Annotation Prevalence Across Quality Tiers [dimer-validated]", fontsize=FONT_TITLE + 1, fontweight='bold', y=0.98)
 
     n_effective = len(df) # dataset size
     caption_14 = (
@@ -2195,6 +2520,11 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
         return
     if 'reactome_pathways_a' not in df.columns:
         print("  Skipping Fig 15 - no pathway data available")
+        return
+
+    df = _filter_dimer_validated(df)
+    if len(df) == 0:
+        print("  Skipping Fig 15 - no dimer-validated rows")
         return
 
     tier_col = 'quality_tier_v2' if 'quality_tier_v2' in df.columns else 'quality_tier'
@@ -2400,7 +2730,7 @@ def plot_fig15_pathway_network(df: pd.DataFrame,
         legend_elements.append(Line2D([0], [0], marker='o', color='w', markerfacecolor='#bdc3c7', markeredgecolor='black', markeredgewidth=0.5, markersize=max(4, np.sqrt(display_size) / 3), label=lbl))
 
     figure.legend(handles=legend_elements, fontsize=10, title='Pathway size (complexes)', title_fontsize=11, framealpha=1.0, borderpad=1.2, labelspacing=1.5, handletextpad=1.0, loc='upper right', bbox_to_anchor=(0.99, 0.97))
-    figure.suptitle("Reactome Pathway Network by Structural Quality", fontsize=FONT_TITLE + 1, fontweight='bold')
+    figure.suptitle("Reactome Pathway Network by Structural Quality [dimer-validated]", fontsize=FONT_TITLE + 1, fontweight='bold')
 
     # Caption - dynamic values, no hardcoded sizes
     n_nodes = G.number_of_nodes()
@@ -2671,10 +3001,23 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
     """
     tiers = _PARADOX_TIER_ORDER
 
+    required = [
+        'quality_tier_v2',
+        'n_pathogenic_interface_variants',
+        'ppi_enrichment_ratio',
+        'gene_constraint_pli_a',
+        'gene_constraint_pli_b',
+        'plddt_below50_fraction',
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"  Skipping Fig 16 - missing required columns: {missing}")
+        return
+
     #=============================Data prep==================================================
-    wdf = df.copy()
+    wdf = _filter_dimer_validated(df).copy()
     if 'has_pdb' in wdf.columns:
-        wdf = wdf[wdf['has_pdb'] != False].copy()  # noqa: E712
+        wdf = wdf[_boolish(wdf['has_pdb']).ne(False)].copy()
     wdf = wdf.dropna(subset=['quality_tier_v2'])
 
     wdf['_max_pli'] = wdf[['gene_constraint_pli_a', 'gene_constraint_pli_b']].apply(lambda r: np.nanmax(r.values), axis=1)
@@ -2762,7 +3105,7 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
     if footer_parts:
         fig.text(0.5, -0.01, '  |  '.join(footer_parts), ha='center', va='top', fontsize=9, fontstyle='italic', color='#555555')
 
-    fig.suptitle("The Prediction Quality Paradox", fontsize=14, fontweight='bold', y=1.02)
+    fig.suptitle("The Prediction Quality Paradox [dimer-validated]", fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
     _save_figure(fig, '16_Prediction_Quality_Paradox.png')
 
@@ -2825,6 +3168,23 @@ Examples:
         '--density', action='store_true',
         help='Add KDE density contour overlays to scatter figures. '
              'Contour lines show percentile-based density levels (10%%-90%%).')
+
+    #======================Optional: multimer supplementary panels================
+    # Primary figures always stay dimer-validated (dissertation-safe). This flag
+    # enables supplementary panels that expose multimer behaviour separately;
+    # it is NOT a load-time filter - no row is dropped by this flag.
+    parser.add_argument(
+        '--multimer-supplement', action='store_true',
+        help='Render multimer-exploratory supplementary panels alongside the '
+             'dimer-validated primary figures. Supplementary panels are '
+             'descriptive only, never dissertation claims.')
+
+    import sys as _sys
+    # Reject the old flag explicitly - it used to be a load-time multimer gate.
+    if '--include-multimers' in _sys.argv[1:]:
+        parser.error(
+            "--include-multimers has been removed. Multimers are always "
+            "processed; use --multimer-supplement to add exploratory panels.")
 
     return parser.parse_args()
 
@@ -2960,6 +3320,12 @@ def main() -> None:
             plot_fig4_composite_validation(df_subset, density_mode=args.density, species_label=suffix)
             figures_generated += 1
 
+            # Supplementary: strict vs PAE-only fraction scatter (methodology evidence image)
+            if 'pae_confident_contact_fraction' in df_subset.columns and 'strict_confident_contact_fraction' in df_subset.columns:
+                print(f"Fig 4 supp - Strict vs PAE-only Fraction{label_suffix}")
+                plot_fig4_supp_strict_vs_pae_only(df_subset, species_label=suffix)
+                figures_generated += 1
+
             print(f"Fig 5 - Interface vs Bulk{label_suffix}")
             plot_fig5_interface_vs_bulk(df_subset, density_mode=args.density, species_label=suffix)
             figures_generated += 1
@@ -2968,8 +3334,9 @@ def main() -> None:
             plot_fig6_paradox_spotlight(df_subset, species_label=suffix)
             figures_generated += 1
 
-            print(f"Fig 7 - Homo vs Hetero{label_suffix}")
-            plot_fig7_homo_vs_hetero(df_subset, species_label=suffix)
+            print(f"Fig 7 - Architecture (dimer-validated primary{', + multimer supp' if args.multimer_supplement else ''}){label_suffix}")
+            plot_fig7_homo_vs_hetero(df_subset, species_label=suffix,
+                                      multimer_supplement=args.multimer_supplement)
             figures_generated += 1
 
             print(f"Fig 8 - Metric Disagreement{label_suffix}")

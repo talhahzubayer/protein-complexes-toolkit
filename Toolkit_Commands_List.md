@@ -186,8 +186,31 @@ python visualise_results.py <OUTPUT_CSV> --pae-heatmaps <MODELS_DIR> --limit 10
 # Custom output directory (--output-dir defaults to Output/)
 python visualise_results.py <OUTPUT_CSV> --output-dir <OUTPUT_DIR>
 
+# Emit supplementary Fig 7 multimer-stoichiometry panel (buckets: A2B / ABC / A2B2 / ABCD / Other)
+# Writes 7_supp_Multimer_Stoichiometry{_human,_nonhuman,}.png in addition to the dimer-validated primary panel.
+python visualise_results.py <OUTPUT_CSV> --multimer-supplement
+
 # All options combined
 python visualise_results.py <OUTPUT_CSV> --density --disorder-scatter --pae-heatmaps <MODELS_DIR> --limit 20 --output-dir <OUTPUT_DIR>
+```
+
+> **Multimer scope (post-refactor, Decision #33).** Figs 4, 5, 6, 8, 13 filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}`. Fig 9 is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]`. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** — the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load; the scope is derived from `n_chains` with a one-time warning.
+
+### Post-refactor audit scripts
+
+```bash
+# Dimer metric-identity regression (every shared N=2 row must agree within 1e-9 on named fields)
+python Documentation/scripts/verify_dimer_metric_identity.py \
+    --old results_pre_multimer_refactor.csv \
+    --new <OUTPUT_CSV> \
+    --report <OUTPUT_DIR>/dimer_metric_identity_report.md
+
+# Correction report: reconciles pre-refactor headline numbers (534 labelled homodimers, 94 CSV-observable
+# contamination, 56.5% old High-tier rate) against the post-refactor CSV plus audit fields.
+python Documentation/scripts/generate_multimer_correction_report.py \
+    --baseline tests/test_data/regression_baselines/multimer_pre_refactor_baseline.json \
+    --new <OUTPUT_CSV> \
+    --output <OUTPUT_DIR>/multimer_correction_report.md
 ```
 
 ---

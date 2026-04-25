@@ -54,8 +54,9 @@ import time
 import re
 import numpy as np
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Optional
 
 # tqdm for displaying progress bar - fallback if not installed
@@ -78,11 +79,16 @@ from pdockq import (
     calc_pdockq_and_contacts_New as calc_pdockq_and_contacts,
     compute_pae_chain_offsets_New as compute_pae_chain_offsets,
     find_best_chain_pair_New as find_best_chain_pair,
+    compute_all_chain_pairs,
+    calc_pdockq_whole_complex,
 )
 from interface_analysis import (
     analyse_interface_from_contact_result,
     compute_extended_flags,
     build_interface_export_record,
+    compute_all_pair_metrics,
+    aggregate_pair_metrics,
+    serialise_pair_metrics,
 )
 
 
@@ -102,8 +108,13 @@ SUBSTANTIAL_DISORDER_FRACTION = 0.3
 # PAE threshold
 PAE_CONFIDENT_THRESHOLD = 5.0
 
+# Schema version marker - bump when column semantics change.
+# Readers must treat a missing schema_version column as "legacy" (pre-refactor).
+SCHEMA_VERSION = "multimer_v1"
+
 # CSV base columns that are always present
 CSV_FIELDNAMES_BASE = [
+    'schema_version',
     'complex_name', 'protein_a', 'protein_b', 'complex_type',
     'n_chains', 'best_chain_pair',
     'iptm', 'ptm', 'ranking_confidence',
@@ -111,9 +122,15 @@ CSV_FIELDNAMES_BASE = [
     'plddt_below50_fraction', 'plddt_below70_fraction',
     'num_residues', 'pae_mean',
     'pdockq', 'ppv', 'quality_tier',
-    'has_pdb', 'has_pkl', 'plddt_source',
+    'has_pdb', 'has_pkl', 'geometry_available', 'plddt_source',
     'species', 'structure_source',
     'species_a', 'species_b', 'species_status',
+    # Multimer-safe identity columns (Phase 2 - multimer_v1 schema)
+    'stoichiometry', 'is_homomeric',
+    'unique_accessions', 'chain_ids', 'accession_chain_map',
+    'tier_scope',
+    'filename_n_chains', 'pdb_n_chains', 'chain_count_consistency',
+    'complex_identity_json',
 ]
 
 # Enrichment columns added when --enrich is used
@@ -135,7 +152,15 @@ THREE_TO_ONE = {
     'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
 }
 
-# Interface geometry columns added when --interface is used
+# Interface geometry columns added when --interface is used.
+#
+# Best-pair vs whole-complex (multimer_v1 schema):
+#   For N=2, best-pair values and whole-complex aggregates are metric-identical.
+#   For N>2, `n_interface_contacts`, `interface_plddt_*`, `interface_symmetry`,
+#   `interface_fraction_*` etc. describe the BEST pair (max contacts). The
+#   `pair_metrics` JSON + `*_mean` / `*_min` / `pdockq_whole_complex` /
+#   `contact_count_total` aggregates describe the full complex and are required
+#   to avoid the pre-refactor order-statistic bias of `max(all pairs)`.
 CSV_FIELDNAMES_INTERFACE = [
     'n_interface_contacts', 'n_interface_residues_a', 'n_interface_residues_b',
     'interface_residues_a', 'interface_residues_b',
@@ -144,20 +169,58 @@ CSV_FIELDNAMES_INTERFACE = [
     'interface_plddt_a', 'interface_plddt_b', 'interface_plddt_combined',
     'bulk_plddt_combined', 'interface_vs_bulk_delta',
     'interface_plddt_high_fraction',
+    # Multimer_v1: per-pair snapshot + non-PAE aggregates
+    'pair_metrics',
+    'pdockq_mean', 'pdockq_min', 'pdockq_whole_complex',
+    'contact_count_total',
+    'interface_plddt_mean', 'symmetry_mean', 'symmetry_min',
 ]
 
 # Interface PAE columns added when --interface --pae is used
+# Two confident-contact fractions are exported:
+#   - pae_confident_contact_fraction: PAE < 5A only (historical metric; paradox thresholds)
+#   - strict_confident_contact_fraction: PAE < 5A AND both pLDDT >= 70 (consumed by composite)
+# Directional diagnostics (*_forward_mean, *_reverse_mean, *_directional_delta_*) are
+# exposed for the methods section - they quantify how often pae[i,j] disagrees with
+# pae[j,i] across the dataset (not part of the composite score).
 CSV_FIELDNAMES_INTERFACE_PAE = [
     'interface_pae_mean', 'interface_pae_median',
-    'n_confident_contacts', 'confident_contact_fraction',
+    'n_pae_confident_contacts', 'pae_confident_contact_fraction',
+    'n_strict_confident_contacts', 'strict_confident_contact_fraction',
     'cross_chain_pae_mean',
+    'interface_pae_forward_mean', 'interface_pae_reverse_mean',
+    'interface_pae_directional_delta_mean', 'interface_pae_directional_delta_max',
     'n_confident_residues_a', 'n_confident_residues_b',
     'interface_confidence_score',
     'quality_tier_v2',
+    # Multimer_v1: contact-weighted PAE aggregates across all pairs
+    'pae_confident_fraction_mean', 'strict_confident_fraction_mean',
+    # Multimer_v1 scope flag. True only for N=2 - the existing composite uses
+    # best-pair inputs (strict fraction, symmetry, density) which are order-
+    # statistic biased for N>2. A calibrated multimer composite is deferred
+    # (optional Phase 8) - downstream code should treat N>2 composites as
+    # uncalibrated and filter to tier_scope == "dimer_validated" for any
+    # headline confidence claim.
+    'composite_is_calibrated',
 ]
 
 # Flags column
 CSV_FIELDNAMES_FLAGS = ['interface_flags']
+
+
+# Central registry of every fieldname constant in the toolkit's own CSV output.
+# `test_schema_integrity.py` guards this mapping: it fails CI if any constant drifts
+# (new columns appended without a registry update, or duplicates across groups).
+# External modules (protein_clustering, variant_mapper, stability_scorer,
+# protvar_client, disease_annotations, pathway_network) own their own CSV_FIELDNAMES_*
+# constants; those are validated by their individual test modules.
+CSV_FIELDNAME_REGISTRY: dict[str, list[str]] = {
+    'base': CSV_FIELDNAMES_BASE,
+    'enrichment': CSV_FIELDNAMES_ENRICHMENT,
+    'interface': CSV_FIELDNAMES_INTERFACE,
+    'interface_pae': CSV_FIELDNAMES_INTERFACE_PAE,
+    'flags': CSV_FIELDNAMES_FLAGS,
+}
 
 
 #---------PDB B-Factor (pLDDT) Extraction------------------------------------
@@ -204,52 +267,160 @@ def extract_plddt_from_pdb(pdb_path: Path) -> Optional[dict]:
 
 #--------File Discovery & Parsing-------------------------------------------------
 
-def parse_complex_name(filename: str) -> tuple[str, str, str, str]:
-    """Parse protein IDs and complex type from an AlphaFold2 output filename.
-    Args:
-        filename: The filename without directory path to parse.
-    Returns:
-        Tuple of complex_name, protein_a_id, protein_b_id, complex_type
-    """
-    clean_name = filename
+# AlphaFold2 model suffixes - handles both naming conventions:
+#   PKL files use:  _result_model_X_multimer_v3_pred_Y
+#   PDB files use:  _relaxed_model_X_multimer_v3_pred_Y
+AF2_SUFFIX_PATTERN = re.compile(
+    r'_(result|relaxed)_model_\d+_multimer_v\d+_pred_\d+$'
+)
 
-    # Strip file extensions (.pdb, .pkl) if present
+
+@dataclass(frozen=True)
+class ComplexIdentity:
+    """Structural identity of a complex derived from its filename (and optionally PDB).
+
+    Replaces the lossy `parse_complex_name` contract: every chain token is preserved,
+    stoichiometry is canonicalised, and filename/PDB chain counts are cross-checked.
+    """
+    complex_id: str
+    accessions: tuple[str, ...]
+    unique_accessions: tuple[str, ...]
+    n_chains: int
+    stoichiometry: str
+    is_homomeric: bool
+    accession_chain_map: dict
+    chain_ids: tuple[str, ...]
+    legacy_complex_type: str
+    filename_n_chains: int
+    pdb_n_chains: Optional[int]
+    chain_count_consistency: str
+
+
+def _strip_filename_suffixes(filename: str) -> str:
+    """Strip file extensions and AF2 model suffixes to leave just the accession tokens."""
+    clean_name = filename
     for ext in ('.pdb', '.pkl'):
         if clean_name.endswith(ext):
             clean_name = clean_name[:-len(ext)]
-
-    # Strip AlphaFold2 model suffixes - handles both naming conventions:
-    # PKL files use:  _result_model_X_multimer_v3_pred_Y
-    # PDB files use:  _relaxed_model_X_multimer_v3_pred_Y
-    AF2_SUFFIX_PATTERN = re.compile(
-        r'_(result|relaxed)_model_\d+_multimer_v\d+_pred_\d+$'
-    )
     clean_name = AF2_SUFFIX_PATTERN.sub('', clean_name)
-
-    # Handles legacy _results / .results suffixes from older datasets
     for suffix in ('.results', '_results'):
         if clean_name.endswith(suffix):
             clean_name = clean_name[:-len(suffix)]
+    return clean_name
 
-    # Handle doubled-name format: A_B_A_B -> A_B
-    name_parts = clean_name.split('_')
-    if len(name_parts) >= 4:
-        midpoint = len(name_parts) // 2
-        first_half = '_'.join(name_parts[:midpoint])
-        second_half = '_'.join(name_parts[midpoint:])
-        if first_half == second_half:
-            clean_name = first_half
-            name_parts = clean_name.split('_')
 
-    if len(name_parts) >= 2:
-        protein_a_id = name_parts[0]
-        protein_b_id = name_parts[1]
+def _chain_label(index: int) -> str:
+    """Return chain label for index 0 -> 'A', 25 -> 'Z', 26 -> 'AA', etc."""
+    if index < 26:
+        return chr(ord('A') + index)
+    # Extended labels for rare N>26 complexes
+    first = chr(ord('A') + (index // 26) - 1)
+    second = chr(ord('A') + (index % 26))
+    return first + second
+
+
+def _canonical_stoichiometry(accessions: tuple[str, ...]) -> str:
+    """Canonical stoichiometry label from accession counts.
+
+    Sort unique accessions by count descending, then alphabetical; assign A, B, C,...
+    AFTER sorting so token-order variants (A_A_B vs B_A_A) yield the same label.
+    """
+    counts = Counter(accessions)
+    sorted_unique = sorted(counts.keys(), key=lambda acc: (-counts[acc], acc))
+    parts = []
+    for i, acc in enumerate(sorted_unique):
+        label = _chain_label(i)
+        count = counts[acc]
+        parts.append(label if count == 1 else f"{label}{count}")
+    return ''.join(parts)
+
+
+def parse_complex_identity(
+    filename: str,
+    pdb_n_chains: Optional[int] = None,
+) -> ComplexIdentity:
+    """Parse a filename into a full ComplexIdentity.
+
+    Args:
+        filename: Filename, optionally with .pdb/.pkl and AF2 model suffixes.
+        pdb_n_chains: Structural chain count if a PDB is available. When provided
+            and disagreeing with the filename token count, the row is flagged as
+            `chain_count_consistency == "mismatch"` and PDB is authoritative for
+            `n_chains` (stoichiometry remains filename-derived).
+    """
+    complex_id = _strip_filename_suffixes(filename)
+    accessions = tuple(complex_id.split('_'))
+    filename_n_chains = len(accessions)
+
+    # unique_accessions preserves first-seen order (not canonical-sorted order)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for acc in accessions:
+        if acc not in seen:
+            seen.add(acc)
+            unique.append(acc)
+    unique_accessions = tuple(unique)
+
+    stoichiometry = _canonical_stoichiometry(accessions)
+
+    # Chain IDs follow raw token order: chain A = first token, B = second, ...
+    chain_ids = tuple(_chain_label(i) for i in range(filename_n_chains))
+    accession_chain_map = {ch: accessions[i] for i, ch in enumerate(chain_ids)}
+
+    is_homomeric = len(unique_accessions) == 1
+
+    # Chain-count consistency
+    if pdb_n_chains is None:
+        n_chains = filename_n_chains
+        chain_count_consistency = "filename_only"
+    elif filename_n_chains == pdb_n_chains:
+        n_chains = filename_n_chains
+        chain_count_consistency = "match"
     else:
-        protein_a_id = clean_name
-        protein_b_id = clean_name
+        n_chains = pdb_n_chains
+        chain_count_consistency = "mismatch"
 
-    complex_type = 'Homodimer' if protein_a_id == protein_b_id else 'Heterodimer'
-    return clean_name, protein_a_id, protein_b_id, complex_type
+    # legacy_complex_type is the coarse category retained for backward compatibility.
+    # New code should prefer `stoichiometry` and `tier_scope`.
+    if filename_n_chains == 2:
+        legacy_complex_type = "Homodimer" if is_homomeric else "Heterodimer"
+    else:
+        legacy_complex_type = "Multi-chain"
+
+    return ComplexIdentity(
+        complex_id=complex_id,
+        accessions=accessions,
+        unique_accessions=unique_accessions,
+        n_chains=n_chains,
+        stoichiometry=stoichiometry,
+        is_homomeric=is_homomeric,
+        accession_chain_map=accession_chain_map,
+        chain_ids=chain_ids,
+        legacy_complex_type=legacy_complex_type,
+        filename_n_chains=filename_n_chains,
+        pdb_n_chains=pdb_n_chains,
+        chain_count_consistency=chain_count_consistency,
+    )
+
+
+def parse_complex_name(filename: str) -> tuple[str, str, str, str]:
+    """Parse protein IDs and coarse complex type from an AF2 output filename.
+
+    Thin backward-compat wrapper over `parse_complex_identity`. For N>2 complexes
+    this returns the first two accessions and `legacy_complex_type == "Multi-chain"`;
+    callers that need full stoichiometry should use `parse_complex_identity` directly.
+
+    Returns:
+        (complex_name, protein_a_id, protein_b_id, complex_type)
+    """
+    ident = parse_complex_identity(filename)
+    if ident.filename_n_chains >= 2:
+        protein_a_id = ident.accessions[0]
+        protein_b_id = ident.accessions[1]
+    else:
+        protein_a_id = ident.complex_id
+        protein_b_id = ident.complex_id
+    return ident.complex_id, protein_a_id, protein_b_id, ident.legacy_complex_type
 
 
 def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
@@ -293,7 +464,13 @@ def classify_prediction_quality(iptm_score: Optional[float], pdockq_score: Optio
     else:
         return 'Low'
 
-# Interface confidence thresholds for tier reclassification - calibrated from the 9,573-complex dataset
+# Interface confidence thresholds for tier reclassification - calibrated from the 9,573-complex
+# dataset scored with the PRE-REVISION composite (PAE-only fraction + linear pLDDT/100 +
+# one-directional PAE indexing). The 2026-04 methodological revision of
+# compute_interface_confidence() (strict fraction, band-aware pLDDT, bidirectional PAE max)
+# shifts the composite distribution downward; these thresholds are NOT recalibrated in this
+# pass. Expect tier counts to change. Recalibration is a deferred follow-up task - it
+# requires regenerating the 9,573-complex CSV and re-running the percentile analysis.
 UPGRADE_LOW_THRESHOLD = 0.64     # Low    -> High when composite score >= 0.64 (90th percentile of Low-tier scores)
 UPGRADE_MEDIUM_THRESHOLD = 0.80  # Medium -> High when composite score >= 0.80 (90th percentile of Medium-tier scores)
 DOWNGRADE_HIGH_THRESHOLD = 0.65  # High   -> Medium when composite score <= 0.65 (10th percentile of High-tier scores)
@@ -393,7 +570,7 @@ def _compute_pdockq_and_chain_info(
     *,
     run_interface_pae: bool,
     verbose: bool,
-) -> tuple[Optional[object], Optional[object], Optional[tuple], Optional[tuple]]:
+) -> tuple[Optional[object], Optional[object], Optional[tuple], Optional[tuple], Optional[list], Optional[dict]]:
     """Read PDB chain structure, find the best interacting chain pair, and compute pDockQ.
     Also pre-computes PAE chain offsets and CB-to-CA maps needed for downstream interface analysis.
     Args:
@@ -403,30 +580,48 @@ def _compute_pdockq_and_chain_info(
         run_interface_pae: Whether to compute PAE offsets and CB-to-CA maps.
         verbose: Whether to print per-step progress.
     Returns:
-        Tuple of contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps.
-        Any element may be None if the corresponding step was skipped or failed.
+        Tuple of (contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps,
+        pair_results, all_chain_offsets). Any element may be None if the
+        corresponding step was skipped or failed. pair_results is the list of
+        per-pair geometry records from compute_all_chain_pairs; all_chain_offsets
+        maps every chain id to its PAE row/column offset (for PAE pair aggregation).
     """
     contact_result = None
     chain_info = None
     pae_chain_offsets = None
     cb_to_ca_maps = None
+    pair_results: Optional[list] = None
+    all_chain_offsets: Optional[dict] = None
 
-    # Default chain count: parse_complex_name() infers a dimer pair from the filename,
-    # so 2 is the fallback when no PDB is available.
-    row['n_chains'] = 2
+    # n_chains is authoritatively set by parse_complex_identity / _populate_identity_fields
+    # (filename_n_chains when no PDB, else PDB chain count, with mismatch flagging).
 
     if 'pdb' not in file_paths:
-        return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps
+        return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets
 
     try:
         chain_info = read_pdb_with_chain_info(str(file_paths['pdb']))
         if len(chain_info.chain_ids) >= 2:
-            # Find the best interacting chain pair - also handles multi-chain 
+            # Find the best interacting chain pair - also handles multi-chain
             ch_a, ch_b, contact_result = find_best_chain_pair(chain_info, t=8)
-            row['n_chains'] = len(chain_info.chain_ids)
             row['best_chain_pair'] = f'{ch_a}_{ch_b}'
             row['pdockq'] = round(contact_result.pdockq, 4)
             row['ppv'] = round(contact_result.ppv, 4)
+
+            # Multimer_v1: enumerate every inter-chain pair (includes zero-contact pairs)
+            # and compute the whole-complex pDockQ. For N=2 whole-complex exactly equals
+            # best-pair pDockQ (protected by Phase 6 dimer regression test).
+            acc_map_raw = row.get('accession_chain_map')
+            try:
+                acc_map = json.loads(acc_map_raw) if isinstance(acc_map_raw, str) else (acc_map_raw or {})
+            except (json.JSONDecodeError, TypeError):
+                acc_map = {}
+            pair_results = compute_all_chain_pairs(chain_info, accession_chain_map=acc_map, t=8)
+            row['pdockq_whole_complex'] = round(calc_pdockq_whole_complex(chain_info, t=8), 4)
+
+            # All-chain PAE offsets (for per-pair PAE aggregation across the complex).
+            if run_interface_pae and pae_matrix is not None:
+                all_chain_offsets = compute_pae_chain_offsets(chain_info)
             if len(chain_info.chain_ids) > 2 and verbose:
                 print(f"  Multi-chain ({len(chain_info.chain_ids)} chains): "
                       f"best pair = {ch_a}-{ch_b}")
@@ -462,15 +657,16 @@ def _compute_pdockq_and_chain_info(
             if verbose and row.get('pdockq') is not None:
                 print(f"  PDB -> pDockQ={row['pdockq']}")
         else:
-            row['n_chains'] = len(chain_info.chain_ids)
             print(f"  Warning: <2 chains in {file_paths['pdb']}", file=sys.stderr)
 
     except Exception as error:
         print(f"  Warning: pDockQ failed for {file_paths['pdb']}: {error}", file=sys.stderr)
         contact_result = None
         chain_info = None
+        pair_results = None
+        all_chain_offsets = None
 
-    return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps
+    return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets
 
 
 def _compute_interface_features(
@@ -481,6 +677,8 @@ def _compute_interface_features(
     pae_matrix: Optional[np.ndarray],
     pae_chain_offsets: Optional[tuple],
     cb_to_ca_maps: Optional[tuple],
+    pair_results: Optional[list] = None,
+    all_chain_offsets: Optional[dict] = None,
     *,
     run_interface_pae: bool,
     export_interfaces: bool,
@@ -531,6 +729,26 @@ def _compute_interface_features(
             if key not in skip_keys:
                 row[key] = value
 
+        # Multimer_v1 all-pairs aggregates. Populates pair_metrics JSON +
+        # pdockq_mean/_min, contact_count_total, interface_plddt_mean,
+        # symmetry_mean/_min, and (when PAE is available) PAE-fraction means.
+        # For N=2 these coexist with the best-pair columns and must be metric-
+        # identical on pdockq_mean / pdockq_min / contact_count_total.
+        if pair_results is not None:
+            cb_map_dict = None
+            if chain_info is not None and hasattr(chain_info, 'cb_to_ca_map'):
+                cb_map_dict = chain_info.cb_to_ca_map
+            pair_records = compute_all_pair_metrics(
+                pair_results,
+                pae_matrix=pae_matrix if run_interface_pae else None,
+                chain_offsets=all_chain_offsets,
+                cb_to_ca_map=cb_map_dict,
+            )
+            row['pair_metrics'] = serialise_pair_metrics(pair_records)
+            aggregates = aggregate_pair_metrics(pair_records)
+            for agg_key, agg_val in aggregates.items():
+                row[agg_key] = agg_val
+
         # Extended flags: structural + paradox detection
         flags = compute_extended_flags(interface_features, iptm=row.get('iptm'), pdockq=row.get('pdockq'), disorder_fraction=row.get('plddt_below50_fraction'))
         row['interface_flags'] = ','.join(flags) if flags else ''
@@ -541,14 +759,74 @@ def _compute_interface_features(
             delta = interface_features.get('interface_vs_bulk_delta', 'N/A')
             print(f"  Interface -> {n_contacts} contacts, "
                   f"pLDDT={if_plddt}, delta={delta}")
-            if run_interface_pae and interface_features.get('confident_contact_fraction') is not None:
-                print(f"  Interface PAE -> confident={interface_features['confident_contact_fraction']:.1%}")
+            if run_interface_pae and interface_features.get('pae_confident_contact_fraction') is not None:
+                pae_frac = interface_features['pae_confident_contact_fraction']
+                strict_frac = interface_features.get('strict_confident_contact_fraction')
+                strict_str = f"{strict_frac:.1%}" if strict_frac is not None else "N/A"
+                print(f"  Interface PAE -> pae_confident={pae_frac:.1%}, strict_confident={strict_str}")
             score = interface_features.get('interface_confidence_score')
             if score is not None:
                 print(f"  Composite score: {score:.4f}")
 
     except Exception as error:
         print(f"  Warning: Interface analysis failed for {complex_name}: {error}", file=sys.stderr)
+
+
+def _populate_identity_fields(row: dict, identity: ComplexIdentity) -> None:
+    """Write a ComplexIdentity into the CSV row dict.
+
+    Sets the multimer_v1 identity columns plus the legacy fields (`complex_name`,
+    `protein_a`, `protein_b`, `complex_type`, `n_chains`) so callers see a
+    consistent view. For N=2 this preserves the pre-refactor legacy semantics.
+    """
+    row['schema_version'] = SCHEMA_VERSION
+    row['complex_name'] = identity.complex_id
+    # Legacy two-slot view: first two tokens when N>=2, same token when N==1
+    if identity.filename_n_chains >= 2:
+        row['protein_a'] = identity.accessions[0]
+        row['protein_b'] = identity.accessions[1]
+    else:
+        row['protein_a'] = identity.complex_id
+        row['protein_b'] = identity.complex_id
+    row['complex_type'] = identity.legacy_complex_type
+    row['n_chains'] = identity.n_chains
+    row['stoichiometry'] = identity.stoichiometry
+    row['is_homomeric'] = identity.is_homomeric
+    row['unique_accessions'] = ','.join(identity.unique_accessions)
+    row['chain_ids'] = ','.join(identity.chain_ids)
+    row['accession_chain_map'] = json.dumps(identity.accession_chain_map)
+    row['filename_n_chains'] = identity.filename_n_chains
+    row['pdb_n_chains'] = identity.pdb_n_chains
+    row['chain_count_consistency'] = identity.chain_count_consistency
+    row['tier_scope'] = "dimer_validated" if identity.n_chains == 2 else "multimer_provisional"
+    row['complex_identity_json'] = json.dumps({
+        'complex_id': identity.complex_id,
+        'accessions': list(identity.accessions),
+        'unique_accessions': list(identity.unique_accessions),
+        'n_chains': identity.n_chains,
+        'stoichiometry': identity.stoichiometry,
+        'is_homomeric': identity.is_homomeric,
+        'accession_chain_map': identity.accession_chain_map,
+        'chain_ids': list(identity.chain_ids),
+        'legacy_complex_type': identity.legacy_complex_type,
+        'filename_n_chains': identity.filename_n_chains,
+        'pdb_n_chains': identity.pdb_n_chains,
+        'chain_count_consistency': identity.chain_count_consistency,
+    })
+
+
+def _populate_scope_flags(row: dict) -> None:
+    """Derive scope-only flags from the row's tier_scope.
+
+    Must be called after every _populate_identity_fields() call so the flag
+    tracks identity revisions (e.g. PDB-driven n_chains overwrite).
+
+    The existing composite (compute_interface_confidence) consumes best-pair
+    inputs which are order-statistic biased for N>2 - mark it uncalibrated so
+    downstream figures and claims only rely on it under
+    tier_scope == "dimer_validated".
+    """
+    row['composite_is_calibrated'] = bool(row.get('tier_scope') == 'dimer_validated')
 
 
 def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, run_interface: bool = False, run_interface_pae: bool = False, export_interfaces: bool = False, stash_variant_data: bool = False, verbose: bool = False) -> dict:
@@ -564,34 +842,60 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
     Returns:
         Dictionary of results for this complex (one CSV row).
     """
-    _, protein_a_id, protein_b_id, complex_type = parse_complex_name(complex_name)
+    # Phase 2: parse full ComplexIdentity from filename. pdb_n_chains is unknown
+    # at this point; populate initial identity fields so downstream steps always
+    # see stoichiometry/tier_scope. After the PDB is read we re-parse with
+    # pdb_n_chains and overwrite - this is what surfaces filename/PDB mismatches.
+    initial_identity = parse_complex_identity(complex_name, pdb_n_chains=None)
 
-    row: dict = {'complex_name': complex_name,
-                 'protein_a': protein_a_id,
-                 'protein_b': protein_b_id,
-                 'complex_type': complex_type,
-                 'has_pdb': 'pdb' in file_paths,
-                 'has_pkl': 'pkl' in file_paths,
-                 'species': 'Homo sapiens (9606)',
-                 'structure_source': 'AlphaFold2_prediction',
-                 }
+    row: dict = {
+        'has_pdb': 'pdb' in file_paths,
+        'has_pkl': 'pkl' in file_paths,
+        'geometry_available': False,
+        'species': 'Homo sapiens (9606)',
+        'structure_source': 'AlphaFold2_prediction',
+    }
+    _populate_identity_fields(row, initial_identity)
+    _populate_scope_flags(row)
 
     pae_matrix = _extract_pkl_metrics(file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose)
     _extract_pdb_plddt(file_paths, row, verbose=verbose)
-    contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
+    contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
+
+    # Geometry availability: True iff every chain pair was successfully enumerated.
+    # Zero-contact pairs are valid geometry (still count toward the expected pair
+    # count); the flag only goes False on actual enumeration failure (no PDB,
+    # unparseable PDB, chain extraction failure).
+    n_chains_for_pairs = len(chain_info.chain_ids) if chain_info is not None else 0
+    expected_pair_count = n_chains_for_pairs * (n_chains_for_pairs - 1) // 2
+    row['geometry_available'] = bool(
+        chain_info is not None
+        and pair_results is not None
+        and len(pair_results) == expected_pair_count
+    )
+
+    # Finalise identity now that PDB chain count is known. When filename and PDB
+    # disagree, n_chains follows PDB (authoritative for structural metrics) and
+    # the row is flagged via chain_count_consistency == "mismatch".
+    if chain_info is not None:
+        pdb_n_chains = len(chain_info.chain_ids)
+        final_identity = parse_complex_identity(complex_name, pdb_n_chains=pdb_n_chains)
+        _populate_identity_fields(row, final_identity)
+        _populate_scope_flags(row)
 
     if run_interface and 'pdb' in file_paths:
         # Keep confident residue numbers if exporting interfaces OR stashing for variant mapping
         _compute_interface_features(
             complex_name, row, contact_result, chain_info,
             pae_matrix, pae_chain_offsets, cb_to_ca_maps,
+            pair_results, all_chain_offsets,
             run_interface_pae=run_interface_pae,
             export_interfaces=export_interfaces or stash_variant_data,
             verbose=verbose,
         )
 
         # Stash raw interface residue PDB numbers for PyMOL script generation
-        # (public keys — written to CSV so batch CLI can also skip re-reading PDBs)
+        # (public keys - written to CSV so batch CLI can also skip re-reading PDBs)
         if contact_result is not None and chain_info is not None:
             _bp = row.get('best_chain_pair', '')
             if _bp and '_' in _bp:
@@ -609,7 +913,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
 
         # Stash structural data for variant mapping (private keys, stripped before CSV write)
         # SASA is computed here inside the worker to avoid pickling heavy ChainInfo_New
-        # objects (numpy arrays) across the process boundary — only lightweight dicts are returned.
+        # objects (numpy arrays) across the process boundary - only lightweight dicts are returned.
         if stash_variant_data and chain_info is not None:
             from variant_mapper import compute_residue_sasa_both_chains
             best_pair = row.get('best_chain_pair', '')
@@ -623,7 +927,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
             except Exception:
                 sasa_a, sasa_b = {}, {}
 
-            row['_sasa_a'] = sasa_a                    # dict[int, float] — lightweight
+            row['_sasa_a'] = sasa_a                    # dict[int, float] - lightweight
             row['_sasa_b'] = sasa_b
             row['_chain_res_numbers_a'] = chain_info.chain_res_numbers.get(_va, [])
             row['_chain_res_numbers_b'] = chain_info.chain_res_numbers.get(_vb, [])
@@ -736,7 +1040,8 @@ def write_interface_exports(results: list[dict], output_path: str, min_tier: str
                 iptm=row.get('iptm'),
                 pdockq=row.get('pdockq'),
                 n_interface_contacts=row.get('n_interface_contacts'),
-                confident_contact_fraction=row.get('confident_contact_fraction'),
+                pae_confident_contact_fraction=row.get('pae_confident_contact_fraction'),
+                strict_confident_contact_fraction=row.get('strict_confident_contact_fraction'),
                 interface_plddt_combined=row.get('interface_plddt_combined'),
             )
             jsonl_file.write(json.dumps(record) + '\n')
@@ -1137,7 +1442,11 @@ def _aggregate_summary_statistics(results: list[dict], include_interface: bool =
                 for flag in flags_str.split(','):
                     all_flags[flag.strip()] += 1
         stats['all_flags'] = dict(all_flags)
-        stats['confident_fractions'] = [row['confident_contact_fraction'] for row in results if row.get('confident_contact_fraction') is not None]
+        # Aggregate both fractions so the summary block can show the PAE-only distribution
+        # (backward-compatible name for any log parsing) and the strict distribution that
+        # now feeds the composite score.
+        stats['confident_fractions'] = [row['pae_confident_contact_fraction'] for row in results if row.get('pae_confident_contact_fraction') is not None]
+        stats['strict_confident_fractions'] = [row['strict_confident_contact_fraction'] for row in results if row.get('strict_confident_contact_fraction') is not None]
         stats['composite_scores'] = [row['interface_confidence_score'] for row in results if row.get('interface_confidence_score') is not None]
 
         v2_tiers = [row.get('quality_tier_v2') for row in results if row.get('quality_tier_v2') is not None]
@@ -1165,7 +1474,7 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
     print(f"  Homodimers:      {stats['homodimer_count']} ({100 * stats['homodimer_count'] / total:.1f}%)")
     print(f"  Heterodimers:    {stats['heterodimer_count']} ({100 * stats['heterodimer_count'] / total:.1f}%)")
 
-    print(f"\nQuality Distribution:")
+    print(f"\nQuality Distribution (v1, two-metric baseline - for v1↔v2 comparison only):")
     print(f"  High:   {stats['quality_high']} ({100 * stats['quality_high'] / total:.1f}%)"
           f" - ipTM≥{IPTM_HIGH_THRESHOLD} & pDockQ≥{PDOCKQ_HIGH_THRESHOLD}")
     print(f"  Medium: {stats['quality_medium']} ({100 * stats['quality_medium'] / total:.1f}%)"
@@ -1222,12 +1531,14 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
             for flag, count in sorted(stats['all_flags'].items(), key=lambda x: -x[1]):
                 print(f"    {flag}: {count} ({100 * count / total:.1f}%)")
 
-    # PAE-specific summary
+    # PAE-specific summary (reports both PAE-only and strict fractions)
     if stats['confident_fractions']:
         print(f"\nInterface PAE:")
-        print(f"  Mean confident contact fraction: {statistics.mean(stats['confident_fractions']):.3f}")
+        print(f"  Mean PAE-only confident fraction:   {statistics.mean(stats['confident_fractions']):.3f}")
+        if stats.get('strict_confident_fractions'):
+            print(f"  Mean strict confident fraction:     {statistics.mean(stats['strict_confident_fractions']):.3f}")
         high_conf = sum(1 for f in stats['confident_fractions'] if f > 0.5)
-        print(f"  Complexes with >50% confident contacts: "
+        print(f"  Complexes with >50% PAE-only confident contacts: "
               f"{high_conf} ({100 * high_conf / len(stats['confident_fractions']):.1f}%)")
 
     # Composite interface confidence score
@@ -1238,13 +1549,16 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
               f"Median: {statistics.median(scores):.3f}, "
               f"Min: {min(scores):.3f}, Max: {max(scores):.3f}")
 
-    # Quality tier v2 reclassification summary
+    # Quality tier v2 reclassification summary - this is the canonical
+    # distribution used by every figure (Figs 1-16) via the
+    # `quality_tier_v2` column. The v1 block above is kept only for
+    # transparency about what the composite-score reclassification adds.
     if 'v2_high' in stats:
-        print(f"\nQuality Tier v2 (interface-aware reclassification):")
+        print(f"\nQuality Distribution (v2, composite-aware - used by all figures):")
         print(f"  High:   {stats['v2_high']} ({100 * stats['v2_high'] / total:.1f}%)")
         print(f"  Medium: {stats['v2_medium']} ({100 * stats['v2_medium'] / total:.1f}%)")
         print(f"  Low:    {stats['v2_low']} ({100 * stats['v2_low'] / total:.1f}%)")
-        print(f"  Reclassified: {stats['v2_upgrades']} upgraded to High, "
+        print(f"  Reclassified vs v1: {stats['v2_upgrades']} upgraded to High, "
               f"{stats['v2_downgrades']} downgraded from High")
 
 
@@ -1812,7 +2126,7 @@ def main() -> None:
         acc_to_entry = load_eve_entry_name_map(map_path)
         print(f"  Mapped {len(acc_to_entry):,} accessions to entry names", file=sys.stderr)
 
-        # Build EVE index (lazy — only loads CSVs for pipeline accessions)
+        # Build EVE index (lazy - only loads CSVs for pipeline accessions)
         # all_accessions was built by the --variants block (which --stability requires)
         eve_dir = stability_dir / "EVE_all_data"
         eve_index = build_eve_index(
@@ -1939,7 +2253,7 @@ def main() -> None:
         pathways_dir = Path(args.disease) if getattr(args, '_disease_enabled', False) \
             else DEFAULT_PATHWAYS_DIR
 
-        # Collect unique accessions from annotatable (human) rows only — STRING
+        # Collect unique accessions from annotatable (human) rows only - STRING
         # enrichment, per-pathway PPI, and network stats are species-specific
         # so non-human accessions would only add noise.
         pathway_accessions: set[str] = set()

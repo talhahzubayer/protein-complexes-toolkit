@@ -315,6 +315,131 @@ def compute_pae_chain_offsets_New(chain_info: ChainInfo_New) -> dict[str, int]:
         cumulative += chain_info.ca_counts[ch]
     return offsets
 
+@dataclass
+class PairContactResult:
+    """Per-pair contact result annotated with accessions and ready for aggregation.
+
+    This is the geometry-only record produced by `compute_all_chain_pairs`. PAE
+    features and the final JSON-serialisable view live in
+    `interface_analysis.PairMetricRecord` — pdockq.py owns geometry, interface_analysis
+    owns PAE (Phase 3 of the multimer refactor).
+
+    Zero-contact pairs are represented with n_contacts=0, pdockq=0.0, ppv=None,
+    interface_plddt=None, and empty residue sets. They must not be silently dropped:
+    dangling chains carry signal that surfaces through `pdockq_min` in the
+    per-complex aggregates.
+    """
+    chain_i: str
+    chain_j: str
+    accession_i: str
+    accession_j: str
+    n_contacts: int
+    interface_plddt: Optional[float]
+    pdockq: float
+    ppv: Optional[float]
+    interface_residues_i: set = field(default_factory=set)
+    interface_residues_j: set = field(default_factory=set)
+    # Private: kept so downstream PAE + symmetry computation can reuse the contact
+    # arrays without re-parsing. Not serialised into CSV.
+    _raw: Optional['ContactResult_New'] = None
+
+
+def compute_all_chain_pairs(
+    chain_info: ChainInfo_New,
+    accession_chain_map: Optional[dict] = None,
+    t: float = DEFAULT_CONTACT_THRESHOLD_New,
+) -> list[PairContactResult]:
+    """Enumerate all unique inter-chain pairs and return a PairContactResult for each.
+
+    Includes pairs with zero contacts (`n_contacts=0`, `pdockq=0.0`, `ppv=None`,
+    `interface_plddt=None`) so that downstream aggregation sees every pair.
+
+    Args:
+        chain_info: Chain-aware PDB info.
+        accession_chain_map: Optional chain -> accession dict (from ComplexIdentity).
+            When missing, accession is set to the chain id (harmless fallback).
+        t: Contact distance threshold in Ångströms.
+    """
+    from itertools import combinations
+
+    acc_map = accession_chain_map or {}
+    results: list[PairContactResult] = []
+    chains_with_coords = [ch for ch in chain_info.chain_ids if ch in chain_info.cb_coords]
+
+    for ch_i, ch_j in combinations(chains_with_coords, 2):
+        pair_coords = {ch_i: chain_info.cb_coords[ch_i], ch_j: chain_info.cb_coords[ch_j]}
+        pair_plddt = {ch_i: chain_info.cb_plddt[ch_i], ch_j: chain_info.cb_plddt[ch_j]}
+        raw = calc_pdockq_and_contacts_New(pair_coords, pair_plddt, t=t)
+
+        # Zero-contact pairs: keep structure shape but null out the score-bearing
+        # fields. We deliberately use None (not 0.0) for ppv and interface_plddt
+        # because "no contacts observed" is not the same as "score of zero".
+        has_contacts = raw.n_interface_contacts > 0
+        results.append(PairContactResult(
+            chain_i=ch_i,
+            chain_j=ch_j,
+            accession_i=acc_map.get(ch_i, ch_i),
+            accession_j=acc_map.get(ch_j, ch_j),
+            n_contacts=raw.n_interface_contacts,
+            interface_plddt=raw.avg_if_plddt if has_contacts else None,
+            pdockq=float(raw.pdockq),
+            ppv=float(raw.ppv) if has_contacts else None,
+            interface_residues_i=set(raw.interface_residues_a),
+            interface_residues_j=set(raw.interface_residues_b),
+            _raw=raw,
+        ))
+
+    return results
+
+
+def calc_pdockq_whole_complex(
+    chain_info: ChainInfo_New,
+    t: float = DEFAULT_CONTACT_THRESHOLD_New,
+) -> float:
+    """Recompute pDockQ once using the union of all inter-chain contacts.
+
+    This is NOT the mean of per-pair pDockQs. It applies the FoldDock sigmoid to
+    a single (avg_if_plddt, total_contacts) pair derived from every inter-chain
+    contact in the complex, so that dangling chains and weakly-coupled secondary
+    interfaces are both reflected in a single number.
+
+    For N=2 this exactly equals the best-pair pDockQ (metric identity — protected
+    by the Phase 6 dimer regression test).
+    """
+    from itertools import combinations
+
+    interface_residues: dict[str, set] = {}
+    total_contacts = 0
+
+    for ch_a, ch_b in combinations(chain_info.chain_ids, 2):
+        if ch_a not in chain_info.cb_coords or ch_b not in chain_info.cb_coords:
+            continue
+        coords_a = chain_info.cb_coords[ch_a]
+        coords_b = chain_info.cb_coords[ch_b]
+        contacts, _ = _compute_interchain_contacts(coords_a, coords_b, t)
+        if contacts.shape[0] < 1:
+            continue
+        total_contacts += int(contacts.shape[0])
+        interface_residues.setdefault(ch_a, set()).update(np.unique(contacts[:, 0]).tolist())
+        interface_residues.setdefault(ch_b, set()).update(np.unique(contacts[:, 1]).tolist())
+
+    if total_contacts == 0 or not interface_residues:
+        return 0.0
+
+    all_plddt: list[float] = []
+    for ch, indices in interface_residues.items():
+        plddt = chain_info.cb_plddt[ch]
+        all_plddt.extend(plddt[list(indices)].tolist())
+
+    if not all_plddt:
+        return 0.0
+
+    avg_plddt = float(np.mean(all_plddt))
+    x = avg_plddt * np.log10(total_contacts)
+    pdockq = PDOCKQ_L_New / (1 + np.exp(-PDOCKQ_K_New * (x - PDOCKQ_X0_New))) + PDOCKQ_B_New
+    return float(pdockq)
+
+
 def find_best_chain_pair_New(chain_info: ChainInfo_New, t: float = DEFAULT_CONTACT_THRESHOLD_New) -> tuple[str, str, 'ContactResult_New']:
     """Find the chain pair with the most inter-chain contacts.
     For multi-chain complexes, the first 2 chains alphabetically may not be the interacting pair. 
