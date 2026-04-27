@@ -205,21 +205,6 @@ The wrapper's `[0/4]`–`[2/4]` steps fail in <30 s if anything is wrong, so a m
 - `[1/4] data_registry.py` - all 18 registered data files exist and are non-empty.
 - `[2/4] complex_resolver.py` - PDB/PKL pairs in the input tree, audit manifest written.
 
-### Reference run (sanity baseline)
-
-Job `33556112`, 26 April 2026, host `erc-hpc-comp012`, 41,196 complexes, sharded HPC layout:
-
-| Phase | Elapsed |
-|---|---|
-| Structural pass (16-worker pool) | 32.6 min |
-| ProtVar offline | 10.5 min |
-| Disease annotation | 3.7 min |
-| Pathway + per-pathway PPI enrichment | **67.9 min (dominant cost)** |
-| PyMOL `.pml` generation (12,629 High-tier) | 1.9 min |
-| **Total** | **5h 57m** |
-
-Output: `results.csv` (~344 MB, 41,196 rows × 153 cols), `interfaces.jsonl` (~22 MB, 28,203 complexes), 12,629 `.pml` files, and the forensic manifest (`data/complex_manifest_audit/complex_manifest.tsv`, `incomplete_inputs.tsv`).
-
 ---
 
 ## Pipeline Architecture
