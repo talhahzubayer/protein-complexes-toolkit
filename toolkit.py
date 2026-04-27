@@ -56,6 +56,7 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Optional
 
@@ -73,6 +74,7 @@ CHECKPOINT_SUFFIX = '.checkpoint.jsonl'
 
 # Direct module imports for core analysis functions - replaces subprocess calls and temp JSON files
 # JAX mocking happens once when read_af2_nojax is first imported
+from file_io import decompressed_pdb_view, open_text_maybe_compressed
 from read_af2_nojax import load_pkl_without_jax, extract_metrics
 from pdockq import (
     read_pdb_with_chain_info_New as read_pdb_with_chain_info,
@@ -235,7 +237,7 @@ def extract_plddt_from_pdb(pdb_path: Path) -> Optional[dict]:
     """
     plddt_values: list[float] = []
     try:
-        with open(pdb_path, 'r', encoding='utf-8', errors='replace') as pdb_file:
+        with open_text_maybe_compressed(pdb_path) as pdb_file:
             for line in pdb_file:
                 if not line.startswith('ATOM'):
                     continue
@@ -423,26 +425,74 @@ def parse_complex_name(filename: str) -> tuple[str, str, str, str]:
     return ident.complex_id, protein_a_id, protein_b_id, ident.legacy_complex_type
 
 
+_LOOSE_SUFFIXES = (
+    '.pdb', '.pdb.bz2', '.pdb.gz',
+    '.pkl', '.pkl.bz2', '.pkl.gz',
+    '.results.pkl', '.results.pkl.bz2',
+)
+
+
+def _has_loose_files(directory: Path) -> bool:
+    for f in directory.iterdir():
+        if not f.is_file():
+            continue
+        name = f.name
+        for suffix in _LOOSE_SUFFIXES:
+            if name.endswith(suffix):
+                return True
+    return False
+
+
 def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
-    """Find matching PDB and PKL files in a directory.
-    Args:
-        directory: Path to the directory containing PDB/PKL files.
-    Returns:
-        Dictionary mapping complex names to dicts with 'pdb' and/or 'pkl' paths.
+    """Find paired PDB/PKL files in a loose, flat-dir, or sharded layout.
+
+    Three layouts supported:
+
+    - **Loose**: files directly in root, e.g. ``Test_Data/X_Y.pdb`` (legacy
+      local layout). Complex names parsed from filenames.
+    - **Flat-dir**: each child of root is a complex directory containing
+      ``{name}.pdb`` and ``{name}.pkl`` (or compressed variants).
+    - **Sharded**: ``{root}/{shard}/{complex_name}/...`` (HPC layout).
+
+    Hierarchical layouts (flat-dir + sharded) delegate to
+    ``complex_resolver.find_complexes`` which also writes a forensic
+    manifest. The loose layout is handled in-place to preserve the original
+    Test_Data semantics.
+
+    Returns only complete pairs; downstream code dereferences
+    ``paths['pdb']`` and ``paths['pkl']`` directly.
     """
     data_directory = Path(directory)
-    complexes: dict[str, dict[str, Path]] = defaultdict(dict)
 
-    for file_path in data_directory.iterdir():
-        if not file_path.is_file():
-            continue
-        complex_name, _, _, _ = parse_complex_name(file_path.name)
-        if file_path.suffix == '.pdb':
-            complexes[complex_name]['pdb'] = file_path
-        elif file_path.suffix == '.pkl':
-            complexes[complex_name]['pkl'] = file_path
+    if _has_loose_files(data_directory):
+        complexes: dict[str, dict[str, Path]] = defaultdict(dict)
+        for file_path in data_directory.iterdir():
+            if not file_path.is_file():
+                continue
+            # parse_complex_name doesn't know about .bz2/.gz; strip the
+            # compression suffix before grouping so X_Y.pdb.bz2 and
+            # X_Y.pkl.bz2 share the same complex_name key.
+            name_for_parsing = file_path.name
+            for ext in ('.bz2', '.gz'):
+                if name_for_parsing.lower().endswith(ext):
+                    name_for_parsing = name_for_parsing[: -len(ext)]
+                    break
+            complex_name, _, _, _ = parse_complex_name(name_for_parsing)
+            name_lower = file_path.name.lower()
+            if name_lower.endswith('.pdb') or name_lower.endswith('.pdb.bz2') \
+                    or name_lower.endswith('.pdb.gz'):
+                complexes[complex_name].setdefault('pdb', file_path)
+            elif name_lower.endswith('.pkl') or name_lower.endswith('.pkl.bz2') \
+                    or name_lower.endswith('.pkl.gz'):
+                complexes[complex_name].setdefault('pkl', file_path)
+        return {
+            name: paths
+            for name, paths in complexes.items()
+            if 'pdb' in paths and 'pkl' in paths
+        }
 
-    return dict(complexes)
+    from complex_resolver import find_complexes
+    return find_complexes(root=data_directory)
 
 #------Quality Classification------------------------------------------------------
 
@@ -842,105 +892,117 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
     Returns:
         Dictionary of results for this complex (one CSV row).
     """
-    # Phase 2: parse full ComplexIdentity from filename. pdb_n_chains is unknown
-    # at this point; populate initial identity fields so downstream steps always
-    # see stoichiometry/tier_scope. After the PDB is read we re-parse with
-    # pdb_n_chains and overwrite - this is what surfaces filename/PDB mismatches.
-    initial_identity = parse_complex_identity(complex_name, pdb_n_chains=None)
+    # Decompress .pdb.bz2 / .pdb.gz once per complex into a per-call tempfile so
+    # the four downstream PDB readers (extract_plddt_from_pdb, the three passes
+    # inside read_pdb_with_chain_info_New, and the SASA parser) all consume
+    # plain-disk text instead of re-decompressing a slow sequential codec each
+    # time. Plain .pdb inputs pass through unchanged.
+    with ExitStack() as _pdb_stack:
+        if 'pdb' in file_paths:
+            effective_pdb = _pdb_stack.enter_context(
+                decompressed_pdb_view(file_paths['pdb'])
+            )
+            file_paths = {**file_paths, 'pdb': effective_pdb}
 
-    row: dict = {
-        'has_pdb': 'pdb' in file_paths,
-        'has_pkl': 'pkl' in file_paths,
-        'geometry_available': False,
-        'species': 'Homo sapiens (9606)',
-        'structure_source': 'AlphaFold2_prediction',
-    }
-    _populate_identity_fields(row, initial_identity)
-    _populate_scope_flags(row)
+        # Phase 2: parse full ComplexIdentity from filename. pdb_n_chains is unknown
+        # at this point; populate initial identity fields so downstream steps always
+        # see stoichiometry/tier_scope. After the PDB is read we re-parse with
+        # pdb_n_chains and overwrite - this is what surfaces filename/PDB mismatches.
+        initial_identity = parse_complex_identity(complex_name, pdb_n_chains=None)
 
-    pae_matrix = _extract_pkl_metrics(file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose)
-    _extract_pdb_plddt(file_paths, row, verbose=verbose)
-    contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
-
-    # Geometry availability: True iff every chain pair was successfully enumerated.
-    # Zero-contact pairs are valid geometry (still count toward the expected pair
-    # count); the flag only goes False on actual enumeration failure (no PDB,
-    # unparseable PDB, chain extraction failure).
-    n_chains_for_pairs = len(chain_info.chain_ids) if chain_info is not None else 0
-    expected_pair_count = n_chains_for_pairs * (n_chains_for_pairs - 1) // 2
-    row['geometry_available'] = bool(
-        chain_info is not None
-        and pair_results is not None
-        and len(pair_results) == expected_pair_count
-    )
-
-    # Finalise identity now that PDB chain count is known. When filename and PDB
-    # disagree, n_chains follows PDB (authoritative for structural metrics) and
-    # the row is flagged via chain_count_consistency == "mismatch".
-    if chain_info is not None:
-        pdb_n_chains = len(chain_info.chain_ids)
-        final_identity = parse_complex_identity(complex_name, pdb_n_chains=pdb_n_chains)
-        _populate_identity_fields(row, final_identity)
+        row: dict = {
+            'has_pdb': 'pdb' in file_paths,
+            'has_pkl': 'pkl' in file_paths,
+            'geometry_available': False,
+            'species': 'Homo sapiens (9606)',
+            'structure_source': 'AlphaFold2_prediction',
+        }
+        _populate_identity_fields(row, initial_identity)
         _populate_scope_flags(row)
 
-    if run_interface and 'pdb' in file_paths:
-        # Keep confident residue numbers if exporting interfaces OR stashing for variant mapping
-        _compute_interface_features(
-            complex_name, row, contact_result, chain_info,
-            pae_matrix, pae_chain_offsets, cb_to_ca_maps,
-            pair_results, all_chain_offsets,
-            run_interface_pae=run_interface_pae,
-            export_interfaces=export_interfaces or stash_variant_data,
-            verbose=verbose,
+        pae_matrix = _extract_pkl_metrics(file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose)
+        _extract_pdb_plddt(file_paths, row, verbose=verbose)
+        contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
+
+        # Geometry availability: True iff every chain pair was successfully enumerated.
+        # Zero-contact pairs are valid geometry (still count toward the expected pair
+        # count); the flag only goes False on actual enumeration failure (no PDB,
+        # unparseable PDB, chain extraction failure).
+        n_chains_for_pairs = len(chain_info.chain_ids) if chain_info is not None else 0
+        expected_pair_count = n_chains_for_pairs * (n_chains_for_pairs - 1) // 2
+        row['geometry_available'] = bool(
+            chain_info is not None
+            and pair_results is not None
+            and len(pair_results) == expected_pair_count
         )
 
-        # Stash raw interface residue PDB numbers for PyMOL script generation
-        # (public keys - written to CSV so batch CLI can also skip re-reading PDBs)
-        if contact_result is not None and chain_info is not None:
-            _bp = row.get('best_chain_pair', '')
-            if _bp and '_' in _bp:
-                _ia, _ib = _bp.split('_', 1)
-            else:
-                _ia, _ib = 'A', 'B'
-            row['interface_residues_a'] = '|'.join(
-                str(chain_info.chain_res_numbers[_ia][i])
-                for i in sorted(contact_result.interface_residues_a)
+        # Finalise identity now that PDB chain count is known. When filename and PDB
+        # disagree, n_chains follows PDB (authoritative for structural metrics) and
+        # the row is flagged via chain_count_consistency == "mismatch".
+        if chain_info is not None:
+            pdb_n_chains = len(chain_info.chain_ids)
+            final_identity = parse_complex_identity(complex_name, pdb_n_chains=pdb_n_chains)
+            _populate_identity_fields(row, final_identity)
+            _populate_scope_flags(row)
+
+        if run_interface and 'pdb' in file_paths:
+            # Keep confident residue numbers if exporting interfaces OR stashing for variant mapping
+            _compute_interface_features(
+                complex_name, row, contact_result, chain_info,
+                pae_matrix, pae_chain_offsets, cb_to_ca_maps,
+                pair_results, all_chain_offsets,
+                run_interface_pae=run_interface_pae,
+                export_interfaces=export_interfaces or stash_variant_data,
+                verbose=verbose,
             )
-            row['interface_residues_b'] = '|'.join(
-                str(chain_info.chain_res_numbers[_ib][i])
-                for i in sorted(contact_result.interface_residues_b)
-            )
 
-        # Stash structural data for variant mapping (private keys, stripped before CSV write)
-        # SASA is computed here inside the worker to avoid pickling heavy ChainInfo_New
-        # objects (numpy arrays) across the process boundary - only lightweight dicts are returned.
-        if stash_variant_data and chain_info is not None:
-            from variant_mapper import compute_residue_sasa_both_chains
-            best_pair = row.get('best_chain_pair', '')
-            if best_pair and '_' in best_pair:
-                _va, _vb = best_pair.split('_', 1)
-            else:
-                _va, _vb = 'A', 'B'
-            try:
-                sasa_a, sasa_b = compute_residue_sasa_both_chains(
-                    file_paths['pdb'], _va, _vb)
-            except Exception:
-                sasa_a, sasa_b = {}, {}
+            # Stash raw interface residue PDB numbers for PyMOL script generation
+            # (public keys - written to CSV so batch CLI can also skip re-reading PDBs)
+            if contact_result is not None and chain_info is not None:
+                _bp = row.get('best_chain_pair', '')
+                if _bp and '_' in _bp:
+                    _ia, _ib = _bp.split('_', 1)
+                else:
+                    _ia, _ib = 'A', 'B'
+                row['interface_residues_a'] = '|'.join(
+                    str(chain_info.chain_res_numbers[_ia][i])
+                    for i in sorted(contact_result.interface_residues_a)
+                )
+                row['interface_residues_b'] = '|'.join(
+                    str(chain_info.chain_res_numbers[_ib][i])
+                    for i in sorted(contact_result.interface_residues_b)
+                )
 
-            row['_sasa_a'] = sasa_a                    # dict[int, float] - lightweight
-            row['_sasa_b'] = sasa_b
-            row['_chain_res_numbers_a'] = chain_info.chain_res_numbers.get(_va, [])
-            row['_chain_res_numbers_b'] = chain_info.chain_res_numbers.get(_vb, [])
-            row['_cb_coords_a'] = chain_info.cb_coords.get(_va, np.empty((0, 3))).tolist()
-            row['_cb_coords_b'] = chain_info.cb_coords.get(_vb, np.empty((0, 3))).tolist()
-            row['_confident_residue_numbers_a'] = row.get('confident_residue_numbers_a', [])
-            row['_confident_residue_numbers_b'] = row.get('confident_residue_numbers_b', [])
+            # Stash structural data for variant mapping (private keys, stripped before CSV write)
+            # SASA is computed here inside the worker to avoid pickling heavy ChainInfo_New
+            # objects (numpy arrays) across the process boundary - only lightweight dicts are returned.
+            if stash_variant_data and chain_info is not None:
+                from variant_mapper import compute_residue_sasa_both_chains
+                best_pair = row.get('best_chain_pair', '')
+                if best_pair and '_' in best_pair:
+                    _va, _vb = best_pair.split('_', 1)
+                else:
+                    _va, _vb = 'A', 'B'
+                try:
+                    sasa_a, sasa_b = compute_residue_sasa_both_chains(
+                        file_paths['pdb'], _va, _vb)
+                except Exception:
+                    sasa_a, sasa_b = {}, {}
 
-    # Quality tier classification
-    row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
-    row['quality_tier_v2'] = classify_prediction_quality_v2(row.get('iptm'), row.get('pdockq'), row.get('interface_confidence_score'))
+                row['_sasa_a'] = sasa_a                    # dict[int, float] - lightweight
+                row['_sasa_b'] = sasa_b
+                row['_chain_res_numbers_a'] = chain_info.chain_res_numbers.get(_va, [])
+                row['_chain_res_numbers_b'] = chain_info.chain_res_numbers.get(_vb, [])
+                row['_cb_coords_a'] = chain_info.cb_coords.get(_va, np.empty((0, 3))).tolist()
+                row['_cb_coords_b'] = chain_info.cb_coords.get(_vb, np.empty((0, 3))).tolist()
+                row['_confident_residue_numbers_a'] = row.get('confident_residue_numbers_a', [])
+                row['_confident_residue_numbers_b'] = row.get('confident_residue_numbers_b', [])
 
-    return row
+        # Quality tier classification
+        row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
+        row['quality_tier_v2'] = classify_prediction_quality_v2(row.get('iptm'), row.get('pdockq'), row.get('interface_confidence_score'))
+
+        return row
 
 #----------------------------Results Output-------------------------------------
 

@@ -46,10 +46,14 @@ protein-complexes-toolkit/
 ├── pathway_network.py        # Reactome pathway mapping, PPI enrichment, NetworkX networks
 ├── pymol_scripts.py          # PyMOL .pml script generation and py3Dmol fallback
 ├── data_registry.py          # Data dependency registry and pre-run validation
+├── complex_resolver.py       # PDB/PKL pair discovery (flat + sharded, .bz2-aware) + forensic manifest
+├── file_io.py                # Transparent open() for plain / .gz / .bz2 inputs
+├── hpc_dataset_run.sh        # SLURM wrapper for production HPC submission (see HPC Submission)
 ├── Toolkit_Commands_List.md  # Full CLI command reference (all flags, defaults, examples)
 ├── requirements.txt          # Python dependencies
 ├── .gitignore
 └── data/                        # External databases (not included in repo)
+    ├── complex_manifest_audit/  # Forensic manifest from complex_resolver (auto-generated)
     ├── ppi/                     # PPI databases (see "Setting Up Data")
     ├── clusters/                # STRING sequence clusters (see "Setting Up Data")
     ├── variants/                # Variant databases (see "Setting Up Data")
@@ -62,7 +66,7 @@ protein-complexes-toolkit/
 
 ### Prerequisites
 
-- Python 3.13+
+- Python 3.11+
 - pip
 
 ### Install Dependencies
@@ -165,6 +169,59 @@ data/
 ```
 
 
+## HPC Submission
+
+For cluster runs, `hpc_dataset_run.sh` is a hardened SLURM wrapper that orchestrates the full pipeline end-to-end. The minimum invocation:
+
+```bash
+export PROTEIN_TOOLKIT_PROJECT_ROOT=/scratch/<project>/protein-complexes-toolkit-hpc
+export PROTEIN_COMPLEXES_ROOT=/scratch/<project>/Protein_Complexes
+sbatch hpc_dataset_run.sh
+```
+
+The wrapper sets `module purge && module load python/3.11.6-gcc-13.2.0`, activates the project venv, applies the environment-hardening below, and runs 5 phases: `[0/4] pip check -> [1/4] data_registry.py -> [2/4] complex_resolver.py -> [3/4] toolkit.py --full-pipeline -> [4/4] visualise_results.py`.
+
+### Resource allocation
+
+| Resource | Allocation | Note |
+|---|---|---|
+| CPUs | 16 | Matches `ProcessPoolExecutor(max_workers=16)`. |
+| Memory | 64 GB | Run 1 measured MaxRSS 67 GB on a 41,196-complex corpus - bump to **80 GB** for headroom. |
+| Walltime | 48 h | Run 1 finished in 5h 57m; 48 h gives ~8× safety. |
+
+### Why the wrapper sets BLAS thread caps
+
+NumPy / SciPy / BioPython transitively call BLAS, which by default tries to use all available cores per call. Combined with `ProcessPoolExecutor(max_workers=16)` on a 16-CPU allocation, this would oversubscribe to 16 × 16 = 256 threads competing for 16 cores - a 5-10× slowdown. The wrapper exports `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1` so `ProcessPoolExecutor`'s parallelism is the only level of concurrency.
+
+### Why the wrapper sets matplotlib environment
+
+Compute nodes have no DISPLAY, so the default Tk backend would crash when `visualise_results.py` runs. The wrapper exports `MPLBACKEND=Agg` and `MPLCONFIGDIR="$PROTEIN_TOOLKIT_PROJECT_ROOT/.matplotlib"` (the second redirects the font/style cache off the user's home directory, which is often a quota-restricted shared filesystem).
+
+### Pre-flight gates
+
+The wrapper's `[0/4]`–`[2/4]` steps fail in <30 s if anything is wrong, so a missing data file fails fast at minute 0 instead of at hour 12:
+
+- `[0/4] pip check` - dependency consistency in the venv.
+- `[1/4] data_registry.py` - all 18 registered data files exist and are non-empty.
+- `[2/4] complex_resolver.py` - PDB/PKL pairs in the input tree, audit manifest written.
+
+### Reference run (sanity baseline)
+
+Job `33556112`, 26 April 2026, host `erc-hpc-comp012`, 41,196 complexes, sharded HPC layout:
+
+| Phase | Elapsed |
+|---|---|
+| Structural pass (16-worker pool) | 32.6 min |
+| ProtVar offline | 10.5 min |
+| Disease annotation | 3.7 min |
+| Pathway + per-pathway PPI enrichment | **67.9 min (dominant cost)** |
+| PyMOL `.pml` generation (12,629 High-tier) | 1.9 min |
+| **Total** | **5h 57m** |
+
+Output: `results.csv` (~344 MB, 41,196 rows × 153 cols), `interfaces.jsonl` (~22 MB, 28,203 complexes), 12,629 `.pml` files, and the forensic manifest (`data/complex_manifest_audit/complex_manifest.tsv`, `incomplete_inputs.tsv`).
+
+---
+
 ## Pipeline Architecture
 
 ```
@@ -251,7 +308,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 ### Script Descriptions
 
-The pipeline produces a 28-column base CSV, progressively expandable to 130 columns by stacking optional flags (`--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI.
+The pipeline produces a 40-column base CSV, progressively expandable to ~153 columns by stacking optional flags (`--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI. Compressed inputs (`.pdb.bz2`, `.pkl.bz2`) and the sharded HPC layout are supported transparently.
 
 #### Core Analysis
 
@@ -261,9 +318,7 @@ The pipeline produces a 28-column base CSV, progressively expandable to 130 colu
 
 **interface_analysis.py** - 2-phase interface characterisation. Phase 1 derives structural geometry from PDB alone (contact count, interface fractions, symmetry, density, interface vs bulk pLDDT). Phase 2 adds PAE-aware confident contact identification, composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, resume from interruption and implements 2 quality classification schemes.. Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). `--full-pipeline` activates all phases with default data paths and validates all data dependencies before processing starts.
-
-**data_registry.py** - Centralises all data-file path references into a single registry of 18 entries, each recording expected path, source module, constant name, and whether the filename contains a version string. Provides `validate_data_dependencies()` for pre-run checks used by `--full-pipeline`, and a standalone CLI for dependency checking (`python data_registry.py`).
+**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, resume from interruption, and implements 2 quality classification schemes (v1 ipTM/pDockQ gating; v2 composite-informed reclassification). Reads paired PDB/PKL files via `complex_resolver.py` and decompresses `.bz2` inputs in-place via `file_io.py` (no staging mirror). Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging, species classification), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). `--full-pipeline` activates all phases with default data paths and validates all data dependencies before processing starts.
 
 **visualise_results.py** - Generates up to 16 figures (+ 1b supplementary) with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`). When `species_status` is present, structural figures (1-9) are emitted per species subset (`<n>_<name>_human.png`, `<n>_<name>_nonhuman.png`); enrichment figures use reviewed+TrEMBL (Figs 10-12) or reviewed-only (Figs 13-16) depending on database coverage.
 
@@ -295,60 +350,101 @@ The pipeline produces a 28-column base CSV, progressively expandable to 130 colu
 
 #### Structural Visualisation
 
-**pymol_scripts.py** - Generates scene-managed PyMOL `.pml` scripts with layered visualisation: chain colouring (10-chain palette, homodimer transparency), pLDDT confidence bands, interface residue sticks, pathogenicity-aware variant spheres coloured by structural context, and AlphaMissense transparency overlay (`--pymol`, `--pymol-min-tier`, `--pymol-render`). Includes metadata and biological annotation comments, pre-computed interface residue lookup to avoid redundant PDB I/O, and a `py3Dmol` fallback for in-notebook rendering.
+**pymol_scripts.py** - Generates scene-managed PyMOL `.pml` scripts with layered visualisation: chain colouring (10-chain palette, homodimer transparency), pLDDT confidence bands, interface residue sticks, pathogenicity-aware variant spheres coloured by structural context, and AlphaMissense transparency overlay (`--pymol`, `--pymol-min-tier`, `--pymol-render`). Includes metadata and biological annotation comments, pre-computed interface residue lookup to avoid redundant PDB I/O, and a `py3Dmol` fallback for in-notebook rendering. For `.pdb.bz2` inputs the generator emits an inline `bz2.open` + `cmd.read_pdbstr` block because PyMOL's CLI `load` does not transparently decompress.
+
+#### Input Discovery & HPC Submission
+
+**data_registry.py** - Centralises all data-file path references into a single registry of 16 entries, each recording expected path, source module, constant name, and whether the filename contains a version string. Resolves the project root dynamically with the precedence `explicit argument > PROTEIN_TOOLKIT_PROJECT_ROOT env var > repo fallback` so the toolkit (e.g. on HPC at `/scratch/<project>/protein-complexes-toolkit-hpc/`) and its data tree (e.g. at `/scratch/<project>/Protein_Complexes/`) can live in different locations. Provides `validate_data_dependencies()` for pre-run checks used by `--full-pipeline`, and a standalone CLI (`python data_registry.py`) for dependency checking.
+
+**complex_resolver.py** - Discovers paired PDB/PKL inputs across three layouts (loose flat, flat directory-per-complex, sharded directory-per-complex) and writes a forensic manifest of complete pairs plus an audit of incomplete inputs with reason codes (`missing_pdb`, `missing_pkl`, `missing_both`, `empty_pkl`, `duplicate_complex_name`, `ambiguous_pdb`). Layout detection via a `^[A-Z0-9]{2}$` shard regex. Atomic manifest writes (`write .tmp -> Path.replace()`) so the audit file is never half-written. Public API `find_complexes(root, audit_dir=None, write_audit=True)` is consumed by `toolkit.py`'s main pipeline, the standalone forensic CLI (`python complex_resolver.py`), and the `--pymol` script-generator path.
+
+**file_io.py** - Transparent compression-aware open helpers for the eight PDB-reading sites across `toolkit.py`, `pdockq.py`, `variant_mapper.py`, and `pymol_scripts.py`. Three exports: `open_text_maybe_compressed(path)` (text mode with `errors='replace'`), `open_binary_maybe_compressed(path)` (binary mode), and `decompressed_pdb_view(path)` (a context manager that materialises a `.pdb.bz2`/`.pdb.gz` into a per-complex tempfile once, yields the path, and deletes it on exit). The view is entered once per complex in `toolkit.process_single_complex` so the five sequential PDB readers (extract_pLDDT + three CA/CB passes in `read_pdb_with_chain_info_New` + SASA) all hit plain disk text after a single decompression.
+
+**hpc_dataset_run.sh** - Production SLURM wrapper for cluster submission. Owns the entire environment so the run is reproducible across login-node sessions: `module purge && module load python/3.11.6-gcc-13.2.0`, `source .venv/bin/activate`, BLAS thread caps (`OMP_NUM_THREADS=1` + MKL/OpenBLAS/NumExpr - prevents `ProcessPoolExecutor`'s 16 workers from oversubscribing to 256 BLAS threads on 16 cores), `MPLBACKEND=Agg` + `MPLCONFIGDIR` (compute nodes have no DISPLAY and home directories are quota-restricted), `PYTHONUNBUFFERED=1` (real-time SLURM logs) and `PYTHONNOUSERSITE=1` (defensive against stray user-site installs). Runs 5 phases: `[0/4] pip check`, `[1/4] data_registry.py`, `[2/4] complex_resolver.py`, `[3/4] toolkit.py --full-pipeline`, `[4/4] visualise_results.py`. See [HPC Submission](#hpc-submission) for required env vars, resource allocation, and reference performance numbers.
 
 
 ## Input Data Format
 
-The toolkit expects a directory containing paired AlphaFold2-Multimer output files:
+The toolkit expects a directory containing paired AlphaFold2-Multimer output files. **3 directory layouts and both compressed (`.bz2`) and uncompressed inputs are supported transparently** - no pre-processing or decompression step is required.
+
+### Layout 1 - Loose flat (legacy local)
+
+Files directly in the root, complex names parsed from filenames:
 
 ```
 Protein_Complexes/
-├── ProteinA_ProteinB.pdb                                          # Old naming
-├── ProteinA_ProteinB.results.pkl                                  # Old naming
-├── ProteinC_ProteinD_relaxed_model_1_multimer_v3_pred_0.pdb       # New naming
-├── ProteinC_ProteinD_result_model_1_multimer_v3_pred_0.pkl        # New naming
+├── ProteinA_ProteinB.pdb
+├── ProteinA_ProteinB.results.pkl
+├── ProteinC_ProteinD_relaxed_model_1_multimer_v3_pred_0.pdb
+├── ProteinC_ProteinD_result_model_1_multimer_v3_pred_0.pkl
 └── ...
 ```
 
-Each complex requires a **paired PDB structure file and PKL result file**. The toolkit supports two naming conventions:
+### Layout 2 - Flat directory-per-complex
 
-**Old naming convention:**
-```
-A0A0B4J2C3_P24534.pdb
-A0A0B4J2C3_P24534.results.pkl
-```
+Each child of the root is one complex's directory:
 
-**New naming convention:**
 ```
-A0A0A0MQZ0_P40933_relaxed_model_1_multimer_v3_pred_0.pdb
-A0A0A0MQZ0_P40933_result_model_1_multimer_v3_pred_0.pkl
+Protein_Complexes/
+├── A0A0A0MQZ0_P40933/
+│   ├── A0A0A0MQZ0_P40933.pdb
+│   └── A0A0A0MQZ0_P40933.pkl
+└── ...
 ```
 
-Each file pair contains:
-- A **PDB file** containing the predicted structure with ATOM records
-- A **PKL file** containing the AlphaFold2 result dictionary (ipTM, pTM, pLDDT, PAE)
+### Layout 3 - Sharded directory-per-complex (HPC)
 
-The toolkit also handles homodimer, isoform, and multi-chain naming patterns.
+2-letter shard prefix groups complexes for filesystem performance:
+
+```
+Protein_Complexes/
+└── A0/
+    └── A0A0A0MQZ0_P40933/
+        ├── A0A0A0MQZ0_P40933.pdb.bz2
+        └── A0A0A0MQZ0_P40933.pkl.bz2
+```
+
+### Supported file formats
+
+- **PDB**: `.pdb`, `.pdb.bz2`, `.pdb.gz`
+- **PKL**: `.pkl`, `.pkl.bz2`, `.pkl.gz`, `.results.pkl`, `.results.pkl.bz2`
+- **AF2 long-form names**: `*_relaxed_model_*.pdb[.bz2]` and `*_result_model_*.pkl[.bz2]`
+
+Compressed inputs are read directly via a transparent compression-aware open helper (`file_io.py`); the per-complex tempfile is created once and reused across all readers in the same complex's processing window.
+
+**Reader-API notes** (worth knowing if you patch a new reader to consume compressed inputs):
+
+- BioPython `PDBParser.get_structure(name, source)` accepts a string path **OR** a file-like object. Passing a string `'foo.pdb.bz2'` makes it attempt to read raw bzip2 bytes as PDB lines (silent corruption, no exception). Always pass an open text handle from `file_io.open_text_maybe_compressed()` for compressed inputs.
+- Biotite `PDBFile.read(source)` follows the same convention - file-like objects work, string paths to `.bz2` files don't.
+- PyMOL's CLI `load` command does not transparently decompress. The toolkit's `.pml` generator emits an inline `bz2.open` + `cmd.read_pdbstr` block for `.pdb.bz2` inputs.
+
+### Naming conventions
+
+Each pair contains:
+- A **PDB file** with ATOM records
+- A **PKL file** with the AlphaFold2 result dictionary (ipTM, pTM, pLDDT, PAE)
+
+Homodimer, isoform, and multi-chain naming patterns are also handled. Layouts 2 and 3 also produce a forensic manifest at `data/complex_manifest_audit/` listing complete pairs and an audit of skipped complexes with reason codes (`missing_pdb`, `empty_pkl`, `duplicate_complex_name`, `ambiguous_pdb`, ...).
 
 
 ## Output
 
-### CSV (40 base columns, up to ~142 with all features)
+### CSV (40 base columns, up to 153 with all features)
 
 The main output CSV groups columns into:
 
 | Category | Key Columns |
 |----------|-------------|
-| **Identity** | complex_name, protein_a, protein_b, complex_type (legacy coarse: Homodimer / Heterodimer / Multi-chain), n_chains, species, structure_source, species_a, species_b, species_status (per-chain and complex-level tag: `reviewed_human` / `trembl_human` / `non_human`) |
+| **Identity** | complex_name, protein_a, protein_b, complex_type (legacy coarse: Homodimer / Heterodimer / Multi-chain), n_chains, num_residues, species, structure_source, species_a, species_b, species_status (per-chain and complex-level tag: `reviewed_human` / `trembl_human` / `non_human`) |
 | **Multimer Identity** | schema_version (`multimer_v1`), stoichiometry (`A2`, `AB`, `A2B`, `A2B2`, `ABCD`, `A3`…), is_homomeric, unique_accessions, chain_ids, accession_chain_map (JSON), tier_scope (`dimer_validated` \| `multimer_provisional`), filename_n_chains, pdb_n_chains, chain_count_consistency (`match` / `filename_only` / `pdb_only` / `mismatch`), complex_identity_json |
-| **Core Metrics** | ipTM, pTM, ranking_confidence, pDockQ, ppv |
+| **Core Metrics** | ipTM, pTM, ranking_confidence, pDockQ, ppv, pae_mean (global PAE matrix mean) |
 | **pLDDT Statistics** | plddt_mean, plddt_median, plddt_min, plddt_max, plddt_below50/70_fraction |
-| **Interface Geometry (best pair)** | n_interface_contacts, n_interface_residues_a/b, interface_residues_a/b, interface_fraction_a/b, interface_symmetry, contacts_per_interface_residue |
-| **Interface pLDDT** | interface_plddt_combined, bulk_plddt_combined, interface_vs_bulk_delta |
-| **PAE Features (best pair)** | interface_pae_mean (bidirectional max), n_pae_confident_contacts, pae_confident_contact_fraction (PAE<5A), n_strict_confident_contacts, strict_confident_contact_fraction (PAE<5A AND both pLDDT>=70; used by composite), cross_chain_pae_mean, interface_pae_forward_mean, interface_pae_reverse_mean, interface_pae_directional_delta_mean/_max |
+| **Interface Geometry (best pair)** | best_chain_pair, n_interface_contacts, n_interface_residues_a/b, interface_residues_a/b, interface_fraction_a/b, interface_symmetry, contacts_per_interface_residue |
+| **Interface pLDDT** | interface_plddt_a/b (per-chain), interface_plddt_combined, bulk_plddt_combined, interface_vs_bulk_delta, interface_plddt_high_fraction |
+| **PAE Features (best pair)** | interface_pae_mean (bidirectional max), interface_pae_median, n_pae_confident_contacts, pae_confident_contact_fraction (PAE<5A), n_strict_confident_contacts, strict_confident_contact_fraction (PAE<5A AND both pLDDT>=70; used by composite), cross_chain_pae_mean, interface_pae_forward_mean, interface_pae_reverse_mean, interface_pae_directional_delta_mean/_max, n_confident_residues_a/b |
 | **All-Pairs Aggregates** | pair_metrics (JSON list, length `N*(N-1)/2`), pdockq_mean, pdockq_min, pdockq_whole_complex (recomputed from all inter-chain contacts, not a mean), contact_count_total, interface_plddt_mean, symmetry_mean, symmetry_min, pae_confident_fraction_mean, strict_confident_fraction_mean (aggregates are contact-weighted; zero-contact pairs excluded from weighted means but still appear in `pair_metrics`) |
-| **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2, composite_is_calibrated (True only for `tier_scope == "dimer_validated"`) |
+| **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2 |
+| **Audit / Data Availability** | has_pdb, has_pkl, geometry_available (`True` iff pair enumeration succeeded - Decision #34 contract), composite_is_calibrated (`True` only for `tier_scope == "dimer_validated"` - paired with `geometry_available` and `has_pdb`/`has_pkl` as the canonical audit set), plddt_source (`pdb` / `pkl` - diagnostic for which input the pLDDT array was read from) |
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |
@@ -377,7 +473,7 @@ When `--export-interfaces` is used, one JSON record per complex is written, cont
 | 8 | Metric Disagreement | [dimer-validated] Scatter highlighting complexes with conflicting quality signals |
 | 9 | Chain-Count Profile | [all-N descriptive] Four panels: best-pair pDockQ, pdockq_mean, pdockq_min, coherence gap (`pdockq − pdockq_min`) by chain count. Exposes order-statistic bias in best-pair metrics. |
 | 10 | Clustering Validation | Homodimer ground truth scatter (shared = total clusters), cluster ratio by quality tier |
-| 11 | Classified Variant Sankey | [dimer-validated] Alluvial flow: clinical significance → structural context. Where do clinically significant variants land structurally? |
+| 11 | Classified Variant Sankey | [dimer-validated] Alluvial flow: clinical significance -> structural context. Where do clinically significant variants land structurally? |
 | 12 | Variant Density | [dimer-validated] Interface variant density (per residue) vs composite score scatter with Spearman + partial correlation (size-controlled). Does the confidence metric predict variant biology? |
 | 13 | Stability Cross-Validation | EVE vs AlphaMissense concordance, AlphaMissense vs FoldX DDG, coverage landscape by tier |
 | 14 | Disease Annotation Prevalence | [dimer-validated] Disease prevalence by quality tier (grouped bars + chi-square) + top 10 diseases stacked bars. The drug-target panel keeps a Fisher-test enrichment annotation in its own subtitle. |

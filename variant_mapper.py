@@ -35,6 +35,8 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
+from file_io import open_text_maybe_compressed
+
 try:
     from Bio.PDB import PDBParser, ShrakeRupley
     _HAS_BIOPYTHON = True
@@ -484,7 +486,8 @@ def compute_residue_sasa(pdb_path: Union[str, Path], chain_id: str) -> dict[int,
                 message='.*elements were guessed from atom name.*',
                 category=UserWarning,
             )
-            pdb_file = _bt_pdb_io.PDBFile.read(str(pdb_path))
+            with open_text_maybe_compressed(pdb_path) as handle:
+                pdb_file = _bt_pdb_io.PDBFile.read(handle)
             structure = pdb_file.get_structure(model=1)
         structure = structure[_bt_struc.filter_amino_acids(structure)]
         atom_sasa = _bt_struc.sasa(structure, vdw_radii='ProtOr', point_number=30)
@@ -509,7 +512,8 @@ def compute_residue_sasa(pdb_path: Union[str, Path], chain_id: str) -> dict[int,
         )
 
     parser = PDBParser(QUIET=True)
-    structure = parser.get_structure('complex', str(pdb_path))
+    with open_text_maybe_compressed(pdb_path) as handle:
+        structure = parser.get_structure('complex', handle)
 
     sr = ShrakeRupley()
     sr.compute(structure[0], level='R')
@@ -543,7 +547,8 @@ def _compute_sasa_biotite(pdb_path: Union[str, Path], chain_a: str, chain_b: str
             message='.*elements were guessed from atom name.*',
             category=UserWarning,
         )
-        pdb_file = _bt_pdb_io.PDBFile.read(str(pdb_path))
+        with open_text_maybe_compressed(pdb_path) as handle:
+            pdb_file = _bt_pdb_io.PDBFile.read(handle)
         structure = pdb_file.get_structure(model=1)
     structure = structure[_bt_struc.filter_amino_acids(structure)]
 
@@ -586,7 +591,8 @@ def compute_residue_sasa_both_chains(pdb_path: Union[str, Path], chain_a: str, c
         )
 
     parser = PDBParser(QUIET=True)
-    structure = parser.get_structure('complex', str(pdb_path))
+    with open_text_maybe_compressed(pdb_path) as handle:
+        structure = parser.get_structure('complex', handle)
 
     sr = ShrakeRupley()
     sr.compute(structure[0], level='R')

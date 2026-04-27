@@ -194,24 +194,7 @@ python visualise_results.py <OUTPUT_CSV> --multimer-supplement
 python visualise_results.py <OUTPUT_CSV> --density --disorder-scatter --pae-heatmaps <MODELS_DIR> --limit 20 --output-dir <OUTPUT_DIR>
 ```
 
-> **Multimer scope (post-refactor, Decision #33).** Figs 4, 5, 6, 8, 13 filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}`. Fig 9 is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]`. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** — the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load; the scope is derived from `n_chains` with a one-time warning.
-
-### Post-refactor audit scripts
-
-```bash
-# Dimer metric-identity regression (every shared N=2 row must agree within 1e-9 on named fields)
-python Documentation/scripts/verify_dimer_metric_identity.py \
-    --old results_pre_multimer_refactor.csv \
-    --new <OUTPUT_CSV> \
-    --report <OUTPUT_DIR>/dimer_metric_identity_report.md
-
-# Correction report: reconciles pre-refactor headline numbers (534 labelled homodimers, 94 CSV-observable
-# contamination, 56.5% old High-tier rate) against the post-refactor CSV plus audit fields.
-python Documentation/scripts/generate_multimer_correction_report.py \
-    --baseline tests/test_data/regression_baselines/multimer_pre_refactor_baseline.json \
-    --new <OUTPUT_CSV> \
-    --output <OUTPUT_DIR>/multimer_correction_report.md
-```
+> **Multimer scope (post-refactor).** Figs 4, 5, 6, 8, 13 filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}`. Fig 9 is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]`. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** — the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load; the scope is derived from `n_chains` with a one-time warning.
 
 ---
 
@@ -634,3 +617,102 @@ python data_registry.py --root /path/to/project
 | `offline-scoring` | AlphaMissense + AFDB FoldX export |
 | `disease-pathways` | UniProt XML, Reactome mappings + hierarchy |
 | `pymol` | PyMOL output directory (auto-created) |
+
+---
+
+## 14. Complex Resolver
+
+Discover paired PDB/PKL files in flat or sharded layouts (HPC-shaped directory tree) and write a forensic manifest of complete pairs plus an audit of incomplete inputs. Reads `.pdb` and `.pdb.bz2` (and the matching `.pkl` variants) via the discovery rules baked into `complex_resolver.py`. Library mode is silent; script mode prints progress to stderr and a summary to stdout.
+
+```bash
+# Audit a sharded HPC root via the env var (typical HPC use)
+PROTEIN_COMPLEXES_ROOT=/scratch/.../Protein_Complexes python complex_resolver.py
+
+# Same, with explicit overrides (no env vars required)
+python complex_resolver.py --root /scratch/.../Protein_Complexes --audit-dir /scratch/.../audit
+```
+
+### Outputs
+
+Written atomically (write `.tmp` → rename) on every run; never appended.
+
+| File | Contents |
+|---|---|
+| `data/complex_manifest_audit/complex_manifest.tsv` | One row per complete pair: name, layout, shard, complex_dir, pdb_path, pkl_path, sizes |
+| `data/complex_manifest_audit/incomplete_inputs.tsv` | One row per skipped complex, with a `reason` column (`missing_pdb`, `empty_pkl`, `duplicate_complex_name`, `ambiguous_pdb`, …) |
+
+### Layout detection
+
+A child directory whose name matches `^[A-Z0-9]{2}$` triggers sharded mode (e.g. `A0/A0A0A0MQZ0_P40933/...`). Otherwise the layout is flat-dir (each child of root is a complex directory). Loose file layouts (`Test_Data/<files>` directly in root) are handled by `toolkit.py`'s `find_paired_data_files()` and do not invoke the resolver.
+
+### Exit codes
+
+- `0` — at least one complete pair was found
+- `1` — zero complete pairs (treat as fatal in batch scripts)
+
+---
+
+## 15. SLURM HPC Submission
+
+`hpc_dataset_run.sh` is the production wrapper that submits the full toolkit pipeline to a SLURM cluster. It owns the entire environment (module purge + module load + venv activation + BLAS thread caps + matplotlib environment + Python runtime hardening) so the run is reproducible across login-node sessions and does not silently fall back to a system Python.
+
+```bash
+# Required environment variables (set before sbatch)
+export PROTEIN_TOOLKIT_PROJECT_ROOT=/scratch/<project>/protein-complexes-toolkit-hpc
+export PROTEIN_COMPLEXES_ROOT=/scratch/<project>/Protein_Complexes
+
+# Submit to SLURM
+sbatch hpc_dataset_run.sh
+```
+
+The wrapper runs five numbered phases:
+
+| Phase | Step | Purpose |
+|---|---|---|
+| `[0/4]` | `python -m pip check` | Dependency consistency in the venv. |
+| `[1/4]` | `python data_registry.py` | Validate all 18 registered data files exist and are non-empty. |
+| `[2/4]` | `python complex_resolver.py` | Discover PDB/PKL pairs in the input tree; write forensic manifest. |
+| `[3/4]` | `python toolkit.py --full-pipeline ...` | Run all phases A-F; write `results.csv`, `interfaces.jsonl`, `pymol_scripts/`. |
+| `[4/4]` | `python visualise_results.py` | Generate the 16-figure suite into `Output/`. |
+
+### Resource allocation
+
+| Resource | Allocation | Note |
+|---|---|---|
+| CPUs | 16 | Matches `ProcessPoolExecutor(max_workers=16)`. |
+| Memory | 64 GB | Bump to **80 GB** for headroom (Run 1 measured MaxRSS 67 GB on 41,196 complexes). |
+| Walltime | 48 h | Run 1 finished in 5h 57m. |
+
+### Reference performance (Run 1)
+
+Job `33556112`, 26 April 2026, host `erc-hpc-comp012`, 41,196 complexes,
+sharded HPC layout:
+
+| Phase | Elapsed | Throughput |
+|---|---|---|
+| Structural pass (16-worker pool, interface + PAE) | 32.6 min | 21.0 complexes/s |
+| ProtVar offline (AlphaMissense + AFDB FoldX streams) | 10.5 min | 65.6 complexes/s |
+| Disease annotation (UniProt XML + API fallback) | 3.7 min | 187 complexes/s |
+| Pathway + per-pathway PPI enrichment (STRING) | **67.9 min** | 10.1 complexes/s |
+| PyMOL `.pml` generation (12,629 High-tier) | 1.9 min | 924 scripts/s |
+| **Total elapsed** | **5h 57m** | |
+
+Pathway annotation dominates the wall-clock budget (~68% of total).
+
+### Outputs
+
+| Path | Contents |
+|---|---|
+| `results.csv` | Up to 153-column CSV, one row per complex (~344 MB at 41k rows). |
+| `interfaces.jsonl` | One record per complex with computable interface geometry (~22 MB at 41k rows / 28k interfaces). |
+| `pymol_scripts/*.pml` | One scene-managed PyMOL script per High-tier complex. |
+| `data/complex_manifest_audit/complex_manifest.tsv` | One row per complete pair (forensic manifest). |
+| `data/complex_manifest_audit/incomplete_inputs.tsv` | One row per skipped complex with a reason code. |
+| `Output/<n>_<figure_name>.png` | The 16-figure dissertation suite. |
+
+### Caveat — SLURM exit code is not the completeness signal
+
+`sacct` may report State `FAILED` even on a successful run if the end-of-pipeline summary aggregator (`print_summary` at `toolkit.py:1482`) hits a row whose worker raised an exception. The CSV / JSONL / PyMOL outputs are still complete and on disk. Verify completeness with `wc -l results.csv` and the presence of `interfaces.jsonl`, not the SLURM exit code.
+
+---
+

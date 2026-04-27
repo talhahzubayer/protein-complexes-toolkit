@@ -20,12 +20,33 @@ Usage (from toolkit.py)::
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 # ── Project root (same pattern as other modules) ─────────────────────
 PROJECT_ROOT = Path(__file__).parent
+
+
+def _resolve_project_root(project_root: Path | str | None = None) -> Path:
+    """explicit > PROTEIN_TOOLKIT_PROJECT_ROOT > PROJECT_ROOT (repo fallback)."""
+    if project_root is not None:
+        path = Path(project_root).expanduser().resolve()
+        source = "explicit project_root"
+    else:
+        env = os.environ.get("PROTEIN_TOOLKIT_PROJECT_ROOT")
+        if env:
+            path = Path(env).expanduser().resolve()
+            source = "PROTEIN_TOOLKIT_PROJECT_ROOT"
+        else:
+            return PROJECT_ROOT
+
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"{source} points to {str(path)!r}, but directory does not exist"
+        )
+    return path
 
 
 # ── Dataclass ─────────────────────────────────────────────────────────
@@ -243,7 +264,7 @@ def get_default_path(key: str, project_root: Path | None = None) -> str:
         Absolute path as a string, suitable for passing to argparse.
     """
     dep = DATA_DEPENDENCIES[key]
-    root = project_root or PROJECT_ROOT
+    root = _resolve_project_root(project_root)
     return str(root / dep.expected_path)
 
 
@@ -269,7 +290,7 @@ def validate_data_dependencies(
     list of str
         Error messages for missing required files.  Empty list = all OK.
     """
-    root = project_root or PROJECT_ROOT
+    root = _resolve_project_root(project_root)
     check_groups = groups or ALL_GROUPS
     errors: list[str] = []
     found: list[str] = []
@@ -364,9 +385,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = Path(args.root) if args.root else PROJECT_ROOT
     groups = set(args.groups) if args.groups else None
-    errors = validate_data_dependencies(project_root=root, groups=groups)
+    errors = validate_data_dependencies(project_root=args.root, groups=groups)
 
     if errors:
         sys.exit(1)

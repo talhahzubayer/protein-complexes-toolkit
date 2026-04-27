@@ -592,7 +592,10 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
 
     #=========================================================Chain boundary lines and best-pair highlighting==================================================================
     # Look for a matching PDB file in the same directory
+    # Note: '.results.pkl' must be matched before plain '.pkl' — for
+    # X.results.pkl, str.replace('.pkl', '.pdb') yields X.results.pdb (wrong).
     pdb_candidates = [
+        pkl_path.replace('.results.pkl', '.pdb'),
         pkl_path.replace('.pkl', '.pdb'),
         pkl_path.replace('_result_', '_relaxed_').replace('.pkl', '.pdb'),
     ]

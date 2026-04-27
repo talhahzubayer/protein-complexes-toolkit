@@ -23,6 +23,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
+
+from file_io import open_text_maybe_compressed
 import numpy as np
 
 #----------------Constants-----------------------------------------
@@ -138,7 +140,7 @@ def _read_pdb_cb_atoms(pdbfile: Union[str, Path], include_residue_ids: bool = Fa
     chain_res_numbers: dict[str, list[int]] = {}
     chain_res_names: dict[str, list[str]] = {}
 
-    with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
+    with open_text_maybe_compressed(pdbfile) as file:
         for line in file:
             if not line.startswith('ATOM'):
                 continue
@@ -236,7 +238,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
     # Track unique (chain, resid) to handle multi-atom residues
     chain_ca_residues: dict[str, list[str]] = defaultdict(list)  # chain -> [resid, ...]
     seen_ca: set[tuple[str, str]] = set()
-    with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
+    with open_text_maybe_compressed(pdbfile) as file:
         for line in file:
             if not line.startswith('ATOM'):
                 continue
@@ -258,7 +260,7 @@ def read_pdb_with_chain_info_New(pdbfile: Union[str, Path]) -> ChainInfo_New:
     chain_cb_res_numbers: dict[str, list[int]] = defaultdict(list)
     chain_cb_res_names: dict[str, list[str]] = defaultdict(list)
     seen_cb: set[tuple[str, str]] = set()
-    with open(pdbfile, 'r', encoding='utf-8', errors='replace') as file:
+    with open_text_maybe_compressed(pdbfile) as file:
         for line in file:
             if not line.startswith('ATOM'):
                 continue
