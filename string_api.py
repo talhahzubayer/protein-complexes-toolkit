@@ -72,6 +72,11 @@ STRING_API_MAX_ENRICHMENT_BATCH = 500   # Max proteins per enrichment call
 # Default cache directory (auto-caching enabled by default)
 STRING_API_DEFAULT_CACHE_DIR = Path(__file__).parent / "data" / "string_api_cache"
 
+# Cache files are sharded by the first N hex chars of their sha256 key into
+# subdirectories — keeps each directory well under filesystem-pressure size at
+# HPC scale. Lookup remains O(1): one stat call against the deterministic shard.
+STRING_API_CACHE_SHARD_PREFIX_LEN = 2
+
 # Valid network types
 _VALID_NETWORK_TYPES = {"functional", "physical"}
 
@@ -145,6 +150,18 @@ def _cache_key(endpoint: str, params: dict) -> str:
     return hashlib.sha256(json.dumps(key_data, sort_keys=True).encode()).hexdigest()
 
 
+def _shard_path(cache_dir: Path, key: str) -> Path:
+    """Return the sharded cache file path for a key.
+
+    Layout: ``cache_dir/<prefix>/<key>.json`` where ``<prefix>`` is the first
+    ``STRING_API_CACHE_SHARD_PREFIX_LEN`` hex chars of the sha256 key. The
+    function is pure — every key has exactly one home, so cache lookup remains
+    a single deterministic stat call with no false misses.
+    """
+    shard = key[:STRING_API_CACHE_SHARD_PREFIX_LEN]
+    return cache_dir / shard / f"{key}.json"
+
+
 def _read_cache(cache_dir: Path, key: str) -> Optional[Union[dict, list]]:
     """Read a cached API response if it exists.
 
@@ -155,7 +172,7 @@ def _read_cache(cache_dir: Path, key: str) -> Optional[Union[dict, list]]:
     Returns:
         Parsed JSON data, or None if cache miss.
     """
-    cache_file = cache_dir / f"{key}.json"
+    cache_file = _shard_path(cache_dir, key)
     if not cache_file.exists():
         return None
     try:
@@ -176,8 +193,8 @@ def _write_cache(cache_dir: Path, key: str, endpoint: str,
         endpoint: API endpoint name (stored as metadata).
         data: Parsed JSON response to cache.
     """
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{key}.json"
+    cache_file = _shard_path(cache_dir, key)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "_timestamp": datetime.now(timezone.utc).isoformat(),
         "_endpoint": endpoint,

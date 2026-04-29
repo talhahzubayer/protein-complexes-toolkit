@@ -1,45 +1,35 @@
 #!/bin/bash
 #SBATCH --job-name=hpc_dataset_run
 #SBATCH --time=48:00:00
-#SBATCH --mem=64G
+#SBATCH --mem=80G
 #SBATCH --cpus-per-task=16
 #SBATCH --output=hpc_dataset_run_%j.out
 #SBATCH --error=hpc_dataset_run_%j.err
 
-# Full-pipeline production run against the validated 41,196-complex HPC dataset.
+# Full-pipeline production run against the HPC dataset
 # Reads .pdb.bz2 / .pkl.bz2 directly; no staging or manual decompression required.
-#
 # Submit:
 #     sbatch /scratch/prj/chmi_msa/protein-complexes-toolkit-hpc/hpc_dataset_run.sh
 
 set -euo pipefail
 
-# -----------------------------
 # Fixed HPC paths
-# -----------------------------
 export PROTEIN_TOOLKIT_PROJECT_ROOT=/scratch/prj/chmi_msa/protein-complexes-toolkit-hpc
 export PROTEIN_COMPLEXES_ROOT=/scratch/prj/chmi_msa/Protein_Complexes
 
 cd "$PROTEIN_TOOLKIT_PROJECT_ROOT"
 
-# -----------------------------
 # Python environment
-# -----------------------------
 module purge
 module load python/3.11.6-gcc-13.2.0
 source .venv/bin/activate
 
-# -----------------------------
-# Output filenames
-# Keep these as variables so toolkit.py and visualise_results.py always agree.
-# -----------------------------
+# Output filenames - keep these as variables so toolkit.py and visualise_results.py always agree.
 OUTPUT_CSV="results.csv"
 INTERFACES_JSONL="interfaces.jsonl"
 OUTPUT_DIR="Output"
 
-# -----------------------------
 # HPC-safe runtime settings
-# -----------------------------
 export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
 export MPLBACKEND=Agg
@@ -83,8 +73,7 @@ echo "[2/4] Resolving complex manifest..."
 python -u complex_resolver.py
 
 echo "[3/4] Running full toolkit pipeline..."
-# If compute nodes are firewalled from outbound HTTPS and API calls cause delays,
-# append --no-api to the command below for a fully offline run.
+# If compute nodes are firewalled from outbound HTTPS and API calls cause delays, append --no-api to the command below for a fully offline run.
 python -u toolkit.py \
     --full-pipeline \
     --dir "$PROTEIN_COMPLEXES_ROOT" \

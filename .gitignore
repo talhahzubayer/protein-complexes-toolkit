@@ -14,16 +14,16 @@ pytest.ini
 # Generated pipeline output
 Output/
 pymol_scripts/
-results.csv
-interfaces.jsonl
+*.csv
+*.jsonl
 *.checkpoint.jsonl
-test.csv
 
 # Internal documentation
 Documentation/
 
-# Test data 
+# Test data
 Test_Data/
+Protein_Complexes/
 
 # Data from external sources
 data/

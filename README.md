@@ -59,7 +59,7 @@ protein-complexes-toolkit/
     ├── variants/                # Variant databases (see "Setting Up Data")
     ├── stability/               # Stability prediction data (see "Setting Up Data")
     ├── pathways/                # Disease & pathway databases (see "Setting Up Data")
-    └── string_api_cache/        # STRING API response cache (auto-generated)
+    └── string_api_cache/        # STRING API response cache (auto-generated; sharded <key[:2]>/<key>.json)
 ```
 
 ## Installation
@@ -80,7 +80,7 @@ pip install -r requirements.txt
 
 ## Setting Up Data
 
-The `data/` directory is **not included** in this repository due to the large size of external database files. These files are required for Phase A (Database Ingestion & ID Mapping) and later phases. To set up:
+The `data/` directory is **not included** in this repository due to the large size of external database files. These files are required for Database Ingestion & ID Mapping and later phases. To set up:
 
 1. Create the directory structure:
 ```bash
@@ -186,7 +186,7 @@ The wrapper sets `module purge && module load python/3.11.6-gcc-13.2.0`, activat
 | Resource | Allocation | Note |
 |---|---|---|
 | CPUs | 16 | Matches `ProcessPoolExecutor(max_workers=16)`. |
-| Memory | 64 GB | Run 1 measured MaxRSS 67 GB on a 41,196-complex corpus - bump to **80 GB** for headroom. |
+| Memory | 64 GB | Run 1 measured MaxRSS 67 GB on a 41,196-complex corpus - bumped up to **80 GB** for headroom. |
 | Walltime | 48 h | Run 1 finished in 5h 57m; 48 h gives ~8× safety. |
 
 ### Why the wrapper sets BLAS thread caps
@@ -335,7 +335,7 @@ The pipeline produces a 40-column base CSV, progressively expandable to ~153 col
 
 #### Structural Visualisation
 
-**pymol_scripts.py** - Generates scene-managed PyMOL `.pml` scripts with layered visualisation: chain colouring (10-chain palette, homodimer transparency), pLDDT confidence bands, interface residue sticks, pathogenicity-aware variant spheres coloured by structural context, and AlphaMissense transparency overlay (`--pymol`, `--pymol-min-tier`, `--pymol-render`). Includes metadata and biological annotation comments, pre-computed interface residue lookup to avoid redundant PDB I/O, and a `py3Dmol` fallback for in-notebook rendering. For `.pdb.bz2` inputs the generator emits an inline `bz2.open` + `cmd.read_pdbstr` block because PyMOL's CLI `load` does not transparently decompress.
+**pymol_scripts.py** - Generates scene-managed PyMOL `.pml` scripts with layered visualisation: chain colouring (10-chain palette, homodimer transparency), pLDDT confidence bands, interface residue sticks, pathogenicity-aware variant spheres coloured by structural context, and AlphaMissense transparency overlay (`--pymol`, `--pymol-min-tier`, `--pymol-render`). Includes metadata and biological annotation comments, pre-computed interface residue lookup to avoid redundant PDB I/O, and a `py3Dmol` fallback for in-notebook rendering. For `.pdb.bz2` inputs the generator emits an inline `bz2.open` + `cmd.read_pdbstr` block because PyMOL's CLI `load` does not transparently decompress. Toolkit output is sharded into `pymol_scripts/shard_NNNN/` subdirs (≤1000 scripts each) for filesystem scalability - the `--pymol-output` flag still controls the top-level directory; use `find <pymol_scripts> -name '<complex>.pml'` to locate a specific script.
 
 #### Input Discovery & HPC Submission
 
@@ -429,7 +429,7 @@ The main output CSV groups columns into:
 | **PAE Features (best pair)** | interface_pae_mean (bidirectional max), interface_pae_median, n_pae_confident_contacts, pae_confident_contact_fraction (PAE<5A), n_strict_confident_contacts, strict_confident_contact_fraction (PAE<5A AND both pLDDT>=70; used by composite), cross_chain_pae_mean, interface_pae_forward_mean, interface_pae_reverse_mean, interface_pae_directional_delta_mean/_max, n_confident_residues_a/b |
 | **All-Pairs Aggregates** | pair_metrics (JSON list, length `N*(N-1)/2`), pdockq_mean, pdockq_min, pdockq_whole_complex (recomputed from all inter-chain contacts, not a mean), contact_count_total, interface_plddt_mean, symmetry_mean, symmetry_min, pae_confident_fraction_mean, strict_confident_fraction_mean (aggregates are contact-weighted; zero-contact pairs excluded from weighted means but still appear in `pair_metrics`) |
 | **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2 |
-| **Audit / Data Availability** | has_pdb, has_pkl, geometry_available (`True` iff pair enumeration succeeded - Decision #34 contract), composite_is_calibrated (`True` only for `tier_scope == "dimer_validated"` - paired with `geometry_available` and `has_pdb`/`has_pkl` as the canonical audit set), plddt_source (`pdb` / `pkl` - diagnostic for which input the pLDDT array was read from) |
+| **Audit / Data Availability** | has_pdb, has_pkl, geometry_available (`True` iff pair enumeration succeeded - Decision #34 contract), composite_is_calibrated (`True` only when the composite was actually computable: `tier_scope == "dimer_validated"`, every composite input present, AND `partial_reason` empty), partial_reason (row-level recoverability diagnostic - empty for valid rows, otherwise one of `unreadable_pdb_or_structure_input` / `missing_pkl_or_pkl_unreadable` / `no_positive_interface_contacts` / `missing_required_composite_inputs`. Together with `composite_is_calibrated` these are the dissertation-safe filters: a calibrated quality claim sits inside `composite_is_calibrated == True`, and any excluded row is recoverable to a known reason), plddt_source (`pdb` / `pkl` - diagnostic for which input the pLDDT array was read from) |
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |

@@ -12,7 +12,7 @@ All paths in this document use angle-bracket placeholders. Replace them with you
 
 | Placeholder | Description | Default (if omitted) |
 |---|---|---|
-| `<MODELS_DIR>` | Directory containing AlphaFold2-Multimer PDB and PKL output files | **Required** — no default |
+| `<MODELS_DIR>` | Directory containing AlphaFold2-Multimer PDB and PKL output files | **Required** - no default |
 | `<OUTPUT_CSV>` | Output CSV file path | `results.csv` |
 | `<ALIASES_FILE>` | STRING protein aliases file (`9606.protein.aliases.v12.0.txt`) | `data/ppi/9606.protein.aliases.v12.0.txt` |
 | `<PPI_DIR>` | Directory containing PPI database files: STRING `9606.protein.links.v12.0.txt`, BioGRID `BIOGRID-ALL-5.0.253.tab3.txt`, `HuRI.tsv`, HuMAP `humap2_ppis_ACC_20200821.pairsWprob` | `data/ppi/` |
@@ -24,8 +24,8 @@ All paths in this document use angle-bracket placeholders. Replace them with you
 | `<PATHWAYS_DIR>` | Directory containing `uniprot_sprot_human.xml`, Reactome `UniProt2Reactome_All_Levels.txt`, and `ReactomePathwaysRelation.txt` | `data/pathways/` |
 | `<OUTPUT_DIR>` | Figure and report output directory | `Output/` |
 | `<INTERFACES_JSONL>` | JSONL interface residue export file path, eg: just saying the file name like `interfaces.jsonl`, will generate that file in the home project directory | No default (user-specified) |
-| `<PDB_FILE>` | Path to a single PDB file | **Required** — no default |
-| `<PDB_DIR>` | Directory of PDB files (for batch operations) | **Required** — no default |
+| `<PDB_FILE>` | Path to a single PDB file | **Required** - no default |
+| `<PDB_DIR>` | Directory of PDB files (for batch operations) | **Required** - no default |
 | `<PYMOL_OUTPUT>` | PyMOL script output directory | `pymol_scripts/` |
 
 ---
@@ -194,7 +194,7 @@ python visualise_results.py <OUTPUT_CSV> --multimer-supplement
 python visualise_results.py <OUTPUT_CSV> --density --disorder-scatter --pae-heatmaps <MODELS_DIR> --limit 20 --output-dir <OUTPUT_DIR>
 ```
 
-> **Multimer scope (post-refactor).** Figs 4, 5, 6, 8, 13 filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}`. Fig 9 is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]`. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** — the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load; the scope is derived from `n_chains` with a one-time warning.
+> **Multimer scope (post-refactor).** Figs 4, 5, 6, 8, 13 filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}`. Fig 9 is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]`. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** - the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load; the scope is derived from `n_chains` with a one-time warning.
 
 ---
 
@@ -527,6 +527,14 @@ python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --e
 
 Generates layered PyMOL `.pml` scripts for visualising predicted complexes, with chain colouring, pLDDT colouring, interface highlighting (sticks), variant highlighting (spheres with pathogenicity-aware sizing), and protvar overlay (transparency). Supports standalone single-PDB generation, batch generation from CSV, and toolkit pipeline integration. In the toolkit pipeline, `--pymol` requires `--interface --pae`.
 
+> **Output layout.** Batch and toolkit-driven runs shard the output directory for filesystem scalability:
+>
+> ```
+> pymol_scripts/shard_NNNN/<complex_name>.pml
+> ```
+>
+> Each shard holds up to 1000 scripts. The `--output` / `--pymol-output` flag still controls the top-level directory; sharding is internal. The `generate` subcommand (single PDB) writes flat - only batch/toolkit runs are sharded. To open a script for a specific complex, see *Running Generated Scripts in PyMOL* below.
+
 ### Flag Defaults
 
 | Flag | Default when omitted |
@@ -578,13 +586,17 @@ python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --e
 
 ### Running Generated Scripts in PyMOL
 
+Batch/toolkit output is sharded under `<PYMOL_OUTPUT>/shard_NNNN/`. To resolve a script for a specific complex, use `find` (works on any shard):
+
 ```bash
 # Interactive (opens PyMOL GUI)
-pymol <PYMOL_OUTPUT>/A0A0B4J2C3_P24534.pml
+pymol "$(find <PYMOL_OUTPUT> -name 'A0A0B4J2C3_P24534.pml' -print -quit)"
 
 # Headless batch rendering (requires --pymol-render or --render)
-pymol -c <PYMOL_OUTPUT>/A0A0B4J2C3_P24534.pml
+pymol -c "$(find <PYMOL_OUTPUT> -name 'A0A0B4J2C3_P24534.pml' -print -quit)"
 ```
+
+The single-PDB `generate` subcommand writes a flat `.pml` directly under `--output`, so its output can still be opened by literal path: `pymol <PYMOL_OUTPUT>/<complex>.pml`.
 
 ---
 
@@ -647,8 +659,8 @@ A child directory whose name matches `^[A-Z0-9]{2}$` triggers sharded mode (e.g.
 
 ### Exit codes
 
-- `0` — at least one complete pair was found
-- `1` — zero complete pairs (treat as fatal in batch scripts)
+- `0` - at least one complete pair was found
+- `1` - zero complete pairs (treat as fatal in batch scripts)
 
 ---
 
@@ -705,12 +717,12 @@ Pathway annotation dominates the wall-clock budget (~68% of total).
 |---|---|
 | `results.csv` | Up to 153-column CSV, one row per complex (~344 MB at 41k rows). |
 | `interfaces.jsonl` | One record per complex with computable interface geometry (~22 MB at 41k rows / 28k interfaces). |
-| `pymol_scripts/*.pml` | One scene-managed PyMOL script per High-tier complex. |
+| `pymol_scripts/shard_NNNN/*.pml` | One scene-managed PyMOL script per High-tier complex; sharded ≤1000 per subdir. |
 | `data/complex_manifest_audit/complex_manifest.tsv` | One row per complete pair (forensic manifest). |
 | `data/complex_manifest_audit/incomplete_inputs.tsv` | One row per skipped complex with a reason code. |
 | `Output/<n>_<figure_name>.png` | The 16-figure dissertation suite. |
 
-### Caveat — SLURM exit code is not the completeness signal
+### Caveat - SLURM exit code is not the completeness signal
 
 `sacct` may report State `FAILED` even on a successful run if the end-of-pipeline summary aggregator (`print_summary` at `toolkit.py:1482`) hits a row whose worker raised an exception. The CSV / JSONL / PyMOL outputs are still complete and on disk. Verify completeness with `wc -l results.csv` and the presence of `interfaces.jsonl`, not the SLURM exit code.
 

@@ -47,6 +47,11 @@ except ImportError:
 
 DEFAULT_PYMOL_OUTPUT_DIR = "pymol_scripts"
 
+# Cap each shard at this many .pml files. Counter-based sharding is local to
+# a single generate_pymol_scripts_for_results() invocation and increments only
+# on a successful write — skipped rows do not consume shard capacity.
+PYMOL_OUTPUT_SHARD_SIZE = 1000
+
 # PyMOL colour names per chain (supports up to 10 chains)
 CHAIN_COLOURS = {
     'A': 'marine',
@@ -893,6 +898,17 @@ def _build_pdb_lookup(pdb_dir: Path) -> dict[str, Path]:
 _TIER_ORDER = {'High': 3, 'Medium': 2, 'Low': 1}
 
 
+def _shard_subdir(output_dir: Union[str, Path], write_index: int) -> Path:
+    """Return the shard subdirectory for a zero-based successful-write index.
+
+    Counter-based sharding caps each subdir at ``PYMOL_OUTPUT_SHARD_SIZE``
+    files. The counter advances only on a successful write, so skipped rows
+    do not leave gaps in the layout.
+    """
+    shard_id = (write_index // PYMOL_OUTPUT_SHARD_SIZE) + 1
+    return Path(output_dir) / f"shard_{shard_id:04d}"
+
+
 def generate_pymol_scripts_for_results(
     results: list[dict],
     pdb_dir: str,
@@ -945,6 +961,7 @@ def generate_pymol_scripts_for_results(
 
     n_generated = 0
     n_skipped = 0
+    write_index = 0  # advances only on successful .pml write — see _shard_subdir
 
     # Set up progress bar (tqdm if available, print fallback otherwise)
     use_bar = tqdm is not None and verbose
@@ -1051,10 +1068,14 @@ def generate_pymol_scripts_for_results(
         is_homodimer = (row.get('protein_a', '') == row.get('protein_b', '')
                         and row.get('protein_a', '') != '')
 
+        # Resolve shard subdir for this successful write — co-locate .pml + .png
+        shard_dir = _shard_subdir(output_dir, write_index)
+        shard_dir.mkdir(parents=True, exist_ok=True)
+
         # Build PNG output path if rendering
         png_path = None
         if render_png:
-            png_path = str(Path(output_dir) / f"{complex_name}.png")
+            png_path = str(shard_dir / f"{complex_name}.png")
 
         # Generate script
         script = build_pymol_script(
@@ -1076,10 +1097,11 @@ def generate_pymol_scripts_for_results(
         )
 
         # Write .pml file
-        pml_path = Path(output_dir) / f"{complex_name}.pml"
+        pml_path = shard_dir / f"{complex_name}.pml"
         with open(pml_path, 'w', encoding='utf-8') as f:
             f.write(script)
 
+        write_index += 1
         n_generated += 1
 
         if use_bar:

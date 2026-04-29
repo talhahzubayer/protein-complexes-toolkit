@@ -43,6 +43,7 @@ Usage:
 """
 
 import gc
+import math
 import os
 import sys
 import argparse
@@ -114,6 +115,35 @@ PAE_CONFIDENT_THRESHOLD = 5.0
 # Readers must treat a missing schema_version column as "legacy" (pre-refactor).
 SCHEMA_VERSION = "multimer_v1"
 
+# Diagnostic reasons for the `partial_reason` column.
+# Empty string is the "fully calibrated, nothing wrong" sentinel — chosen for
+# CSV friendliness over None (csv.DictWriter renders None as empty anyway, but
+# downstream pandas reads NaN; a literal "" round-trips as "" without coercion).
+PARTIAL_REASON_NONE = ""
+PARTIAL_REASON_UNREADABLE_PDB = "unreadable_pdb_or_structure_input"
+PARTIAL_REASON_UNREADABLE_PKL = "missing_pkl_or_pkl_unreadable"
+PARTIAL_REASON_ZERO_CONTACTS = "no_positive_interface_contacts"
+PARTIAL_REASON_MISSING_COMPOSITE = "missing_required_composite_inputs"
+PARTIAL_REASON_INCOMPLETE = "incomplete_input"
+
+
+def _has_value(value) -> bool:
+    """Return True iff `value` is a real, present datum.
+
+    Treats None, "", and NaN (Python float or numpy float) as missing. Used by
+    the calibration predicate so a downstream NaN-from-CSV can't accidentally
+    mark a row as calibrated.
+    """
+    if value is None:
+        return False
+    if value == "":
+        return False
+    try:
+        return not math.isnan(float(value))
+    except (TypeError, ValueError, OverflowError):
+        # Non-numeric truthy values (e.g. populated strings, dicts) count as present.
+        return True
+
 # CSV base columns that are always present
 CSV_FIELDNAMES_BASE = [
     'schema_version',
@@ -133,6 +163,9 @@ CSV_FIELDNAMES_BASE = [
     'tier_scope',
     'filename_n_chains', 'pdb_n_chains', 'chain_count_consistency',
     'complex_identity_json',
+    # Diagnostic for HPC failure modes (empty string when the row is normal /
+    # fully calibrated). See PARTIAL_REASON_* constants for the value vocabulary.
+    'partial_reason',
 ]
 
 # Enrichment columns added when --enrich is used
@@ -558,7 +591,7 @@ def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Op
 
 #------------------------------------------------------Core Processing---------------------------------------------------------------------------------
 
-def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interface_pae: bool, verbose: bool) -> Optional[np.ndarray]:
+def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interface_pae: bool, verbose: bool) -> tuple[Optional[np.ndarray], bool]:
     """Extract ipTM, pTM, pLDDT metrics from a PKL file and optionally retain the PAE matrix.
     Args:
         file_paths: Dict with optional 'pdb' and 'pkl' Path entries.
@@ -566,12 +599,15 @@ def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interfac
         run_interface_pae: Whether to retain the PAE matrix for downstream interface analysis.
         verbose: Whether to print per-step progress.
     Returns:
-        PAE matrix as a numpy array if available and requested - otherwise None.
+        Tuple of (pae_matrix or None, pkl_load_failed). The boolean is True
+        only when the loader actually raised (caller stamps the partial_reason
+        diagnostic from this signal — distinct from "PKL absent" or "PKL
+        readable but missing fields").
     """
     pae_matrix = None
     if 'pkl' not in file_paths:
-        return pae_matrix
-    
+        return pae_matrix, False
+
     try:
         prediction_result = load_pkl_without_jax(file_paths['pkl'])
         pkl_metrics = extract_metrics(prediction_result)
@@ -583,11 +619,11 @@ def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interfac
             pae_matrix = np.asarray(prediction_result['predicted_aligned_error'])
         if verbose:
             print(f"  PKL -> ipTM={pkl_metrics.get('iptm', 'N/A')}")
+        return pae_matrix, False
 
     except Exception as error:
         print(f"  Warning: PKL extraction failed for {file_paths['pkl']}: {error}", file=sys.stderr)
-
-    return pae_matrix
+        return pae_matrix, True
 
 def _extract_pdb_plddt(file_paths: dict[str, Path], row: dict, *, verbose: bool) -> None:
     """Extract per-residue pLDDT from PDB b-factors as a fallback when PKL is unavailable.
@@ -866,17 +902,54 @@ def _populate_identity_fields(row: dict, identity: ComplexIdentity) -> None:
 
 
 def _populate_scope_flags(row: dict) -> None:
-    """Derive scope-only flags from the row's tier_scope.
+    """Identity-flag wiring hook (kept for symmetry with _populate_identity_fields).
 
-    Must be called after every _populate_identity_fields() call so the flag
-    tracks identity revisions (e.g. PDB-driven n_chains overwrite).
-
-    The existing composite (compute_interface_confidence) consumes best-pair
-    inputs which are order-statistic biased for N>2 - mark it uncalibrated so
-    downstream figures and claims only rely on it under
-    tier_scope == "dimer_validated".
+    The strict `composite_is_calibrated` assignment used to live here, but it
+    fired before composite inputs were known — so any dimer was wrongly tagged
+    True even when ipTM/PAE/contacts were missing. Final assignment now
+    happens once at the end of `process_single_complex` via
+    `_finalise_calibration_flag`. This hook is intentionally minimal: it only
+    needs to ensure `composite_is_calibrated` exists on the row.
     """
-    row['composite_is_calibrated'] = bool(row.get('tier_scope') == 'dimer_validated')
+    row.setdefault('composite_is_calibrated', False)
+
+
+def _finalise_calibration_flag(row: dict, *, run_interface_pae: bool) -> None:
+    """Set the strict `composite_is_calibrated` flag and stamp the
+    `MISSING_COMPOSITE` diagnostic when a dimer-validated row was expected to
+    be calibrated but is not.
+
+    A row is calibrated only when:
+      * tier_scope == 'dimer_validated' (existing scope rule), AND
+      * no upstream failure has stamped `partial_reason`, AND
+      * every input the composite depends on is actually present.
+
+    Multimer-provisional rows and basic-mode runs (no `--interface --pae`) are
+    deliberately uncalibrated by design and must NOT be tagged partial.
+    """
+    composite_inputs_present = (
+        _has_value(row.get('iptm'))
+        and _has_value(row.get('interface_confidence_score'))
+        and _has_value(row.get('strict_confident_contact_fraction'))
+        and _has_value(row.get('interface_pae_mean'))
+        and _has_value(row.get('n_interface_contacts'))
+        and int(row.get('n_interface_contacts') or 0) > 0
+    )
+    row['composite_is_calibrated'] = bool(
+        row.get('tier_scope') == 'dimer_validated'
+        and not row.get('partial_reason')
+        and composite_inputs_present
+    )
+
+    # Stamp MISSING_COMPOSITE only when interface+PAE was attempted and the
+    # row should have been calibrated but isn't. Skip basic-mode and N>2.
+    if (
+        run_interface_pae
+        and row.get('tier_scope') == 'dimer_validated'
+        and not row['composite_is_calibrated']
+        and row.get('partial_reason') in (PARTIAL_REASON_NONE, None)
+    ):
+        row['partial_reason'] = PARTIAL_REASON_MISSING_COMPOSITE
 
 
 def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, run_interface: bool = False, run_interface_pae: bool = False, export_interfaces: bool = False, stash_variant_data: bool = False, verbose: bool = False) -> dict:
@@ -916,13 +989,27 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
             'geometry_available': False,
             'species': 'Homo sapiens (9606)',
             'structure_source': 'AlphaFold2_prediction',
+            # Always-present diagnostic; populated below on any failure path.
+            'partial_reason': PARTIAL_REASON_NONE,
+            'composite_is_calibrated': False,
         }
         _populate_identity_fields(row, initial_identity)
         _populate_scope_flags(row)
 
-        pae_matrix = _extract_pkl_metrics(file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose)
+        pae_matrix, pkl_load_failed = _extract_pkl_metrics(
+            file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose,
+        )
+        if pkl_load_failed:
+            row['partial_reason'] = PARTIAL_REASON_UNREADABLE_PKL
+
         _extract_pdb_plddt(file_paths, row, verbose=verbose)
         contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
+
+        # PDB-read failure (chain_info is None despite a PDB path being supplied)
+        # supersedes any earlier PKL-load failure in the diagnostic — without a
+        # PDB the row is structurally meaningless, not just metric-incomplete.
+        if 'pdb' in file_paths and chain_info is None:
+            row['partial_reason'] = PARTIAL_REASON_UNREADABLE_PDB
 
         # Geometry availability: True iff every chain pair was successfully enumerated.
         # Zero-contact pairs are valid geometry (still count toward the expected pair
@@ -997,6 +1084,21 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
                 row['_cb_coords_b'] = chain_info.cb_coords.get(_vb, np.empty((0, 3))).tolist()
                 row['_confident_residue_numbers_a'] = row.get('confident_residue_numbers_a', [])
                 row['_confident_residue_numbers_b'] = row.get('confident_residue_numbers_b', [])
+
+        # Zero-contact diagnostic — ill-defined composite (log(0) in pDockQ).
+        # Don't overwrite an earlier upstream failure (PDB/PKL).
+        n_contacts = row.get('n_interface_contacts')
+        if (
+            _has_value(n_contacts)
+            and int(n_contacts) == 0
+            and row.get('partial_reason') in (PARTIAL_REASON_NONE, None)
+        ):
+            row['partial_reason'] = PARTIAL_REASON_ZERO_CONTACTS
+
+        # Final strict calibration flag — replaces the optimistic per-identity
+        # assignment that used to fire from `_populate_scope_flags` before
+        # composite inputs were known.
+        _finalise_calibration_flag(row, run_interface_pae=run_interface_pae)
 
         # Quality tier classification
         row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
@@ -1475,30 +1577,54 @@ def _aggregate_summary_statistics(results: list[dict], include_interface: bool =
         include_interface: Whether to include interface statistics.
     Returns:
         Dictionary of aggregated statistics keyed by section name.
+
+    Tolerates incomplete rows (missing identity / quality_tier_v2 — the HPC
+    crash mode). `partial_reason`-tagged rows that still carry identity remain
+    in the existing tier counts; they are also surfaced separately as a
+    diagnostic block.
     """
     total = len(results)
+
+    # Single-pass partition. "Incomplete" means we can't classify the row at
+    # all (missing complex_type or quality_tier_v2). "Partial" is orthogonal —
+    # the row has identity but the worker stamped a diagnostic reason.
+    valid: list[dict] = []
+    incomplete: list[dict] = []
+    for row in results:
+        if row.get('complex_type') and row.get('quality_tier_v2'):
+            valid.append(row)
+        else:
+            incomplete.append(row)
+
+    partial_rows = [r for r in results if r.get('partial_reason')]
+    calibrated_rows = [r for r in results if r.get('composite_is_calibrated')]
+
     stats: dict = {
         'total_complexes': total,
-        'homodimer_count': sum(1 for row in results if row['complex_type'] == 'Homodimer'),
-        'heterodimer_count': sum(1 for row in results if row['complex_type'] == 'Heterodimer'),
-        'quality_high': sum(1 for row in results if row.get('quality_tier') == 'High'),
-        'quality_medium': sum(1 for row in results if row.get('quality_tier') == 'Medium'),
-        'quality_low': sum(1 for row in results if row.get('quality_tier') == 'Low'),
-        'iptm_values': [row['iptm'] for row in results if row.get('iptm')],
-        'pdockq_values': [row['pdockq'] for row in results if row.get('pdockq')],
-        'below50_values': [row['plddt_below50_fraction'] for row in results if row.get('plddt_below50_fraction') is not None],
-        'below70_values': [row['plddt_below70_fraction'] for row in results if row.get('plddt_below70_fraction') is not None],
-        'pkl_source_count': sum(1 for row in results if row.get('plddt_source') == 'pkl'),
-        'pdb_fallback_count': sum(1 for row in results if row.get('plddt_source') == 'pdb'),
-        'no_plddt_count': sum(1 for row in results if row.get('plddt_source') is None),
+        'incomplete_count': len(incomplete),
+        'partial_count': len(partial_rows),
+        'partial_reason_counts': Counter(r.get('partial_reason') for r in partial_rows),
+        'calibrated_count': len(calibrated_rows),
+        'homodimer_count': sum(1 for row in valid if row.get('complex_type') == 'Homodimer'),
+        'heterodimer_count': sum(1 for row in valid if row.get('complex_type') == 'Heterodimer'),
+        'quality_high': sum(1 for row in valid if row.get('quality_tier') == 'High'),
+        'quality_medium': sum(1 for row in valid if row.get('quality_tier') == 'Medium'),
+        'quality_low': sum(1 for row in valid if row.get('quality_tier') == 'Low'),
+        'iptm_values': [row['iptm'] for row in valid if row.get('iptm')],
+        'pdockq_values': [row['pdockq'] for row in valid if row.get('pdockq')],
+        'below50_values': [row['plddt_below50_fraction'] for row in valid if row.get('plddt_below50_fraction') is not None],
+        'below70_values': [row['plddt_below70_fraction'] for row in valid if row.get('plddt_below70_fraction') is not None],
+        'pkl_source_count': sum(1 for row in valid if row.get('plddt_source') == 'pkl'),
+        'pdb_fallback_count': sum(1 for row in valid if row.get('plddt_source') == 'pdb'),
+        'no_plddt_count': sum(1 for row in valid if row.get('plddt_source') is None),
     }
 
     if include_interface:
-        stats['contact_counts'] = [row['n_interface_contacts'] for row in results if row.get('n_interface_contacts') is not None]
-        stats['if_plddt_values'] = [row['interface_plddt_combined'] for row in results if row.get('interface_plddt_combined') is not None]
-        stats['delta_values'] = [row['interface_vs_bulk_delta'] for row in results if row.get('interface_vs_bulk_delta') is not None]
+        stats['contact_counts'] = [row['n_interface_contacts'] for row in valid if row.get('n_interface_contacts') is not None]
+        stats['if_plddt_values'] = [row['interface_plddt_combined'] for row in valid if row.get('interface_plddt_combined') is not None]
+        stats['delta_values'] = [row['interface_vs_bulk_delta'] for row in valid if row.get('interface_vs_bulk_delta') is not None]
         all_flags: dict[str, int] = defaultdict(int)
-        for row in results:
+        for row in valid:
             flags_str = row.get('interface_flags', '')
             if flags_str:
                 for flag in flags_str.split(','):
@@ -1507,17 +1633,17 @@ def _aggregate_summary_statistics(results: list[dict], include_interface: bool =
         # Aggregate both fractions so the summary block can show the PAE-only distribution
         # (backward-compatible name for any log parsing) and the strict distribution that
         # now feeds the composite score.
-        stats['confident_fractions'] = [row['pae_confident_contact_fraction'] for row in results if row.get('pae_confident_contact_fraction') is not None]
-        stats['strict_confident_fractions'] = [row['strict_confident_contact_fraction'] for row in results if row.get('strict_confident_contact_fraction') is not None]
-        stats['composite_scores'] = [row['interface_confidence_score'] for row in results if row.get('interface_confidence_score') is not None]
+        stats['confident_fractions'] = [row['pae_confident_contact_fraction'] for row in valid if row.get('pae_confident_contact_fraction') is not None]
+        stats['strict_confident_fractions'] = [row['strict_confident_contact_fraction'] for row in valid if row.get('strict_confident_contact_fraction') is not None]
+        stats['composite_scores'] = [row['interface_confidence_score'] for row in valid if row.get('interface_confidence_score') is not None]
 
-        v2_tiers = [row.get('quality_tier_v2') for row in results if row.get('quality_tier_v2') is not None]
+        v2_tiers = [row.get('quality_tier_v2') for row in valid if row.get('quality_tier_v2') is not None]
         if v2_tiers:
             stats['v2_high'] = sum(1 for t in v2_tiers if t == 'High')
             stats['v2_medium'] = sum(1 for t in v2_tiers if t == 'Medium')
             stats['v2_low'] = sum(1 for t in v2_tiers if t == 'Low')
-            stats['v2_upgrades'] = sum(1 for r in results if r.get('quality_tier') != r.get('quality_tier_v2') and r.get('quality_tier_v2') == 'High')
-            stats['v2_downgrades'] = sum(1 for r in results if r.get('quality_tier') == 'High' and r.get('quality_tier_v2') != 'High')
+            stats['v2_upgrades'] = sum(1 for r in valid if r.get('quality_tier') != r.get('quality_tier_v2') and r.get('quality_tier_v2') == 'High')
+            stats['v2_downgrades'] = sum(1 for r in valid if r.get('quality_tier') == 'High' and r.get('quality_tier_v2') != 'High')
 
     return stats
 
@@ -1529,12 +1655,32 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
         include_interface: Whether to include interface statistics.
     """
     stats = _aggregate_summary_statistics(results, include_interface)
-    total = stats['total_complexes']
+    total = stats.get('total_complexes', 0)
+    if total == 0:
+        print("\nDataset Summary:\n  Total complexes: 0 (nothing to summarise)")
+        return
 
     print(f"\nDataset Summary:")
     print(f"  Total complexes: {total}")
     print(f"  Homodimers:      {stats['homodimer_count']} ({100 * stats['homodimer_count'] / total:.1f}%)")
     print(f"  Heterodimers:    {stats['heterodimer_count']} ({100 * stats['heterodimer_count'] / total:.1f}%)")
+
+    # HPC failure-mode diagnostics. These distinguish three orthogonal scopes
+    # so a reader cannot confuse the headline tier counts (above) with the
+    # strict-calibrated subset (below).
+    incomplete_count = stats.get('incomplete_count', 0)
+    partial_count = stats.get('partial_count', 0)
+    if incomplete_count or partial_count:
+        print(f"\nDiagnostics (HPC failure-mode tracking):")
+        print(f"  Incomplete rows (no complex_type / quality_tier_v2):           {incomplete_count}")
+        print(f"  Partial rows (partial_reason populated, kept in tier counts):  {partial_count}")
+        for reason, count in sorted(
+            stats.get('partial_reason_counts', {}).items(),
+            key=lambda kv: -kv[1],
+        ):
+            label = reason or "(empty)"
+            print(f"    {label}: {count}")
+        print(f"  Strict-calibrated rows (composite_is_calibrated=True):         {stats.get('calibrated_count', 0)}")
 
     print(f"\nQuality Distribution (v1, two-metric baseline - for v1↔v2 comparison only):")
     print(f"  High:   {stats['quality_high']} ({100 * stats['quality_high'] / total:.1f}%)"
