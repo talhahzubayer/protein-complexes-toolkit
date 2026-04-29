@@ -49,6 +49,7 @@ The main analysis pipeline (`toolkit.py`) processes AlphaFold2-Multimer predicti
 | `--disease` | `--enrich` |
 | `--pathways` | `--enrich` |
 | `--pymol` | `--interface --pae` |
+| `--skip-existing PATH` | (none; orthogonal to all other flags) |
 | `--full-pipeline` | `--dir` only (activates all flags with default data paths) |
 
 ### Flag Defaults
@@ -66,6 +67,7 @@ The main analysis pipeline (`toolkit.py`) processes AlphaFold2-Multimer predicti
 | `--disease <path>` | `data/pathways/` (when `--disease` is used without a path) |
 | `--pymol-output` | `pymol_scripts/` |
 | `--pymol-min-tier` | `High` |
+| `--skip-existing` | None (off by default - pass the path to the historical `results.csv`) |
 | `--full-pipeline` | Activates `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with module defaults |
 
 ### Progressive Command Build-up
@@ -93,6 +95,32 @@ python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae -w 
 
 # Resume an interrupted run (implies --checkpoint)
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae -w 4 --resume
+
+# Append-only incremental mode: process only complexes NOT in the historical results.csv.
+# Pair --skip-existing with --export-interfaces so the JSONL contains only the delta.
+# Audit TSVs (manifest_delta, already_processed, changed_existing,
+# missing_since_previous_manifest, incremental_run_summary) are written under
+# data/complex_manifest_audit/runs/<auto_run_id>/ and mirrored to latest/.
+python toolkit.py --full-pipeline \
+    --dir <MODELS_DIR> \
+    --skip-existing results.csv \
+    --output results_incremental_2026-05-02_091022_job_33912488.csv \
+    --export-interfaces interfaces_incremental_2026-05-02_091022_job_33912488.jsonl
+
+# After a successful incremental run, merge results_incremental_*.csv into results.csv
+# (and JSONL pair likewise) before the next incremental run, or the wrapper will
+# idempotently reproduce the same delta.
+
+# --skip-existing combined with --resume: skip-existing builds the delta from the
+# historical CSV first, then --resume removes complexes already completed in the
+# current run's checkpoint. The two flags read independent state - skip-existing
+# reads ONLY results.csv, --resume reads ONLY the .checkpoint.jsonl.
+python toolkit.py --full-pipeline \
+    --dir <MODELS_DIR> \
+    --skip-existing results.csv \
+    --output results_incremental_2026-05-02_091022_job_33912488.csv \
+    --export-interfaces interfaces_incremental_2026-05-02_091022_job_33912488.jsonl \
+    --resume
 
 # Combined: enrichment + databases + parallel workers + checkpointing + JSONL export
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --enrich <ALIASES_FILE> --databases <PPI_DIR> --export-interfaces <INTERFACES_JSONL> -w 8 --checkpoint
@@ -151,6 +179,46 @@ python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --e
 # Verbose output (sequential only)
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae -v
 ```
+
+### HPC incremental wrapper
+
+Use this after the pre-expansion baseline manifest has been captured (one-shot `python complex_resolver.py --root "$PROTEIN_COMPLEXES_ROOT" --purpose baseline`) and the dataset has been expanded:
+
+```bash
+sbatch hpc_incremental_run.sh
+```
+
+Environment overrides (all optional, all default to safe values):
+
+| Variable                      | Default                                                | Purpose |
+|-------------------------------|--------------------------------------------------------|---------|
+| `HISTORICAL_RESULTS_CSV`      | `results.csv`                                          | Skip-existing reference (must be the full toolkit `results.csv`, **not** `results_strict_calibrated_*.csv`) |
+| `HISTORICAL_INTERFACES_JSONL` | `interfaces.jsonl`                                     | Paired historical JSONL |
+| `OUTPUT_CSV`                  | `results_incremental_<stamp>_<job>.csv`                | Per-run incremental CSV |
+| `INTERFACES_JSONL`            | `interfaces_incremental_<stamp>_<job>.jsonl`           | Per-run incremental JSONL |
+| `RUN_STAMP`                   | `$(date +%Y-%m-%d_%H%M%S)`                             | Override the date stamp |
+| `JOB_TAG`                     | `job_${SLURM_JOB_ID:-manual}`                          | Override the job tag |
+| `RESUME`                      | `0`                                                    | Set to `1` to append `--resume` to the toolkit invocation |
+
+The wrapper runs four preflight steps before invoking the toolkit:
+
+- `[0/4]` `pip check` - Python package consistency
+- `[1/4]` `data_registry.py` - registered data dependencies present
+- `[2/4]` baseline manifest existence (`data/complex_manifest_audit/latest/complex_manifest.tsv` + `latest_run_id.txt`) - the wrapper does NOT call `complex_resolver.py`; it only verifies the baseline already exists
+- `[3/4]` historical CSV/JSONL sanity - both files non-empty, JSONL `complex_name` ⊆ CSV `complex_name`
+
+Crash recovery - re-submit pointing at the same `OUTPUT_CSV` / `INTERFACES_JSONL` with `RESUME=1` so the toolkit's checkpoint loader finds the existing in-flight state:
+
+```bash
+sbatch --export=ALL,RESUME=1,\
+RUN_STAMP=2026-05-02_091022,\
+JOB_TAG=job_33912488,\
+OUTPUT_CSV=results_incremental_2026-05-02_091022_job_33912488.csv,\
+INTERFACES_JSONL=interfaces_incremental_2026-05-02_091022_job_33912488.jsonl \
+  hpc_incremental_run.sh
+```
+
+**Important**: `hpc_incremental_run.sh` always uses `results.csv` unless overridden. After an incremental run succeeds, merge or promote the combined CSV before the next incremental run. Otherwise the wrapper will intentionally rediscover and reprocess the same delta because the skip reference has not changed. See Decision #42 in [Documentation/Research_Project_Roadmap.md](Documentation/Research_Project_Roadmap.md) for the full rationale.
 
 ---
 
@@ -646,7 +714,7 @@ python complex_resolver.py --root /scratch/.../Protein_Complexes --audit-dir /sc
 
 ### Outputs
 
-Written atomically (write `.tmp` → rename) on every run; never appended.
+Written atomically (write `.tmp` -> rename) on every run; never appended.
 
 | File | Contents |
 |---|---|

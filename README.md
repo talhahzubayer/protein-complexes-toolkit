@@ -46,20 +46,21 @@ protein-complexes-toolkit/
 ├── pathway_network.py        # Reactome pathway mapping, PPI enrichment, NetworkX networks
 ├── pymol_scripts.py          # PyMOL .pml script generation and py3Dmol fallback
 ├── data_registry.py          # Data dependency registry and pre-run validation
-├── complex_resolver.py       # PDB/PKL pair discovery (flat + sharded, .bz2-aware) + forensic manifest
+├── complex_resolver.py       # PDB/PKL pair discovery (flat + sharded, .bz2-aware) + fingerprinted manifest with runs/<id>/ + latest/ + latest_run_id.txt audit layout
 ├── file_io.py                # Transparent open() for plain / .gz / .bz2 inputs
-├── hpc_dataset_run.sh        # SLURM wrapper for production HPC submission (see HPC Submission)
+├── hpc_dataset_run.sh        # SLURM wrapper for full-pipeline production HPC submission (see HPC Submission)
+├── hpc_incremental_run.sh    # SLURM wrapper for append-only incremental runs (see HPC Submission > Append-only incremental mode)
 ├── Toolkit_Commands_List.md  # Full CLI command reference (all flags, defaults, examples)
 ├── requirements.txt          # Python dependencies
 ├── .gitignore
-└── data/                        # External databases (not included in repo)
-    ├── complex_manifest_audit/  # Forensic manifest from complex_resolver (auto-generated)
-    ├── ppi/                     # PPI databases (see "Setting Up Data")
-    ├── clusters/                # STRING sequence clusters (see "Setting Up Data")
-    ├── variants/                # Variant databases (see "Setting Up Data")
-    ├── stability/               # Stability prediction data (see "Setting Up Data")
-    ├── pathways/                # Disease & pathway databases (see "Setting Up Data")
-    └── string_api_cache/        # STRING API response cache (auto-generated; sharded <key[:2]>/<key>.json)
+└── data/                            # External databases (not included in repo)
+    ├── complex_manifest_audit/      # Fingerprinted manifest from complex_resolver (auto-generated)
+    ├── ppi/                         # PPI databases (see "Setting Up Data")
+    ├── clusters/                    # STRING sequence clusters (see "Setting Up Data")
+    ├── variants/                    # Variant databases (see "Setting Up Data")
+    ├── stability/                   # Stability prediction data (see "Setting Up Data")
+    ├── pathways/                    # Disease & pathway databases (see "Setting Up Data")
+    └── string_api_cache/            # STRING API response cache (auto-generated; sharded <key[:2]>/<key>.json)
 ```
 
 ## Installation
@@ -205,6 +206,27 @@ The wrapper's `[0/4]`–`[2/4]` steps fail in <30 s if anything is wrong, so a m
 - `[1/4] data_registry.py` - all 18 registered data files exist and are non-empty.
 - `[2/4] complex_resolver.py` - PDB/PKL pairs in the input tree, audit manifest written.
 
+### Append-only incremental mode
+
+When the input dataset is incrementally expanded (new complexes added to an existing tree), `toolkit.py --skip-existing results.csv` processes only the newly-added complexes against a previously-completed historical run, skipping the ~6 h full-pipeline cost. The companion SLURM wrapper `hpc_incremental_run.sh` mirrors `hpc_dataset_run.sh`'s environment hardening and adds a 4-step preflight (pip -> data registry -> baseline manifest existence -> historical CSV/JSONL sanity).
+
+A fingerprinted manifest layout - `data/complex_manifest_audit/runs/<id>/` (immutable per-run snapshot) + `latest/` (convenience mirror) + `latest_run_id.txt` (atomic single-line pointer) - gives every resolver call a forensic trail and lets incremental runs detect file-level changes via `(size, mtime_ns)` fingerprints. Any complex whose fingerprint differs from the previous baseline is recorded in `changed_existing.tsv` with a stderr warning and is **not** silently reprocessed (mixed-vintage rows would invalidate downstream figures).
+
+Incremental outputs are written separately (`results_incremental_<stamp>_<job>.csv`, `interfaces_incremental_<stamp>_<job>.jsonl`) and must be merged with the historical CSV/JSONL pair before figure generation. After the merge, promote the combined CSV as the next `--skip-existing` reference (or pass it via `HISTORICAL_RESULTS_CSV` to the wrapper) - otherwise the wrapper is intentionally idempotent and will reproduce the same delta.
+
+```bash
+# One-time, before the dataset is expanded - captures the baseline:
+python complex_resolver.py --root "$PROTEIN_COMPLEXES_ROOT" --purpose baseline
+
+# After dataset expansion - runs only the delta:
+sbatch hpc_incremental_run.sh
+
+# Crash recovery - same OUTPUT_CSV, RESUME=1:
+sbatch --export=ALL,RESUME=1,OUTPUT_CSV=...,INTERFACES_JSONL=... hpc_incremental_run.sh
+```
+
+See [Toolkit_Commands_List.md](Toolkit_Commands_List.md) for the full env-override table and per-flag reference.
+
 ---
 
 ## Pipeline Architecture
@@ -293,7 +315,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 ### Script Descriptions
 
-The pipeline produces a 40-column base CSV, progressively expandable to ~153 columns by stacking optional flags (`--enrich`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI. Compressed inputs (`.pdb.bz2`, `.pkl.bz2`) and the sharded HPC layout are supported transparently.
+The pipeline produces a 41-column base CSV, progressively expandable to 154 columns by stacking optional flags (`--enrich`, `--interface --pae`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI. Compressed inputs (`.pdb.bz2`, `.pkl.bz2`) and the sharded HPC layout are supported transparently.
 
 #### Core Analysis
 
@@ -414,7 +436,23 @@ Homodimer, isoform, and multi-chain naming patterns are also handled. Layouts 2 
 
 ## Output
 
-### CSV (40 base columns, up to 153 with all features)
+### CSV (41 base columns, up to 154 with all features)
+
+Progressive column counts as flags are stacked (verified against the production `results.csv` produced by Run 1):
+
+| Flag combination | Column count |
+|---|---|
+| Base (no flags) | 41 |
+| `--interface` | 65 |
+| `--interface --pae` | 83 |
+| `--enrich` (alone) | 53 |
+| `--interface --pae --enrich` | 95 |
+| `+ --clustering` | 102 |
+| `+ --variants` | 114 |
+| `+ --stability` | 122 |
+| `+ --protvar` | 130 |
+| `+ --disease` | 144 |
+| `+ --pathways` (= `--full-pipeline`) | **154** |
 
 The main output CSV groups columns into:
 

@@ -58,8 +58,10 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 SHARD_RE = re.compile(r"^[A-Z0-9]{2}$")
@@ -78,6 +80,12 @@ PKL_GLOB_PATTERNS = ("*_result_model_*.pkl", "*_result_model_*.pkl.bz2")
 MANIFEST_DIR_NAME = "data/complex_manifest_audit"
 MANIFEST_FILE = "complex_manifest.tsv"
 INCOMPLETE_FILE = "incomplete_inputs.tsv"
+SUMMARY_FILE = "manifest_snapshot_summary.txt"
+RUNS_DIR_NAME = "runs"
+LATEST_DIR_NAME = "latest"
+LATEST_RUN_ID_FILE = "latest_run_id.txt"
+
+VALID_PURPOSES = ("baseline", "incremental")
 
 PROGRESS_INTERVAL = 5_000
 
@@ -100,7 +108,23 @@ class CandidateRecord:
     pkl: Path | None
     pdb_size: int
     pkl_size: int
+    pdb_mtime: int       # st_mtime_ns; 0 when file missing/ambiguous/unstattable
+    pkl_mtime: int
     reason: str | None   # None if complete
+
+
+@dataclass(frozen=True)
+class DiscoveryResult:
+    """Returned from find_complexes(..., return_audit=True).
+
+    Carries the discovered pairs plus the run-id and run-dir paths the resolver
+    just wrote, so callers (toolkit incremental mode) don't have to glob
+    runs/* or read latest_run_id.txt to back-derive them.
+    """
+    complexes: dict[str, dict[str, Path]]
+    run_id: str
+    run_dir: Path | None       # None when write_audit=False
+    manifest_path: Path | None # None when write_audit=False
 
 
 def _resolve_root(root: Path | str | None) -> Path:
@@ -201,34 +225,53 @@ def _resolve_files(complex_dir: Path, complex_name: str) -> ResolvedFiles:
     )
 
 
-def _classify(files: ResolvedFiles) -> tuple[str | None, int, int]:
-    """Return (reason, pdb_size, pkl_size). reason=None means complete."""
+def _stat_or_zero(path: Path | None) -> tuple[int, int]:
+    """Return (size_bytes, mtime_ns) for ``path``, or (0, 0) if missing/unstattable.
+
+    Single stat() call so size and mtime are read consistently together.
+    """
+    if path is None:
+        return 0, 0
+    try:
+        st = path.stat()
+    except OSError:
+        return 0, 0
+    return st.st_size, st.st_mtime_ns
+
+
+def _classify(files: ResolvedFiles) -> tuple[str | None, int, int, int, int]:
+    """Return (reason, pdb_size, pkl_size, pdb_mtime_ns, pkl_mtime_ns).
+
+    ``reason=None`` means complete. Sizes/mtimes are zero when the corresponding
+    file is missing or ambiguous.
+    """
+    pdb_size, pdb_mtime = _stat_or_zero(files.pdb)
+    pkl_size, pkl_mtime = _stat_or_zero(files.pkl)
+
     if files.pdb_ambiguous and files.pkl_ambiguous:
-        return "ambiguous_pdb", 0, 0
+        return "ambiguous_pdb", 0, 0, 0, 0
     if files.pdb_ambiguous:
-        return "ambiguous_pdb", 0, (files.pkl.stat().st_size if files.pkl else 0)
+        return "ambiguous_pdb", 0, pkl_size, 0, pkl_mtime
     if files.pkl_ambiguous:
-        return "ambiguous_pkl", (files.pdb.stat().st_size if files.pdb else 0), 0
+        return "ambiguous_pkl", pdb_size, 0, pdb_mtime, 0
 
     pdb_missing = files.pdb is None
     pkl_missing = files.pkl is None
     if pdb_missing and pkl_missing:
-        return "missing_both", 0, 0
+        return "missing_both", 0, 0, 0, 0
     if pdb_missing:
-        return "missing_pdb", 0, files.pkl.stat().st_size
+        return "missing_pdb", 0, pkl_size, 0, pkl_mtime
     if pkl_missing:
-        return "missing_pkl", files.pdb.stat().st_size, 0
+        return "missing_pkl", pdb_size, 0, pdb_mtime, 0
 
-    pdb_size = files.pdb.stat().st_size
-    pkl_size = files.pkl.stat().st_size
     if pdb_size == 0 and pkl_size == 0:
-        return "empty_both", 0, 0
+        return "empty_both", 0, 0, 0, 0
     if pdb_size == 0:
-        return "empty_pdb", 0, pkl_size
+        return "empty_pdb", 0, pkl_size, 0, pkl_mtime
     if pkl_size == 0:
-        return "empty_pkl", pdb_size, 0
+        return "empty_pkl", pdb_size, 0, pdb_mtime, 0
 
-    return None, pdb_size, pkl_size
+    return None, pdb_size, pkl_size, pdb_mtime, pkl_mtime
 
 
 def _atomic_write_tsv(path: Path, header: list[str], rows: list[list[str]]) -> None:
@@ -251,6 +294,8 @@ def _row_for_manifest(rec: CandidateRecord) -> list[str]:
         str(rec.pkl) if rec.pkl else "",
         str(rec.pdb_size),
         str(rec.pkl_size),
+        str(rec.pdb_mtime),
+        str(rec.pkl_mtime),
     ]
 
 
@@ -261,8 +306,93 @@ def _row_for_incomplete(rec: CandidateRecord) -> list[str]:
 MANIFEST_HEADER = [
     "name", "layout", "shard", "complex_dir",
     "pdb_path", "pkl_path", "pdb_size_bytes", "pkl_size_bytes",
+    "pdb_mtime_ns", "pkl_mtime_ns",
 ]
 INCOMPLETE_HEADER = MANIFEST_HEADER + ["reason"]
+
+
+def _make_run_id(purpose: str) -> str:
+    """Build the auto run-id ``<YYYY-MM-DD>_<HHMMSS>[_job_<id>]_<purpose>``."""
+    if purpose not in VALID_PURPOSES:
+        raise ValueError(
+            f"purpose must be one of {VALID_PURPOSES}, got {purpose!r}"
+        )
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if job_id:
+        return f"{stamp}_job_{job_id}_{purpose}"
+    return f"{stamp}_{purpose}"
+
+
+def _refresh_latest(audit_root: Path, run_dir: Path, run_id: str) -> None:
+    """Mirror ``run_dir`` into ``audit_root/latest/`` and update the pointer.
+
+    Best-effort. ``runs/<run_id>/`` is the authoritative snapshot; if the mirror
+    swap fails, a stderr warning is emitted and the previous ``latest/`` is left
+    intact. ``latest_run_id.txt`` is the durable single-line pointer that always
+    resolves to the active run.
+    """
+    latest_dir = audit_root / LATEST_DIR_NAME
+    latest_tmp = audit_root / (LATEST_DIR_NAME + ".tmp")
+    latest_old = audit_root / (LATEST_DIR_NAME + ".old")
+    pointer = audit_root / LATEST_RUN_ID_FILE
+
+    try:
+        if latest_tmp.exists():
+            shutil.rmtree(latest_tmp)
+        latest_tmp.mkdir(parents=True)
+        for item in run_dir.iterdir():
+            if item.is_file():
+                shutil.copy2(item, latest_tmp / item.name)
+
+        if latest_dir.exists():
+            if latest_old.exists():
+                shutil.rmtree(latest_old)
+            latest_dir.rename(latest_old)
+        latest_tmp.rename(latest_dir)
+        if latest_old.exists():
+            shutil.rmtree(latest_old, ignore_errors=True)
+    except OSError as exc:
+        print(
+            f"Warning: failed to refresh {latest_dir} ({exc}); "
+            f"runs/{run_id}/ remains authoritative",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        pointer_tmp = pointer.with_suffix(pointer.suffix + ".tmp")
+        pointer_tmp.write_text(run_id + "\n", encoding="utf-8")
+        pointer_tmp.replace(pointer)
+    except OSError as exc:
+        print(
+            f"Warning: failed to update {pointer} ({exc}); "
+            f"runs/{run_id}/ remains authoritative",
+            file=sys.stderr,
+        )
+
+
+def _write_snapshot_summary(
+    summary_path: Path,
+    run_id: str,
+    purpose: str,
+    layout: str,
+    resolved_root: Path,
+    n_complete: int,
+    n_incomplete: int,
+) -> None:
+    """Write a small human-readable summary alongside the run's TSVs."""
+    lines = [
+        f"run_id:           {run_id}",
+        f"purpose:          {purpose}",
+        f"timestamp:        {datetime.now().isoformat(timespec='seconds')}",
+        f"slurm_job_id:     {os.environ.get('SLURM_JOB_ID', 'none')}",
+        f"layout:           {layout}",
+        f"dataset_root:     {resolved_root}",
+        f"complete_pairs:   {n_complete}",
+        f"incomplete:       {n_incomplete}",
+    ]
+    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def find_complexes(
@@ -270,7 +400,11 @@ def find_complexes(
     audit_dir: Path | str | None = None,
     write_audit: bool = True,
     progress_stream=None,
-) -> dict[str, dict[str, Path]]:
+    *,
+    purpose: str = "baseline",
+    run_id: str | None = None,
+    return_audit: bool = False,
+):
     """Scan a flat or sharded complex root and return complete pairs.
 
     Parameters
@@ -279,22 +413,36 @@ def find_complexes(
         Explicit root override. Defaults to ``PROTEIN_COMPLEXES_ROOT``;
         raises ``RuntimeError`` if neither is set.
     audit_dir
-        Where to write ``complex_manifest.tsv`` and ``incomplete_inputs.tsv``.
-        Defaults to ``$PROTEIN_TOOLKIT_PROJECT_ROOT/data/complex_manifest_audit/``,
-        falling back to ``$CWD/data/complex_manifest_audit/``.
+        Audit-root override. Defaults to
+        ``$PROTEIN_TOOLKIT_PROJECT_ROOT/data/complex_manifest_audit/`` (else
+        ``$CWD/data/complex_manifest_audit/``). When ``write_audit`` is true,
+        manifests are written to ``<audit_root>/runs/<run_id>/`` and mirrored
+        to ``<audit_root>/latest/`` with a ``latest_run_id.txt`` pointer.
     write_audit
-        Set ``False`` to suppress manifest writes (useful in tests / when
-        embedding inside another tool).
+        Set ``False`` to suppress manifest writes (tests / embedding).
     progress_stream
         File-like object to receive scan progress lines (one per
         ``PROGRESS_INTERVAL`` directories). ``None`` is silent.
+    purpose
+        ``"baseline"`` or ``"incremental"``. Drives the auto run-id suffix.
+    run_id
+        Override the auto-generated run id (test/dev only).
+    return_audit
+        When ``False`` (default), return the legacy bare dict for backward
+        compatibility. When ``True``, return a :class:`DiscoveryResult` carrying
+        the run id and run-dir paths the resolver just wrote.
 
     Returns
     -------
-    dict
-        ``{complex_name: {"pdb": Path, "pkl": Path}}`` for complete pairs only,
-        keyed and ordered alphabetically.
+    dict | DiscoveryResult
+        See ``return_audit``. The dict form is
+        ``{complex_name: {"pdb": Path, "pkl": Path}}``, sorted alphabetically.
     """
+    if purpose not in VALID_PURPOSES:
+        raise ValueError(
+            f"purpose must be one of {VALID_PURPOSES}, got {purpose!r}"
+        )
+
     resolved_root = _resolve_root(root)
     layout = _detect_layout(resolved_root)
 
@@ -315,7 +463,7 @@ def find_complexes(
 
         name = complex_dir.name
         files = _resolve_files(complex_dir, name)
-        reason, pdb_size, pkl_size = _classify(files)
+        reason, pdb_size, pkl_size, pdb_mtime, pkl_mtime = _classify(files)
 
         record = CandidateRecord(
             name=name,
@@ -326,6 +474,8 @@ def find_complexes(
             pkl=files.pkl,
             pdb_size=pdb_size,
             pkl_size=pkl_size,
+            pdb_mtime=pdb_mtime,
+            pkl_mtime=pkl_mtime,
             reason=reason,
         )
 
@@ -356,24 +506,48 @@ def find_complexes(
         else:
             incomplete.append(record)
 
+    actual_run_id = run_id if run_id is not None else _make_run_id(purpose)
+    run_dir: Path | None = None
+    manifest_path: Path | None = None
+
     if write_audit:
-        out_dir = _resolve_audit_dir(audit_dir)
+        audit_root = _resolve_audit_dir(audit_dir)
+        run_dir = audit_root / RUNS_DIR_NAME / actual_run_id
+        manifest_path = run_dir / MANIFEST_FILE
+
         manifest_rows = [
             _row_for_manifest(complete_records[name])
             for name in sorted(complete_records)
         ]
         incomplete_rows = [_row_for_incomplete(rec) for rec in incomplete]
+        _atomic_write_tsv(manifest_path, MANIFEST_HEADER, manifest_rows)
         _atomic_write_tsv(
-            out_dir / MANIFEST_FILE, MANIFEST_HEADER, manifest_rows,
+            run_dir / INCOMPLETE_FILE, INCOMPLETE_HEADER, incomplete_rows,
         )
-        _atomic_write_tsv(
-            out_dir / INCOMPLETE_FILE, INCOMPLETE_HEADER, incomplete_rows,
+        _write_snapshot_summary(
+            run_dir / SUMMARY_FILE,
+            run_id=actual_run_id,
+            purpose=purpose,
+            layout=layout,
+            resolved_root=resolved_root,
+            n_complete=len(complete_records),
+            n_incomplete=len(incomplete),
         )
+        _refresh_latest(audit_root, run_dir, actual_run_id)
 
-    return {
+    complexes = {
         name: {"pdb": complete_records[name].pdb, "pkl": complete_records[name].pkl}
         for name in sorted(complete_records)
     }
+
+    if return_audit:
+        return DiscoveryResult(
+            complexes=complexes,
+            run_id=actual_run_id,
+            run_dir=run_dir,
+            manifest_path=manifest_path,
+        )
+    return complexes
 
 
 def main() -> None:
@@ -386,26 +560,43 @@ def main() -> None:
     )
     parser.add_argument(
         "--audit-dir", default=None,
-        help="Override audit directory (default: data/complex_manifest_audit/).",
+        help="Override audit-root directory "
+             "(default: data/complex_manifest_audit/).",
+    )
+    parser.add_argument(
+        "--purpose", choices=list(VALID_PURPOSES), default="baseline",
+        help="Run purpose suffix in the auto-generated run id "
+             "(default: baseline).",
+    )
+    parser.add_argument(
+        "--run-id", default=None,
+        help="Override the auto-generated run id. Intended for tests and "
+             "reproducible fixture generation only; production runs should "
+             "use the auto-generated id.",
     )
     args = parser.parse_args()
 
-    pairs = find_complexes(
+    discovery = find_complexes(
         root=args.root,
         audit_dir=args.audit_dir,
         write_audit=True,
         progress_stream=sys.stderr,
+        purpose=args.purpose,
+        run_id=args.run_id,
+        return_audit=True,
     )
 
     resolved_root = _resolve_root(args.root)
     layout = _detect_layout(resolved_root)
     audit_dir = _resolve_audit_dir(args.audit_dir)
 
-    n_complete = len(pairs)
+    n_complete = len(discovery.complexes)
     print(f"Layout:               {layout}")
     print(f"Complete complexes:   {n_complete:,}")
-    print(f"Manifest:             {audit_dir / MANIFEST_FILE}")
-    print(f"Incomplete audit:     {audit_dir / INCOMPLETE_FILE}")
+    print(f"Run id:               {discovery.run_id}")
+    print(f"Run dir:              {discovery.run_dir}")
+    print(f"Latest mirror:        {audit_dir / LATEST_DIR_NAME}")
+    print(f"Latest pointer:       {audit_dir / LATEST_RUN_ID_FILE}")
 
     sys.exit(0 if n_complete > 0 else 1)
 

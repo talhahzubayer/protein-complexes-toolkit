@@ -476,7 +476,12 @@ def _has_loose_files(directory: Path) -> bool:
     return False
 
 
-def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
+def find_paired_data_files(
+    directory: str,
+    *,
+    purpose: str = "baseline",
+    return_audit: bool = False,
+):
     """Find paired PDB/PKL files in a loose, flat-dir, or sharded layout.
 
     Three layouts supported:
@@ -492,8 +497,22 @@ def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
     manifest. The loose layout is handled in-place to preserve the original
     Test_Data semantics.
 
-    Returns only complete pairs; downstream code dereferences
-    ``paths['pdb']`` and ``paths['pkl']`` directly.
+    Parameters
+    ----------
+    purpose
+        Forwarded to the resolver to drive the auto run-id suffix
+        (``"baseline"`` or ``"incremental"``). Ignored for the loose layout.
+    return_audit
+        When ``False`` (default), returns the legacy bare dict for backward
+        compatibility. When ``True``, returns a
+        :class:`complex_resolver.DiscoveryResult` carrying the run id and
+        run-dir paths the resolver just wrote. The loose layout returns a
+        synthetic ``DiscoveryResult`` with ``run_id=""`` and ``run_dir=None``.
+
+    Returns
+    -------
+    dict | DiscoveryResult
+        See ``return_audit``.
     """
     data_directory = Path(directory)
 
@@ -518,14 +537,27 @@ def find_paired_data_files(directory: str) -> dict[str, dict[str, Path]]:
             elif name_lower.endswith('.pkl') or name_lower.endswith('.pkl.bz2') \
                     or name_lower.endswith('.pkl.gz'):
                 complexes[complex_name].setdefault('pkl', file_path)
-        return {
+        loose_pairs = {
             name: paths
             for name, paths in complexes.items()
             if 'pdb' in paths and 'pkl' in paths
         }
+        if return_audit:
+            from complex_resolver import DiscoveryResult
+            return DiscoveryResult(
+                complexes=loose_pairs,
+                run_id="",
+                run_dir=None,
+                manifest_path=None,
+            )
+        return loose_pairs
 
     from complex_resolver import find_complexes
-    return find_complexes(root=data_directory)
+    return find_complexes(
+        root=data_directory,
+        purpose=purpose,
+        return_audit=return_audit,
+    )
 
 #------Quality Classification------------------------------------------------------
 
@@ -1406,6 +1438,257 @@ def remove_checkpoint(output_path: str) -> None:
         ckpt.unlink()
         logger.info("Checkpoint removed: %s", ckpt)
 
+
+# ── Incremental mode (--skip-existing) helpers ──────────────────────────────
+
+
+def _resolve_audit_root() -> Path:
+    """Resolve the audit-root directory, matching complex_resolver._resolve_audit_dir().
+
+    The resolver and the toolkit MUST agree on this path so the toolkit can
+    find the just-written ``runs/<id>/`` and the previous ``latest/`` mirror.
+    Honours ``PROTEIN_TOOLKIT_PROJECT_ROOT`` (so tests can redirect via
+    ``monkeypatch.setenv``); falls back to ``$CWD/data/complex_manifest_audit``.
+    """
+    env_root = os.environ.get("PROTEIN_TOOLKIT_PROJECT_ROOT")
+    base = Path(env_root).expanduser().resolve() if env_root else Path.cwd()
+    return base / "data" / "complex_manifest_audit"
+
+
+def _stat_size_mtime(path: Path | None) -> tuple[int, int]:
+    """Return ``(size_bytes, mtime_ns)`` for path, or ``(0, 0)`` if missing/unstattable."""
+    if path is None:
+        return 0, 0
+    try:
+        st = path.stat()
+    except OSError:
+        return 0, 0
+    return st.st_size, st.st_mtime_ns
+
+
+def _load_previous_fingerprints(
+    audit_root: Path,
+) -> dict[str, tuple[int, int, int, int]]:
+    """Parse ``<audit_root>/latest/complex_manifest.tsv`` into a fingerprint dict.
+
+    Returns ``{name: (pdb_size, pkl_size, pdb_mtime_ns, pkl_mtime_ns)}``.
+    Returns ``{}`` when ``latest/`` does not yet exist (first incremental ever).
+
+    MUST be called before the resolver runs in incremental mode — the resolver
+    refreshes ``latest/`` as a side effect, after which this function would
+    compare the current manifest to itself.
+    """
+    manifest_path = audit_root / "latest" / "complex_manifest.tsv"
+    if not manifest_path.is_file():
+        return {}
+    fingerprints: dict[str, tuple[int, int, int, int]] = {}
+    with manifest_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                fingerprints[name] = (
+                    int(row.get("pdb_size_bytes", 0) or 0),
+                    int(row.get("pkl_size_bytes", 0) or 0),
+                    int(row.get("pdb_mtime_ns", 0) or 0),
+                    int(row.get("pkl_mtime_ns", 0) or 0),
+                )
+            except ValueError:
+                continue
+    return fingerprints
+
+
+def _load_previous_run_id(audit_root: Path) -> str:
+    """Read the previous ``latest_run_id.txt`` value or return ``"none"``."""
+    pointer = audit_root / "latest_run_id.txt"
+    if not pointer.is_file():
+        return "none"
+    return pointer.read_text(encoding="utf-8").strip() or "none"
+
+
+def _read_skip_existing_names(results_csv_path: Path) -> set[str]:
+    """Read the ``complex_name`` column from a historical results CSV.
+
+    Raises ``FileNotFoundError`` if the path doesn't exist, or ``ValueError``
+    if the file is missing the ``complex_name`` column. Duplicates are
+    deduplicated with a stderr warning.
+    """
+    if not results_csv_path.is_file():
+        raise FileNotFoundError(
+            f"--skip-existing CSV not found: {results_csv_path}"
+        )
+    names: set[str] = set()
+    seen: set[str] = set()
+    duplicates = 0
+    with results_csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or "complex_name" not in reader.fieldnames:
+            raise ValueError(
+                f"--skip-existing CSV {results_csv_path} is missing required "
+                f"'complex_name' column. Note: results_strict_calibrated_*.csv "
+                f"is an analysis subset and must not be used for skip-existing; "
+                f"use the full results.csv from the toolkit pipeline."
+            )
+        for row in reader:
+            name = (row.get("complex_name") or "").strip()
+            if not name:
+                continue
+            if name in seen:
+                duplicates += 1
+            else:
+                seen.add(name)
+            names.add(name)
+    if duplicates:
+        print(
+            f"  Warning: --skip-existing CSV {results_csv_path.name} had "
+            f"{duplicates} duplicate complex_name row(s); using deduped set "
+            f"({len(names):,} unique names)",
+            file=sys.stderr,
+        )
+    return names
+
+
+def _compute_incremental_delta(
+    complexes: dict[str, dict[str, Path]],
+    previous_fingerprints: dict[str, tuple[int, int, int, int]],
+    previous_run_id: str,
+    results_csv_path: Path,
+    run_dir: Path,
+    *,
+    output_csv: str,
+    output_jsonl: str | None,
+) -> dict:
+    """Categorise discovered complexes against the historical results CSV.
+
+    Writes ``manifest_delta.tsv``, ``already_processed.tsv``,
+    ``changed_existing.tsv``, ``missing_since_previous_manifest.tsv``, and
+    ``incremental_run_summary.txt`` into ``run_dir``. Refreshes the audit
+    ``latest/`` mirror so it now includes the delta files.
+
+    Reads only the historical results CSV and the previous fingerprints; never
+    consults the in-flight checkpoint file. ``--resume`` filtering is applied
+    separately by the caller (sequential filter invariant).
+
+    Returns a dict with keys ``delta`` (set of names), ``already_processed``
+    (list of ``(name, status)``), ``changed_existing`` (list of
+    ``(name, status, prev, curr)``), ``missing`` (list of names), and
+    ``previous_run_id``.
+    """
+    # Imported here to avoid a top-level dependency cycle and keep the
+    # incremental path self-contained.
+    from complex_resolver import _atomic_write_tsv, _refresh_latest
+
+    audit_root = run_dir.parent.parent  # runs/<id>/.. = runs/, runs/.. = audit_root
+    run_id = run_dir.name
+
+    historical_names = _read_skip_existing_names(results_csv_path)
+    had_previous_manifest = bool(previous_fingerprints)
+
+    delta_names: list[str] = []
+    already_rows: list[tuple[str, str]] = []
+    changed_rows: list[
+        tuple[str, str, tuple[int, int, int, int], tuple[int, int, int, int]]
+    ] = []
+
+    for name in sorted(complexes):
+        if name not in historical_names:
+            delta_names.append(name)
+            continue
+        # Already in historical CSV — skip and classify by fingerprint status.
+        prev = previous_fingerprints.get(name)
+        if prev is None:
+            status = (
+                "missing_previous_record"
+                if had_previous_manifest
+                else "no_previous_fingerprint"
+            )
+            already_rows.append((name, status))
+            continue
+        paths = complexes[name]
+        pdb_size, pdb_mtime = _stat_size_mtime(paths.get("pdb"))
+        pkl_size, pkl_mtime = _stat_size_mtime(paths.get("pkl"))
+        if (pdb_size, pdb_mtime, pkl_size, pkl_mtime) == (0, 0, 0, 0):
+            already_rows.append((name, "missing_current_stat"))
+            continue
+        curr = (pdb_size, pkl_size, pdb_mtime, pkl_mtime)
+        if curr == prev:
+            already_rows.append((name, "matched"))
+        else:
+            changed_rows.append((name, "changed", prev, curr))
+
+    current_names = set(complexes.keys())
+    missing_names = sorted(previous_fingerprints.keys() - current_names)
+
+    # Write the four delta TSVs.
+    _atomic_write_tsv(
+        run_dir / "manifest_delta.tsv",
+        ["name"],
+        [[n] for n in delta_names],
+    )
+    _atomic_write_tsv(
+        run_dir / "already_processed.tsv",
+        ["name", "fingerprint_status"],
+        [[n, s] for n, s in already_rows],
+    )
+    _atomic_write_tsv(
+        run_dir / "changed_existing.tsv",
+        [
+            "name", "fingerprint_status",
+            "prev_pdb_size_bytes", "curr_pdb_size_bytes",
+            "prev_pkl_size_bytes", "curr_pkl_size_bytes",
+            "prev_pdb_mtime_ns", "curr_pdb_mtime_ns",
+            "prev_pkl_mtime_ns", "curr_pkl_mtime_ns",
+        ],
+        [
+            [
+                n, s,
+                str(p[0]), str(c[0]),
+                str(p[1]), str(c[1]),
+                str(p[2]), str(c[2]),
+                str(p[3]), str(c[3]),
+            ]
+            for n, s, p, c in changed_rows
+        ],
+    )
+    _atomic_write_tsv(
+        run_dir / "missing_since_previous_manifest.tsv",
+        ["name"],
+        [[n] for n in missing_names],
+    )
+
+    # Self-describing summary file (matches plan schema).
+    summary_lines = [
+        f"skip_existing_reference:         {results_csv_path}",
+        f"historical_interfaces_reference: {output_jsonl if output_jsonl else 'none'}",
+        f"output_csv:                      {output_csv}",
+        f"output_interfaces_jsonl:         {output_jsonl if output_jsonl else 'none'}",
+        f"previous_manifest_run_id:        {previous_run_id}",
+        f"current_manifest_run_id:         {run_id}",
+        (
+            f"counts:                          "
+            f"delta={len(delta_names)}, "
+            f"already_processed={len(already_rows)}, "
+            f"changed_existing={len(changed_rows)}, "
+            f"missing={len(missing_names)}"
+        ),
+    ]
+    (run_dir / "incremental_run_summary.txt").write_text(
+        "\n".join(summary_lines) + "\n", encoding="utf-8",
+    )
+
+    # Refresh latest/ so the mirror includes the delta TSVs and summary too.
+    _refresh_latest(audit_root, run_dir, run_id)
+
+    return {
+        "delta": set(delta_names),
+        "already_processed": already_rows,
+        "changed_existing": changed_rows,
+        "missing": missing_names,
+        "previous_run_id": previous_run_id,
+    }
+
 def _make_progress_bar(total: int, desc: str = "Processing"):
     """Create a tqdm progress bar, or a simple fallback counter.
     Returns:
@@ -1823,6 +2106,22 @@ Examples:
     parser.add_argument("--resume", action="store_true",
                         help="Resume from a previous checkpoint. Implies --checkpoint. "
                              "Already-processed complexes are skipped.")
+    parser.add_argument("--skip-existing", metavar="RESULTS_CSV", default=None,
+                        help="Append-only incremental mode. Reads complex_name "
+                             "from RESULTS_CSV (the historical results.csv — NOT "
+                             "a strict-calibrated subset) and processes only "
+                             "complexes not present there. Pair with "
+                             "--export-interfaces to produce an incremental JSONL. "
+                             "Writes a fingerprinted audit snapshot under "
+                             "data/complex_manifest_audit/runs/<auto_run_id>/. "
+                             "Compatible with --resume but the two flags serve "
+                             "different purposes: --skip-existing is an "
+                             "append-only cross-run filter against a completed "
+                             "historical CSV; --resume is in-flight crash recovery "
+                             "from the current run's checkpoint. If both are "
+                             "supplied, the toolkit first builds the incremental "
+                             "delta from --skip-existing, then removes complexes "
+                             "already completed in the current checkpoint.")
     parser.add_argument("--enrich", metavar="ALIASES_PATH",
                         help="Enrich output with gene symbols, protein names, and "
                              "cross-references using a STRING aliases file.")
@@ -2029,16 +2328,92 @@ def main() -> None:
         print("Note: Verbose per-complex output is suppressed in parallel mode.",
               file=sys.stderr)
 
-    # Discover data files
+    # ── Discover data files (incremental-aware) ─────────────────────────
+    #
+    # Sequential filter invariant: --skip-existing reads ONLY the historical
+    # results CSV; --resume reads ONLY the in-flight checkpoint. They are
+    # independent filters applied in order: skip-existing first, resume second.
+    #
+    # When --skip-existing is active we MUST capture the previous fingerprints
+    # from latest/ BEFORE the resolver runs, because the resolver refreshes
+    # latest/ as a side effect — reading it after would compare the new
+    # manifest to itself and produce an empty changed_existing.tsv.
     print(f"Scanning data directory: {args.dir}")
-    complexes = find_paired_data_files(args.dir)
+
+    skip_existing_active = args.skip_existing is not None
+    incremental_run_dir: Path | None = None
+    delta_filter: set[str] | None = None  # None = no skip-existing filter
+    incremental_delta_info: dict | None = None
+
+    if skip_existing_active:
+        audit_root = _resolve_audit_root()
+        previous_fingerprints = _load_previous_fingerprints(audit_root)
+        previous_run_id = _load_previous_run_id(audit_root)
+        discovery = find_paired_data_files(
+            args.dir, purpose="incremental", return_audit=True,
+        )
+        complexes = discovery.complexes
+        incremental_run_dir = discovery.run_dir
+    else:
+        complexes = find_paired_data_files(args.dir)
+
     print(f"Found {len(complexes)} unique complexes")
 
     if len(complexes) == 0:
         print("No PDB/PKL files found!")
         sys.exit(1)
 
-    # Resume from checkpoint if requested
+    # Compute incremental delta (writes audit TSVs as a side effect).
+    if skip_existing_active and incremental_run_dir is not None:
+        incremental_delta_info = _compute_incremental_delta(
+            complexes,
+            previous_fingerprints,
+            previous_run_id,
+            Path(args.skip_existing),
+            incremental_run_dir,
+            output_csv=args.output,
+            output_jsonl=args.export_interfaces,
+        )
+        delta_filter = incremental_delta_info["delta"]
+        n_delta = len(delta_filter)
+        n_already = len(incremental_delta_info["already_processed"])
+        n_changed = len(incremental_delta_info["changed_existing"])
+        n_missing = len(incremental_delta_info["missing"])
+        print(
+            f"Incremental mode: delta={n_delta:,} new, "
+            f"{n_already:,} already processed, "
+            f"{n_changed:,} changed-existing (audit-only), "
+            f"{n_missing:,} missing-since-previous",
+            file=sys.stderr,
+        )
+        if n_changed:
+            sample_names = [
+                row[0] for row in incremental_delta_info["changed_existing"][:5]
+            ]
+            extra = "..." if n_changed > 5 else ""
+            print(
+                f"  Warning: {n_changed} complex(es) have fingerprints "
+                f"differing from the previous baseline manifest: "
+                f"{', '.join(sample_names)}{extra}. They are recorded in "
+                f"changed_existing.tsv but NOT processed. If those rows "
+                f"matter for downstream figures, run a full re-pipeline "
+                f"rather than an incremental update.",
+                file=sys.stderr,
+            )
+    elif skip_existing_active and incremental_run_dir is None:
+        # Loose / Test_Data layout: resolver did not produce an audit dir.
+        # Honour the historical-CSV filter so the path still works for tests
+        # and ad-hoc local runs; no fingerprinted audit is written.
+        historical_names = _read_skip_existing_names(Path(args.skip_existing))
+        delta_filter = {n for n in complexes if n not in historical_names}
+        print(
+            f"Incremental mode (loose layout, no audit dir): "
+            f"delta={len(delta_filter):,} new",
+            file=sys.stderr,
+        )
+
+    # Resume from checkpoint if requested (in-flight crash recovery — strictly
+    # independent from skip-existing's historical-CSV filter).
     resumed_results: list[dict] = []
     completed_names: set[str] = set()
 
@@ -2051,17 +2426,51 @@ def main() -> None:
         else:
             print("No checkpoint found, starting from scratch")
 
-    # Filter out already-completed complexes
-    sorted_complexes = [
-        (name, paths)
-        for name, paths in sorted(complexes.items())
-        if name not in completed_names
-    ]
+    # Sequential filter: apply skip-existing first (delta_filter), then resume
+    # (completed_names). Both filters are unioned via short-circuit per-name.
+    sorted_complexes = []
+    for name, paths in sorted(complexes.items()):
+        if delta_filter is not None and name not in delta_filter:
+            continue
+        if name in completed_names:
+            continue
+        sorted_complexes.append((name, paths))
 
     if not sorted_complexes and resumed_results:
         print("All complexes already processed - writing final output.")
         results = list(resumed_results)
         results.sort(key=lambda r: r.get('complex_name', ''))
+    elif not sorted_complexes and skip_existing_active:
+        # Empty incremental delta — write header-only CSV + JSONL and exit.
+        # Skip the heavy annotation/enrichment phases since there's no data.
+        print(
+            "Incremental delta is empty — all current complexes are already "
+            f"present in {args.skip_existing}. Writing header-only output "
+            "and exiting cleanly.",
+            file=sys.stderr,
+        )
+        empty_fieldnames = get_csv_fieldnames(
+            include_interface=args.interface,
+            include_pae=args.pae,
+            include_enrichment=bool(args.enrich),
+            include_clustering=args.clustering is not None,
+            include_variants=getattr(args, '_variants_enabled', False),
+            include_stability=getattr(args, '_stability_enabled', False),
+            include_protvar=getattr(args, '_protvar_enabled', False),
+            include_disease=getattr(args, '_disease_enabled', False),
+            include_pathways=getattr(args, '_pathways_enabled', False),
+        )
+        with open(args.output, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(f, fieldnames=empty_fieldnames, extrasaction='ignore')
+            writer.writeheader()
+        if args.export_interfaces:
+            jsonl_path = Path(args.export_interfaces)
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            jsonl_path.write_text("", encoding="utf-8")
+        print(f"Empty results written to: {args.output}")
+        if args.export_interfaces:
+            print(f"Empty interface JSONL written to: {args.export_interfaces}")
+        sys.exit(0)
     else:
         # Process complexes (sequential or parallel)
         results = run_batch_parallel(
