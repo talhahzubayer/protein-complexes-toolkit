@@ -269,45 +269,91 @@ sbatch --export=ALL,LIMIT=30000 hpc_incremental_run.sh
 
 ## 2. Visualisation
 
-Generates publication-quality figures (Figs 1-16, plus supplementary Fig 1b) from the toolkit CSV output, including quality scatter plots, score distributions, interface geometry plots, paradox spotlight, multimer stoichiometry, clustering validation, variant Sankey, variant density, stability cross-validation, disease enrichment, pathway network, and prediction-quality paradox panels. Reads the CSV produced by `toolkit.py` and outputs figures to a directory.
+Generates publication-quality figures from the toolkit CSV output, reorganised under **Decision #49 (12 May 2026)** into 24 distinct figure titles (Fig 0 Corpus Funnel + Figs 1 – 18-supp) emitted as **36 PNG files** at full settings: 12 dual-emit pairs (`*.png` + `*_human.png` covering calibrated dimer vs calibrated dimer × human) plus 12 single-emit figures. Five figures are NEW under Decision #49: Fig 0 Corpus Funnel, Fig 4-supp Strict-vs-PAE-only Confident Contact Fraction, Fig 16 Prediction Quality Paradox (4-panel diagnostic), Fig 17 Screening Landscape (visualises the Decision #43 / #47 two-layer model), Fig 18-supp Partial Reason Dashboard (Decision #45 16-value vocabulary). Reads the CSV produced by `toolkit.py` and outputs figures to `Output/` by default. Population filters are applied via `apply_filter()` from the new `visualise_filters.py` module (14-filter registry whose row counts are audit-aligned against `results_516744.csv`); every figure carries an explicit `[scope; N=...]` subtitle annotation. **Default behaviour: main-text figure pack only** - supplementary figures (`*_supp_*.png`) require an opt-in flag.
+
+### Default emit (main-text pack)
+
+Without any extra flags, `visualise_results.py` emits **Figs 0, 1, 3, 4, 5, 7, 8 (delta histogram), 12, 16, 17** plus any auto-detected required-column figures, on the calibrated dimer scope only.
 
 ### Flag Defaults
 
 | Flag | Default when omitted |
 |---|---|
 | `--output-dir` | `Output/` |
-| `--limit` | No limit (all complexes) |
+| `--limit` | No limit (all PAE heatmaps) |
+| `--corpus-funnel` | **on** (Fig 0 always emitted; disable with `--no-corpus-funnel`) |
+| `--screening-figures` | **on** (Fig 17 always emitted when columns available; disable with `--no-screening-figures`) |
+| `--disorder-scatter` | off (Fig 1b-supp not emitted) |
+| `--density` | off (no KDE contour overlays) |
+| `--multimer-supplement` | off (multimer-exploratory supplementary panels not emitted) |
+| `--include-partial-diagnostics` | off (Fig 18-supp partial-reason dashboard not emitted; implied by `--full-figure-pack`) |
+| `--full-figure-pack` | off (supplementary `*_supp_*` figures gated; flag also implies `--disorder-scatter` + `--include-partial-diagnostics`) |
+| `--human-supplement` | off (no `_human` dual emit; alone: main-text only on human subset) |
+| `--nonhuman-supplement` | off (no `_nonhuman` dual emit; Fig 9 is force-skipped on the non-human pass) |
+| `--legacy-mode` | off (no destructive row-dropping in `load_data`; pre-2026-05-11 behaviour requires the flag) |
+| `--skip-diagnostics` | off (`warn_missing_required_rows` summaries print by default) |
 
 ### Commands
 
 ```bash
-# All figures (reads toolkit CSV output)
+# Default main-text pack on the calibrated-dimer scope (Figs 0, 1, 3, 4, 5, 7, 8, 12, 16, 17)
 python visualise_results.py <OUTPUT_CSV>
 
-# With KDE density contour overlays
+# Full figure pack: every `*_supp_*` figure (Figs 1b-supp, 2-supp, 4-supp, 6-supp, 8-supp, 9-supp, 10-supp,
+# 11-supp, 13-supp, 14A-supp, 14B-supp, 15-supp, 18-supp) in addition to the main pack.
+# Implies --disorder-scatter and --include-partial-diagnostics.
+python visualise_results.py <OUTPUT_CSV> --full-figure-pack
+
+# Dual-population emit: also render the structural figures on the human subset (suffix _human).
+# Alone: main-text structural figures only on human. With --full-figure-pack: main + supplementary on human.
+python visualise_results.py <OUTPUT_CSV> --human-supplement
+
+# Non-human supplement (suffix _nonhuman). Fig 9 is force-skipped on the non-human pass.
+python visualise_results.py <OUTPUT_CSV> --nonhuman-supplement
+
+# Full dissertation set: main-text + every supplementary + human dual-emit + non-human supplement.
+# This is the configuration that produces the 36 PNG files (24 distinct figure titles) in Output/round4_everything/.
+python visualise_results.py <OUTPUT_CSV> --full-figure-pack --human-supplement --nonhuman-supplement
+
+# Disable Fig 0 corpus funnel
+python visualise_results.py <OUTPUT_CSV> --no-corpus-funnel
+
+# Disable Fig 17 screening landscape (Decision #47 two-layer crosstab)
+python visualise_results.py <OUTPUT_CSV> --no-screening-figures
+
+# Explicitly emit Fig 18-supp partial-reason dashboard without enabling the full-figure pack
+python visualise_results.py <OUTPUT_CSV> --include-partial-diagnostics
+
+# With KDE density contour overlays on scatter figures
 python visualise_results.py <OUTPUT_CSV> --density
 
-# With disorder-coloured scatter (Fig 1b)
+# With disorder-coloured scatter supplementary (Fig 1b-supp)
 python visualise_results.py <OUTPUT_CSV> --disorder-scatter
 
 # With per-complex PAE heatmaps (requires models directory for PKL files)
 python visualise_results.py <OUTPUT_CSV> --pae-heatmaps <MODELS_DIR>
 
-# PAE heatmaps limited to first 10 complexes (--limit defaults to no limit)
+# PAE heatmaps capped at the first 10 complexes (--limit defaults to no cap)
 python visualise_results.py <OUTPUT_CSV> --pae-heatmaps <MODELS_DIR> --limit 10
 
 # Custom output directory (--output-dir defaults to Output/)
 python visualise_results.py <OUTPUT_CSV> --output-dir <OUTPUT_DIR>
 
-# Emit supplementary Fig 7 multimer-stoichiometry panel (buckets: A2B / ABC / A2B2 / ABCD / Other)
-# Writes 7_supp_Multimer_Stoichiometry{_human,_nonhuman,}.png in addition to the dimer-validated primary panel.
+# Emit supplementary multimer-exploratory Fig 7 panel (stoichiometry buckets A2B / ABC / A2B2 / ABCD / Other);
+# descriptive only, never dissertation claims.
 python visualise_results.py <OUTPUT_CSV> --multimer-supplement
 
-# All options combined
-python visualise_results.py <OUTPUT_CSV> --density --disorder-scatter --pae-heatmaps <MODELS_DIR> --limit 20 --output-dir <OUTPUT_DIR>
+# Suppress the warn_missing_required_rows() per-figure diagnostics (cleaner stdout for production runs)
+python visualise_results.py <OUTPUT_CSV> --skip-diagnostics
+
+# Re-enable pre-2026-05-11 load_data() row-drop on missing/zero ipTM only.
+# Does NOT restore old v2 thresholds, old captions, or old figure filtering.
+python visualise_results.py <OUTPUT_CSV> --legacy-mode
 ```
 
-> **Multimer scope (post-refactor).** Figs 4, 5, 6, 8, 13 filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}`. Fig 9 is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]`. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** - the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load; the scope is derived from `n_chains` with a one-time warning.
+> **Multimer scope (Decision #49 numbering).** Figs 4, 5, 6-supp, 8, 13-supp filter to `tier_scope == "dimer_validated"` automatically and tag their captions `[dimer-validated]`. Fig 7 primary panel is restricted to `stoichiometry ∈ {"A2","AB"}` (calibrated dimer N=402,840 after exclusions). Fig 9-supp is four panels (best-pair pDockQ, `pdockq_mean`, `pdockq_min`, coherence gap `pdockq − pdockq_min`) and is `[all-N descriptive]` - order-statistic bias diagnostic empirically justifying the Decision #33 `tier_scope = multimer_provisional` non-calibration policy. Multimer supplementary buckets for Fig 7 are opt-in via `--multimer-supplement`. The old `--include-multimers` flag has been **removed** - the script exits non-zero with a message pointing to `--multimer-supplement`. Legacy CSVs without `schema_version` / `tier_scope` still load via `--legacy-mode`; the scope is derived from `n_chains` with a one-time warning.
+
+> **Decision #49 figure numbering reference.** Main-text figures: 0 Corpus Funnel · 1 Quality Scatter · 3 Interface PAE by Tier · 4 Composite Tier Validation · 5 Interface vs Bulk pLDDT · 7 Homo vs Hetero (A2/AB-restricted) · 8 ipTM minus pDockQ histogram · 12 Variant Density vs Composite Confidence · 16 Prediction Quality Paradox (NEW 4-panel) · 17 Screening Landscape (NEW). Supplementary (`*_supp_*`): 1b-supp Disorder Scatter · 2-supp Global PAE Health Check · 4-supp Strict vs PAE-only (NEW) · 6-supp Paradox Spotlight · 8-supp ipTM vs pDockQ scatter · 9-supp Chain-Count Quality Profile · 10-supp Clustering Validation · 11-supp Variant Consequence Flow · 13-supp Stability Predictor Cross-Validation · 14A-supp Disease Prevalence by Tier · 14B-supp Top Disease Categories · 15-supp Reactome Pathway Bar Chart + Network · 18-supp Partial Reason Dashboard (NEW). Dual-emit (have `_human` variants): Figs 1, 1b-supp, 2-supp, 3, 4, 4-supp, 5, 6-supp, 7, 8, 8-supp, 9-supp. Single-emit: Figs 0, 10-supp, 11-supp, 12, 13-supp, 14A-supp, 14B-supp, 15-supp bar + network, 16, 17, 18-supp.
 
 ---
 
@@ -798,7 +844,7 @@ The wrapper runs five numbered phases:
 | `[1/4]` | `python data_registry.py` | Validate all 18 registered data files exist and are non-empty. |
 | `[2/4]` | `python complex_resolver.py` | Discover PDB/PKL pairs in the input tree; write forensic manifest. |
 | `[3/4]` | `python toolkit.py --full-pipeline ...` | Run all phases A-F; write `results.csv`, `interfaces.jsonl`, `pymol_scripts/`. |
-| `[4/4]` | `python visualise_results.py` | Generate the 16-figure suite into `Output/`. |
+| `[4/4]` | `python visualise_results.py` | Generate the Decision #49 figure suite into `Output/` - 24 distinct figure titles / up to 36 PNG files at full settings (`--full-figure-pack --human-supplement --nonhuman-supplement`); default emit is the main-text pack only. |
 
 ### Resource allocation
 
@@ -833,7 +879,7 @@ Pathway annotation dominates the wall-clock budget (~68% of total).
 | `pymol_scripts/shard_NNNN/*.pml` | One scene-managed PyMOL script per High-tier complex; sharded ≤1000 per subdir. |
 | `data/complex_manifest_audit/complex_manifest.tsv` | One row per complete pair (forensic manifest). |
 | `data/complex_manifest_audit/incomplete_inputs.tsv` | One row per skipped complex with a reason code. |
-| `Output/<n>_<figure_name>.png` | The 16-figure dissertation suite. |
+| `Output/<n>_<figure_name>.png` | The Decision #49 figure suite - 24 distinct figure titles, up to 36 PNGs at full settings (12 dual-emit pairs + 12 single-emit), with `_human` / `_nonhuman` species-supplement suffixes when those passes are enabled. |
 
 ### Caveat - SLURM exit code is not the completeness signal
 

@@ -29,6 +29,21 @@ OUTPUT_CSV="results.csv"
 INTERFACES_JSONL="interfaces.jsonl"
 OUTPUT_DIR="Output"
 
+# Visualisation flag set (Decision #49 figure suite).
+# Defaults reproduce the dissertation figure pack: 24 distinct figure titles, 36 PNGs total (12 dual-emit pairs `*.png` + `*_human.png` covering calibrated dimer vs calibrated dimer x human, plus 12 single-emit figures 
+# including the 5 new figures: Fig 0 Corpus Funnel,Fig 4-supp Strict-vs-PAE-only, Fig 16 Prediction Quality Paradox, Fig 17 Screening Landscape, Fig 18-supp Partial Reason Dashboard).
+#
+# --full-figure-pack    : every supplementary (*_supp_*) figure; implies --disorder-scatter
+#                        and --include-partial-diagnostics.
+# --human-supplement    : adds the _human dual-emit pass on top of the calibrated-dimer scope.
+#
+# Override at submit time when you want a different mix, e.g. for a quick smoke pass:
+#     sbatch --export=ALL,VISUALISE_ARGS="" hpc_dataset_run.sh           # main-text pack only
+#     sbatch --export=ALL,VISUALISE_ARGS="--full-figure-pack" hpc_dataset_run.sh  # no _human pass
+#     sbatch --export=ALL,VISUALISE_ARGS="--full-figure-pack --human-supplement --nonhuman-supplement" hpc_dataset_run.sh
+# To suppress Fig 0 or Fig 17, append --no-corpus-funnel / --no-screening-figures.
+VISUALISE_ARGS="${VISUALISE_ARGS:---full-figure-pack --human-supplement}"
+
 # HPC-safe runtime settings
 export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
@@ -59,6 +74,7 @@ echo "Workers:      $WORKERS"
 echo "Output CSV:   $OUTPUT_CSV"
 echo "Interfaces:   $INTERFACES_JSONL"
 echo "Output dir:   $OUTPUT_DIR"
+echo "Visualise:    $VISUALISE_ARGS"
 echo "Python:       $(which python)"
 python --version
 echo "============================================================"
@@ -81,8 +97,9 @@ python -u toolkit.py \
     --output "$OUTPUT_CSV" \
     --export-interfaces "$INTERFACES_JSONL"
 
-echo "[4/4] Generating figures from $OUTPUT_CSV..."
-python -u visualise_results.py "$OUTPUT_CSV" --output-dir "$OUTPUT_DIR"
+echo "[4/4] Generating figures from $OUTPUT_CSV (visualise_args='$VISUALISE_ARGS')..."
+# shellcheck disable=SC2086  # $VISUALISE_ARGS is intentionally word-split so multiple flags become separate argv entries
+python -u visualise_results.py "$OUTPUT_CSV" --output-dir "$OUTPUT_DIR" $VISUALISE_ARGS
 
 echo "============================================================"
 echo "HPC dataset run completed: $(date)"
