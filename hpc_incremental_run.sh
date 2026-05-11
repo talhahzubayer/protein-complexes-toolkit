@@ -8,11 +8,8 @@
 #
 # SLURM wrapper for append-only incremental toolkit runs.
 #
-# Mirrors the environment hardening in hpc_dataset_run.sh but invokes
-# `toolkit.py --full-pipeline --skip-existing results.csv` instead of the full
-# pipeline. Does NOT call complex_resolver.py separately (the toolkit handles
-# discovery + audit) and does NOT auto-render figures (figures must come from
-# the merged CSV, not from incremental-only data).
+# Mirrors the environment hardening in hpc_dataset_run.sh but invokes `toolkit.py --full-pipeline --skip-existing results.csv` instead of the full pipeline. 
+# Does NOT call complex_resolver.py separately (the toolkit handles discovery + audit) and does NOT auto-render figures (figures must come fromthe merged CSV, not from incremental-only data).
 #
 # Step layout:
 #   [0/4] pip check                              — Python package consistency
@@ -22,12 +19,13 @@
 #   [4/4] toolkit --full-pipeline --skip-existing
 #
 # Override behaviour via env vars when re-submitting (e.g. for crash recovery):
-#   RUN_STAMP, JOB_TAG, OUTPUT_CSV, INTERFACES_JSONL — reuse the same paths so
-#                                                     RESUME=1 finds the
-#                                                     existing checkpoint.
-#   HISTORICAL_RESULTS_CSV, HISTORICAL_INTERFACES_JSONL — point at non-default
-#                                                        baseline outputs.
+#   RUN_STAMP, JOB_TAG, OUTPUT_CSV, INTERFACES_JSONL — reuse the same paths so RESUME=1 finds the existing checkpoint.
+#   HISTORICAL_RESULTS_CSV, HISTORICAL_INTERFACES_JSONL — point at non-default baseline outputs.
 #   RESUME=1 — append --resume to the toolkit invocation.
+#   LIMIT — cap chunk size at N complexes (post-skip-existing, pre-resume).
+#           Combine with successive submissions to walk the dataset in memory-bounded chunks; merge incremental CSV/JSONL into HISTORICAL_RESULTS_CSV / HISTORICAL_INTERFACES_JSONL between runs.
+#           IMPORTANT: do NOT modify HISTORICAL_RESULTS_CSV between an original failed attempt and its RESUME=1 retry; the historical baseline must be the same on both runs or chunk boundaries shift. 
+#           The job logs a sha256 of the baseline at start so you can confirm the resume baseline matches the original.
 
 set -euo pipefail
 
@@ -69,6 +67,19 @@ if [[ "${RESUME:-0}" == "1" ]]; then
     RESUME_ARGS+=(--resume)
 fi
 
+# Fail fast on invalid LIMIT before SLURM commits compute; matches the Python-side parser.error("--limit must be a positive integer") check.
+if [[ -n "${LIMIT:-}" ]]; then
+    if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: LIMIT must be a positive integer; got '$LIMIT'" >&2
+        exit 2
+    fi
+fi
+
+LIMIT_ARGS=()
+if [[ -n "${LIMIT:-}" ]]; then
+    LIMIT_ARGS+=(--limit "$LIMIT")
+fi
+
 mkdir -p data/complex_manifest_audit "$MPLCONFIGDIR"
 
 echo "============================================================"
@@ -81,6 +92,14 @@ echo "Historical interfaces: $HISTORICAL_INTERFACES_JSONL"
 echo "Output CSV: $OUTPUT_CSV"
 echo "Output interfaces JSONL: $INTERFACES_JSONL"
 echo "Resume: ${RESUME:-0}"
+echo "Limit: ${LIMIT:-unlimited}"
+# Audit fingerprints for the historical baseline. Compare these between an original failed attempt and its RESUME=1 retry to confirm the baseline did not change underfoot; chunk membership depends on it.
+if [[ -f "$HISTORICAL_RESULTS_CSV" ]]; then
+    sha256sum "$HISTORICAL_RESULTS_CSV" || true
+fi
+if [[ -f "$HISTORICAL_INTERFACES_JSONL" ]]; then
+    sha256sum "$HISTORICAL_INTERFACES_JSONL" || true
+fi
 echo "============================================================"
 
 echo "[0/4] Checking Python package consistency..."
@@ -134,7 +153,8 @@ python -u toolkit.py --full-pipeline \
     --skip-existing "$HISTORICAL_RESULTS_CSV" \
     --output "$OUTPUT_CSV" \
     --export-interfaces "$INTERFACES_JSONL" \
-    "${RESUME_ARGS[@]}"
+    "${RESUME_ARGS[@]}" \
+    "${LIMIT_ARGS[@]}"
 
 echo "============================================================"
 echo "Incremental run complete"

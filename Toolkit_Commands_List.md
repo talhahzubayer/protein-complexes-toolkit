@@ -50,6 +50,7 @@ The main analysis pipeline (`toolkit.py`) processes AlphaFold2-Multimer predicti
 | `--pathways` | `--enrich` |
 | `--pymol` | `--interface --pae` |
 | `--skip-existing PATH` | (none; orthogonal to all other flags) |
+| `--limit N` | (none; orthogonal to all other flags - applied between `--skip-existing` and `--resume` in the filter pipeline `scan -> skip-existing -> sort -> limit -> resume`) |
 | `--full-pipeline` | `--dir` only (activates all flags with default data paths) |
 
 ### Flag Defaults
@@ -68,6 +69,7 @@ The main analysis pipeline (`toolkit.py`) processes AlphaFold2-Multimer predicti
 | `--pymol-output` | `pymol_scripts/` |
 | `--pymol-min-tier` | `High` |
 | `--skip-existing` | None (off by default - pass the path to the historical `results.csv`) |
+| `--limit N` | None (off by default - process all eligible complexes). Positive integer cap; `0` and negatives rejected with `--limit must be a positive integer (omit the flag for unlimited)`. Used to chunk runs under the HPC RAM ceiling - see Decision #46 and the SLURM wrapper's `LIMIT` env-override below. |
 | `--full-pipeline` | Activates `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with module defaults |
 
 ### Progressive Command Build-up
@@ -121,6 +123,29 @@ python toolkit.py --full-pipeline \
     --output results_incremental_2026-05-02_091022_job_33912488.csv \
     --export-interfaces interfaces_incremental_2026-05-02_091022_job_33912488.jsonl \
     --resume
+
+# Chunked-runs via --limit N (Decision #46, 12 May 2026): cap how many complexes
+# are processed in a single invocation. Use when the corpus is too large to fit in
+# RAM as a single all-or-nothing run (HPC job 33774663 OOM-killed at 71% of 356,933
+# active complexes under 80 GB). The filter pipeline is correctness-load-bearing:
+# scan -> skip-existing -> sort -> limit -> resume. The limit is applied BEFORE resume
+# so chunk membership survives a mid-chunk crash and resume - otherwise the resume
+# filter would remove completed rows first and the limit would slide forward,
+# silently pulling rows from the next chunk.
+python toolkit.py --full-pipeline \
+    --dir <MODELS_DIR> \
+    --skip-existing results.csv \
+    --limit 30000 \
+    --output results_incremental_2026-05-12_091022_job_33912490.csv \
+    --export-interfaces interfaces_incremental_2026-05-12_091022_job_33912490.jsonl
+
+# After the chunk completes, merge results_incremental_*.csv into results.csv
+# (and the JSONL pair likewise) using an 8-step atomic-merge protocol (header
+# equality, dup check on complex_name, overlap check, JSONL ⊆ CSV invariant, row
+# count = historical_rows + chunk_rows, backup-before-merge, mv atomic rename),
+# then submit the next chunk. Size chunks by sacct MaxRSS: ≤50 GB -> bump LIMIT to
+# 60000; 50–65 GB -> stay at LIMIT=30000–40000; ≥65 GB -> drop to LIMIT=20000 and
+# reconsider the deferred stash-flow refactor.
 
 # Combined: enrichment + databases + parallel workers + checkpointing + JSONL export
 python toolkit.py --dir <MODELS_DIR> --output <OUTPUT_CSV> --interface --pae --enrich <ALIASES_FILE> --databases <PPI_DIR> --export-interfaces <INTERFACES_JSONL> -w 8 --checkpoint
@@ -199,6 +224,7 @@ Environment overrides (all optional, all default to safe values):
 | `RUN_STAMP`                   | `$(date +%Y-%m-%d_%H%M%S)`                             | Override the date stamp |
 | `JOB_TAG`                     | `job_${SLURM_JOB_ID:-manual}`                          | Override the job tag |
 | `RESUME`                      | `0`                                                    | Set to `1` to append `--resume` to the toolkit invocation |
+| `LIMIT`                       | unset (no chunk cap)                                   | Positive integer (validated against `^[1-9][0-9]*$`); when set, appends `--limit $LIMIT` to the toolkit invocation. Use to chunk runs under the HPC RAM ceiling - Decision #46. Wrapper also logs `sha256sum "$HISTORICAL_RESULTS_CSV"` at job start so chunk membership can be audited across a failed-attempt / retry pair. |
 
 The wrapper runs four preflight steps before invoking the toolkit:
 
@@ -218,13 +244,32 @@ INTERFACES_JSONL=interfaces_incremental_2026-05-02_091022_job_33912488.jsonl \
   hpc_incremental_run.sh
 ```
 
-**Important**: `hpc_incremental_run.sh` always uses `results.csv` unless overridden. After an incremental run succeeds, merge or promote the combined CSV before the next incremental run. Otherwise the wrapper will intentionally rediscover and reprocess the same delta because the skip reference has not changed. See Decision #42 in [Documentation/Research_Project_Roadmap.md](Documentation/Research_Project_Roadmap.md) for the full rationale.
+Chunked-runs for very large corpora (Decision #46): set `LIMIT` to chunk the expansion under the HPC RAM ceiling. Use after the historical `results.csv` has grown past ~100K rows and a single all-or-nothing invocation no longer fits in 80 GB.
+
+```bash
+# First chunk - start conservatively at LIMIT=30000:
+sbatch --export=ALL,LIMIT=30000 hpc_incremental_run.sh
+
+# After the job COMPLETED 0:0, check MaxRSS to size the next chunk:
+sacct -j <jobid> --format=JobID,State,ExitCode,MaxRSS,Elapsed
+#   MaxRSS ≤ 50 GB   -> bump to LIMIT=60000
+#   MaxRSS 50–65 GB  -> stay at LIMIT=30000–40000
+#   MaxRSS ≥ 65 GB   -> drop to LIMIT=20000, reconsider stash refactor
+
+# Merge results_incremental_*.csv into results.csv (and JSONL pair likewise) using
+# the 8-step atomic-merge protocol - header equality, dup check on complex_name,
+# overlap check, JSONL ⊆ CSV invariant, row count, backup-before-merge, mv atomic
+# rename. Then submit the next chunk.
+sbatch --export=ALL,LIMIT=30000 hpc_incremental_run.sh
+```
+
+**Important**: `hpc_incremental_run.sh` always uses `results.csv` unless overridden. After an incremental run succeeds, merge or promote the combined CSV before the next incremental run. Otherwise the wrapper will intentionally rediscover and reprocess the same delta because the skip reference has not changed. See Decision #42 in [Documentation/Research_Project_Roadmap.md](Documentation/Research_Project_Roadmap.md) for the full rationale on `--skip-existing` and Decision #46 for `--limit N`.
 
 ---
 
 ## 2. Visualisation
 
-Generates publication-quality figures (Figs 1-13) from the toolkit CSV output, including quality scatter plots, score distributions, interface geometry plots, and PAE heatmaps. Reads the CSV produced by `toolkit.py` and outputs figures to a directory.
+Generates publication-quality figures (Figs 1-16, plus supplementary Fig 1b) from the toolkit CSV output, including quality scatter plots, score distributions, interface geometry plots, paradox spotlight, multimer stoichiometry, clustering validation, variant Sankey, variant density, stability cross-validation, disease enrichment, pathway network, and prediction-quality paradox panels. Reads the CSV produced by `toolkit.py` and outputs figures to a directory.
 
 ### Flag Defaults
 
@@ -783,7 +828,7 @@ Pathway annotation dominates the wall-clock budget (~68% of total).
 
 | Path | Contents |
 |---|---|
-| `results.csv` | Up to 153-column CSV, one row per complex (~344 MB at 41k rows). |
+| `results.csv` | Up to 154-column CSV, one row per complex (~344 MB at 41k rows; the 516,744-row local corpus produces ~4.0 GB). |
 | `interfaces.jsonl` | One record per complex with computable interface geometry (~22 MB at 41k rows / 28k interfaces). |
 | `pymol_scripts/shard_NNNN/*.pml` | One scene-managed PyMOL script per High-tier complex; sharded ≤1000 per subdir. |
 | `data/complex_manifest_audit/complex_manifest.tsv` | One row per complete pair (forensic manifest). |
@@ -792,7 +837,7 @@ Pathway annotation dominates the wall-clock budget (~68% of total).
 
 ### Caveat - SLURM exit code is not the completeness signal
 
-`sacct` may report State `FAILED` even on a successful run if the end-of-pipeline summary aggregator (`print_summary` at `toolkit.py:1482`) hits a row whose worker raised an exception. The CSV / JSONL / PyMOL outputs are still complete and on disk. Verify completeness with `wc -l results.csv` and the presence of `interfaces.jsonl`, not the SLURM exit code.
+`sacct` may report State `FAILED` even on a successful run for reasons unrelated to the toolkit's work (e.g. SLURM step-script signals after a clean exit). Pre-Decision-#40 and pre-Decision-#45, worker exceptions could also crash the end-of-pipeline summary aggregator; **as of Decision #45 (12 May 2026) worker exceptions are caught by `_safe_process_single_complex` and emit `worker_exception` sentinel rows** (with `quality_tier='Error'`, `quality_tier_v2=None`, `tier_scope=None`, `complex_type=None`, `_error=str(exc)`) that `print_summary` handles via defensive `.get()` access - so this is no longer the primary failure mode. Either way, the CSV / JSONL / PyMOL outputs are complete and on disk even when SLURM reports `FAILED`. Verify completeness with `wc -l results.csv` and the presence of `interfaces.jsonl`, not the SLURM exit code.
 
 ---
 

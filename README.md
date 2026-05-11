@@ -187,7 +187,7 @@ The wrapper sets `module purge && module load python/3.11.6-gcc-13.2.0`, activat
 | Resource | Allocation | Note |
 |---|---|---|
 | CPUs | 16 | Matches `ProcessPoolExecutor(max_workers=16)`. |
-| Memory | 64 GB | Run 1 measured MaxRSS 67 GB on a 41,196-complex corpus - bumped up to **80 GB** for headroom. |
+| Memory | 64 GB | Run 1 measured MaxRSS 67 GB on the 41,196-complex Run 1 corpus - bumped up to **80 GB** for subsequent runs. The corpus has since grown via incremental expansions to **516,744 rows** (`results_516744.csv`, 11 May 2026); at this scale the in-memory `results` list exceeds the 80 GB ceiling in a single shot (HPC job `33774663` OOM-killed at 71 % of 356,933 active complexes), so chunked runs via `--limit N` (see Append-only incremental mode below) are now the production path. |
 | Walltime | 48 h | Run 1 finished in 5h 57m; 48 h gives ~8× safety. |
 
 ### Why the wrapper sets BLAS thread caps
@@ -226,6 +226,31 @@ sbatch --export=ALL,RESUME=1,OUTPUT_CSV=...,INTERFACES_JSONL=... hpc_incremental
 ```
 
 See [Toolkit_Commands_List.md](Toolkit_Commands_List.md) for the full env-override table and per-flag reference.
+
+### Chunked-runs via `--limit N`
+
+When the corpus grows past ~100K rows the toolkit's in-memory `results` list (plus per-row stash data `_sasa_*` / `_cb_coords_*` / `_chain_res_numbers_*` consumed by the post-pass variant annotation) exceeds the 80 GB HPC RAM ceiling in a single shot. HPC job `33774663` OOM-killed at 71 % of an active processing scope of 356,933 complexes; this is what motivated `--limit N`. The flag caps the number of complexes processed per invocation, letting operators submit the corpus in chunks that fit under the RAM ceiling.
+
+```bash
+# Submit a 30,000-complex chunk:
+sbatch --export=ALL,LIMIT=30000 hpc_incremental_run.sh
+
+# After the job completes, check MaxRSS to size the next chunk:
+sacct -j <jobid> --format=JobID,State,ExitCode,MaxRSS,Elapsed
+
+# Decide chunk size for the rest:
+#   MaxRSS ≤ 50 GB  -> bump to LIMIT=60000
+#   MaxRSS 50–65 GB -> stay at LIMIT=30000–40000
+#   MaxRSS ≥ 65 GB  -> drop to LIMIT=20000 and reconsider the stash refactor
+```
+
+`--limit N` rejects `0` and negative values at the argparse layer (`--limit must be a positive integer (omit the flag for unlimited)`). The `LIMIT` env-override in `hpc_incremental_run.sh` is validated against `^[1-9][0-9]*$` and logs `sha256sum "$HISTORICAL_RESULTS_CSV"` at job start so chunk membership can be audited across a failed-attempt / retry pair.
+
+**Correctness-load-bearing filter ordering.** The full filter pipeline is `scan -> skip-existing -> sort -> limit -> resume`. `--limit` is applied **before** `--resume` so chunk membership survives a mid-chunk crash - if the limit were applied after resume, the resume filter would remove completed rows first, the limit would slide forward to fill the gap, and the resumed run would silently pull rows from the next chunk. Two regression tests pin this invariant (`test_select_chunk_applies_limit_before_resume_filter` and `test_limit_chunk_membership_survives_resume`).
+
+**Operator workflow between chunks.** After each chunk completes, merge `results_incremental_<stamp>_<job>.csv` into `results.csv` (and the JSONL pair likewise) using an 8-step atomic-merge protocol with Python stdlib `csv` / `json` (not `awk -F,` - fragile with quoted fields): header equality, dup check on `complex_name`, overlap check, JSONL ⊆ CSV invariant, row count = historical_rows + chunk_rows, backup-before-merge, `mv` atomic rename. Then submit the next chunk. For the ~425K-complex residual that triggered the OOM, this is ~14 submissions at LIMIT=30000 or ~7 at LIMIT=60000.
+
+**Deferred follow-up.** The durable fix is a stash-flow refactor that would strip per-row stash from the in-memory `results` list after checkpoint append and read on-demand from disk during variant annotation. Designed but not implemented; ~1–2 h of work. The chunked-runs workflow above is the production path until the refactor lands.
 
 ---
 
@@ -315,7 +340,7 @@ database_loaders.py ──────────▶    (ENSP/ENSG/UniProt
 
 ### Script Descriptions
 
-The pipeline produces a 41-column base CSV, progressively expandable to 154 columns by stacking optional flags (`--enrich`, `--interface --pae`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI. Compressed inputs (`.pdb.bz2`, `.pkl.bz2`) and the sharded HPC layout are supported transparently.
+The pipeline produces a 41-column base CSV, progressively expandable to 155 columns by stacking optional flags (`--enrich`, `--interface --pae`, `--clustering`, `--variants`, `--stability`, `--protvar`, `--disease`, `--pathways`). JSONL interface export is also available. STRING API validation is on by default across all modules; disable with `--no-api`. Each downstream module also provides a standalone CLI. Compressed inputs (`.pdb.bz2`, `.pkl.bz2`) and the sharded HPC layout are supported transparently.
 
 #### Core Analysis
 
@@ -325,7 +350,7 @@ The pipeline produces a 41-column base CSV, progressively expandable to 154 colu
 
 **interface_analysis.py** - 2-phase interface characterisation. Phase 1 derives structural geometry from PDB alone (contact count, interface fractions, symmetry, density, interface vs bulk pLDDT). Phase 2 adds PAE-aware confident contact identification, composite confidence scoring, and automated quality flags including paradox detection and metric disagreement.
 
-**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, resume from interruption, and implements 2 quality classification schemes (v1 ipTM/pDockQ gating; v2 composite-informed reclassification). Reads paired PDB/PKL files via `complex_resolver.py` and decompresses `.bz2` inputs in-place via `file_io.py` (no staging mirror). Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging, species classification), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). `--full-pipeline` activates all phases with default data paths and validates all data dependencies before processing starts.
+**toolkit.py** - Batch orchestrator that processes directories of AlphaFold2 predictions with multiprocessing, periodic checkpointing, resume from interruption, and implements 2 quality classification schemes (v1 ipTM/pDockQ gating; v2 composite-informed reclassification) plus a separate `composite_screen_status` screening / prioritisation label (`strong_screen_candidate` / `moderate_screen_candidate` / `weak_screen_candidate` / `unavailable`) - the screen is a ranking heuristic, not a tier and not a calibrated probability. Reads paired PDB/PKL files via `complex_resolver.py` and decompresses `.bz2` inputs in-place via `file_io.py` (no staging mirror). Each optional flag activates a downstream module: `--enrich` (gene symbols, protein names, sequences, database source tagging, species classification), `--clustering` (sequence clusters, homologous pairs), `--variants` (variant mapping and structural context), `--stability` (EVE scores), `--protvar` (AlphaMissense + FoldX), `--disease` (UniProt annotations), `--pathways` (Reactome + network analysis), `--pymol` (PyMOL script generation). `--full-pipeline` activates all phases with default data paths and validates all data dependencies before processing starts.
 
 **visualise_results.py** - Generates up to 16 figures (+ 1b supplementary) with adaptive scatter sizing for large datasets and optional KDE density contour overlays. Figures are generated automatically based on which columns are present in the CSV (e.g., variant figures from `--variants`, pathway figures from `--pathways`). When `species_status` is present, structural figures (1-9) are emitted per species subset (`<n>_<name>_human.png`, `<n>_<name>_nonhuman.png`); enrichment figures use reviewed+TrEMBL (Figs 10-12) or reviewed-only (Figs 13-16) depending on database coverage.
 
@@ -436,23 +461,23 @@ Homodimer, isoform, and multi-chain naming patterns are also handled. Layouts 2 
 
 ## Output
 
-### CSV (41 base columns, up to 154 with all features)
+### CSV (41 base columns, up to 155 with all features)
 
-Progressive column counts as flags are stacked (verified against the production `results.csv` produced by Run 1):
+Progressive column counts as flags are stacked.
 
 | Flag combination | Column count |
 |---|---|
 | Base (no flags) | 41 |
 | `--interface` | 65 |
-| `--interface --pae` | 83 |
+| `--interface --pae` | 84 |
 | `--enrich` (alone) | 53 |
-| `--interface --pae --enrich` | 95 |
-| `+ --clustering` | 102 |
-| `+ --variants` | 114 |
-| `+ --stability` | 122 |
-| `+ --protvar` | 130 |
-| `+ --disease` | 144 |
-| `+ --pathways` (= `--full-pipeline`) | **154** |
+| `--interface --pae --enrich` | 96 |
+| `+ --clustering` | 103 |
+| `+ --variants` | 115 |
+| `+ --stability` | 123 |
+| `+ --protvar` | 131 |
+| `+ --disease` | 145 |
+| `+ --pathways` (= `--full-pipeline`) | **155** |
 
 The main output CSV groups columns into:
 
@@ -466,8 +491,8 @@ The main output CSV groups columns into:
 | **Interface pLDDT** | interface_plddt_a/b (per-chain), interface_plddt_combined, bulk_plddt_combined, interface_vs_bulk_delta, interface_plddt_high_fraction |
 | **PAE Features (best pair)** | interface_pae_mean (bidirectional max), interface_pae_median, n_pae_confident_contacts, pae_confident_contact_fraction (PAE<5A), n_strict_confident_contacts, strict_confident_contact_fraction (PAE<5A AND both pLDDT>=70; used by composite), cross_chain_pae_mean, interface_pae_forward_mean, interface_pae_reverse_mean, interface_pae_directional_delta_mean/_max, n_confident_residues_a/b |
 | **All-Pairs Aggregates** | pair_metrics (JSON list, length `N*(N-1)/2`), pdockq_mean, pdockq_min, pdockq_whole_complex (recomputed from all inter-chain contacts, not a mean), contact_count_total, interface_plddt_mean, symmetry_mean, symmetry_min, pae_confident_fraction_mean, strict_confident_fraction_mean (aggregates are contact-weighted; zero-contact pairs excluded from weighted means but still appear in `pair_metrics`) |
-| **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2 |
-| **Audit / Data Availability** | has_pdb, has_pkl, geometry_available (`True` iff pair enumeration succeeded - Decision #34 contract), composite_is_calibrated (`True` only when the composite was actually computable: `tier_scope == "dimer_validated"`, every composite input present, AND `partial_reason` empty), partial_reason (row-level recoverability diagnostic - empty for valid rows, otherwise one of `unreadable_pdb_or_structure_input` / `missing_pkl_or_pkl_unreadable` / `no_positive_interface_contacts` / `missing_required_composite_inputs`. Together with `composite_is_calibrated` these are the dissertation-safe filters: a calibrated quality claim sits inside `composite_is_calibrated == True`, and any excluded row is recoverable to a known reason), plddt_source (`pdb` / `pkl` - diagnostic for which input the pLDDT array was read from) |
+| **Composite Scoring** | interface_confidence_score, quality_tier, quality_tier_v2, composite_screen_status (screening / prioritisation label: `strong_screen_candidate` ≥ 0.85, `moderate_screen_candidate` 0.63–0.85, `weak_screen_candidate` < 0.63, `unavailable`) |
+| **Audit / Data Availability** | has_pdb, has_pkl, geometry_available (`True` iff pair enumeration succeeded), composite_is_calibrated (`True` only when the composite was actually computable: `tier_scope == "dimer_validated"`, every composite input present, AND `partial_reason` empty), partial_reason (row-level recoverability diagnostic - empty for valid rows, otherwise one of **16 canonical values** covering granular PDB classes (`pdb_io_error`, `pdb_decompression_error`, `pdb_parse_error`, `pdb_no_chains`), granular PKL classes (`pkl_io_error`, `pkl_decompression_error`, `pkl_unpickle_error`, `pkl_loaded_missing_iptm`, `pkl_loaded_missing_pae`), the geometry/composite reasons (`no_positive_interface_contacts`, `missing_required_composite_inputs`), the parallel-worker `worker_exception` sentinel, and three legacy fallback aliases (`unreadable_pdb_or_structure_input`, `missing_pkl_or_pkl_unreadable`, `incomplete_input`). Values are stamped via a priority-gated helper (`_stamp_partial_reason`) so the dominant failure wins when several apply; `worker_exception` rows are produced by `_safe_process_single_complex` on uncaught exceptions and carry `quality_tier='Error'`, `quality_tier_v2=None`, `tier_scope=None`, `complex_type=None`, `_error=str(exc)`. Together with `composite_is_calibrated` these are the dissertation-safe filters: a calibrated quality claim sits inside `composite_is_calibrated == True`, and any excluded row is recoverable to a known reason), plddt_source (`pdb` / `pkl` - diagnostic for which input the pLDDT array was read from) |
 | **Flags** | interface_flags (8 automated flags including paradox detection) |
 | **Enrichment** (with `--enrich`) | gene_symbol_a/b, protein_name_a/b, ensembl_id_a/b, secondary_accessions_a/b, database_source, evidence_types, sequence_a/b |
 | **Clustering** (with `--clustering`) | sequence_cluster_ids, sequence_cluster_count, shared_cluster_ids, shared_cluster_count, homologous_pairs, n_homologous_pairs, homology_bitscore |

@@ -43,8 +43,10 @@ Usage:
 """
 
 import gc
+import gzip
 import math
 import os
+import pickle
 import sys
 import argparse
 import csv
@@ -111,6 +113,11 @@ SUBSTANTIAL_DISORDER_FRACTION = 0.3
 # PAE threshold
 PAE_CONFIDENT_THRESHOLD = 5.0
 
+# STRING get_string_ids batch size for the missing-protein pre-resolve in
+# enrich_results. 200 stays well under the API's documented per-request
+# identifier ceiling and keeps each request body small for retry safety.
+ENRICH_API_BATCH_SIZE = 200
+
 # Schema version marker - bump when column semantics change.
 # Readers must treat a missing schema_version column as "legacy" (pre-refactor).
 SCHEMA_VERSION = "multimer_v1"
@@ -119,12 +126,81 @@ SCHEMA_VERSION = "multimer_v1"
 # Empty string is the "fully calibrated, nothing wrong" sentinel — chosen for
 # CSV friendliness over None (csv.DictWriter renders None as empty anyway, but
 # downstream pandas reads NaN; a literal "" round-trips as "" without coercion).
+#
+# The vocabulary is a controlled single-column failure taxonomy. Any non-empty
+# value excludes the row from recoverable / calibrated analyses. Values are
+# stamped via `_stamp_partial_reason` (priority-aware) so that the dominant
+# failure reason wins when several apply to the same row.
 PARTIAL_REASON_NONE = ""
-PARTIAL_REASON_UNREADABLE_PDB = "unreadable_pdb_or_structure_input"
-PARTIAL_REASON_UNREADABLE_PKL = "missing_pkl_or_pkl_unreadable"
-PARTIAL_REASON_ZERO_CONTACTS = "no_positive_interface_contacts"
-PARTIAL_REASON_MISSING_COMPOSITE = "missing_required_composite_inputs"
-PARTIAL_REASON_INCOMPLETE = "incomplete_input"
+
+# PDB / structure input
+PARTIAL_REASON_PDB_IO_ERROR             = "pdb_io_error"
+PARTIAL_REASON_PDB_DECOMPRESSION_ERROR  = "pdb_decompression_error"
+PARTIAL_REASON_PDB_PARSE_ERROR          = "pdb_parse_error"
+PARTIAL_REASON_PDB_NO_CHAINS            = "pdb_no_chains"
+
+# PKL / AF2 confidence input
+PARTIAL_REASON_PKL_IO_ERROR             = "pkl_io_error"
+PARTIAL_REASON_PKL_DECOMPRESSION_ERROR  = "pkl_decompression_error"
+PARTIAL_REASON_PKL_UNPICKLE_ERROR       = "pkl_unpickle_error"
+PARTIAL_REASON_PKL_LOADED_MISSING_IPTM  = "pkl_loaded_missing_iptm"
+PARTIAL_REASON_PKL_LOADED_MISSING_PAE   = "pkl_loaded_missing_pae"
+
+# Interface / composite computation
+PARTIAL_REASON_ZERO_CONTACTS            = "no_positive_interface_contacts"
+PARTIAL_REASON_MISSING_COMPOSITE        = "missing_required_composite_inputs"
+
+# Sentinel / catch-all
+PARTIAL_REASON_WORKER_EXCEPTION         = "worker_exception"
+
+# Backward-compat aliases (legacy fallbacks for genuinely unclassified Exception
+# cases inside _extract_pkl_metrics / _compute_pdockq_and_chain_info).
+PARTIAL_REASON_UNREADABLE_PDB           = "unreadable_pdb_or_structure_input"
+PARTIAL_REASON_UNREADABLE_PKL           = "missing_pkl_or_pkl_unreadable"
+
+# Pre-existing, untouched
+PARTIAL_REASON_INCOMPLETE               = "incomplete_input"
+
+
+# Priority map for `_stamp_partial_reason`. Higher number wins.
+# Existing precedence (PDB > PKL > zero contacts > composite-missing) is
+# preserved by the relative ordering.
+PARTIAL_REASON_PRIORITY = {
+    PARTIAL_REASON_WORKER_EXCEPTION:         100,
+    PARTIAL_REASON_PDB_DECOMPRESSION_ERROR:   90,
+    PARTIAL_REASON_PDB_IO_ERROR:              85,
+    PARTIAL_REASON_PDB_PARSE_ERROR:           80,
+    PARTIAL_REASON_PDB_NO_CHAINS:             75,
+    PARTIAL_REASON_UNREADABLE_PDB:            72,  # legacy fallback
+    PARTIAL_REASON_PKL_DECOMPRESSION_ERROR:   70,
+    PARTIAL_REASON_PKL_IO_ERROR:              65,
+    PARTIAL_REASON_PKL_UNPICKLE_ERROR:        60,
+    PARTIAL_REASON_UNREADABLE_PKL:            58,  # legacy fallback
+    PARTIAL_REASON_ZERO_CONTACTS:             40,
+    PARTIAL_REASON_PKL_LOADED_MISSING_IPTM:   35,
+    PARTIAL_REASON_PKL_LOADED_MISSING_PAE:    30,
+    PARTIAL_REASON_MISSING_COMPOSITE:         20,
+    PARTIAL_REASON_INCOMPLETE:                10,
+    PARTIAL_REASON_NONE:                       0,
+}
+
+
+def _stamp_partial_reason(row: dict, reason: Optional[str]) -> None:
+    """Stamp a non-empty partial reason if it strictly outranks the current one.
+
+    Production code should call this helper rather than assigning
+    ``row['partial_reason']`` directly. The helper:
+      * ignores empty / None reasons,
+      * preserves the existing precedence (PDB > PKL > zero contacts > composite),
+      * uses strict ``>`` so equal-priority overwrites do not churn.
+    """
+    if not reason:
+        return
+    current = row.get("partial_reason") or PARTIAL_REASON_NONE
+    current_priority = PARTIAL_REASON_PRIORITY.get(current, 0)
+    new_priority = PARTIAL_REASON_PRIORITY.get(reason, 0)
+    if current == PARTIAL_REASON_NONE or new_priority > current_priority:
+        row["partial_reason"] = reason
 
 
 def _has_value(value) -> bool:
@@ -143,6 +219,21 @@ def _has_value(value) -> bool:
     except (TypeError, ValueError, OverflowError):
         # Non-numeric truthy values (e.g. populated strings, dicts) count as present.
         return True
+
+
+def _coerce_bool(value) -> bool:
+    """Robust truthy-cast that handles CSV-loaded string sentinels.
+
+    bool("False") is True in Python; this helper treats "False"/"0"/""/None as
+    False so the screening function and the calibration-flag predicate cannot
+    be silently fooled by a string-typed CSV column.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in {"true", "1", "yes", "y"}
 
 # CSV base columns that are always present
 CSV_FIELDNAMES_BASE = [
@@ -228,6 +319,11 @@ CSV_FIELDNAMES_INTERFACE_PAE = [
     'n_confident_residues_a', 'n_confident_residues_b',
     'interface_confidence_score',
     'quality_tier_v2',
+    # Composite screening interpretation (Decision #43): strong / moderate / weak
+    # / unavailable, derived from interface_confidence_score + calibration flag +
+    # headline metrics. Decoupled from quality_tier_v2 - this is a prioritisation
+    # label, not a tier and not a probability.
+    'composite_screen_status',
     # Multimer_v1: contact-weighted PAE aggregates across all pairs
     'pae_confident_fraction_mean', 'strict_confident_fraction_mean',
     # Multimer_v1 scope flag. True only for N=2 - the existing composite uses
@@ -579,20 +675,33 @@ def classify_prediction_quality(iptm_score: Optional[float], pdockq_score: Optio
     else:
         return 'Low'
 
-# Interface confidence thresholds for tier reclassification - calibrated from the 9,573-complex
-# dataset scored with the PRE-REVISION composite (PAE-only fraction + linear pLDDT/100 +
-# one-directional PAE indexing). The 2026-04 methodological revision of
-# compute_interface_confidence() (strict fraction, band-aware pLDDT, bidirectional PAE max)
-# shifts the composite distribution downward; these thresholds are NOT recalibrated in this
-# pass. Expect tier counts to change. Recalibration is a deferred follow-up task - it
-# requires regenerating the 9,573-complex CSV and re-running the percentile analysis.
-UPGRADE_LOW_THRESHOLD = 0.64     # Low    -> High when composite score >= 0.64 (90th percentile of Low-tier scores)
-UPGRADE_MEDIUM_THRESHOLD = 0.80  # Medium -> High when composite score >= 0.80 (90th percentile of Medium-tier scores)
-DOWNGRADE_HIGH_THRESHOLD = 0.65  # High   -> Medium when composite score <= 0.65 (10th percentile of High-tier scores)
+# Interface confidence thresholds for tier reclassification.
+# The constants now reflect Decision #38 adoption after the 9K / 41K / 60K
+# recalibration comparison. UPGRADE_LOW is held from the pre-recalibration set;
+# UPGRADE_MEDIUM and DOWNGRADE_HIGH are the post-recalibration values.
+UPGRADE_LOW_THRESHOLD = 0.64     # Low    -> High when composite score >= 0.64 (Decision #38 adopted; held from pre-recalibration)
+UPGRADE_MEDIUM_THRESHOLD = 0.85  # Medium -> High when composite score >= 0.85 (Decision #38 adopted; was 0.80)
+DOWNGRADE_HIGH_THRESHOLD = 0.63  # High   -> Medium when composite score <= 0.63 (Decision #38 adopted; was 0.65)
+
+# Composite screening thresholds - interpretation of interface_confidence_score
+# as a prioritisation signal, NOT a quality tier and NOT a probability.
+# A row with composite >= 0.85 is a "strong" screening candidate; 0.63-0.85 is
+# "moderate"; below 0.63 is "weak". Decoupled from quality_tier_v2 so the two
+# layers can be reasoned about separately (Roadmap Decisions #38, #43).
+COMPOSITE_SCREEN_STRONG_THRESHOLD = 0.85
+COMPOSITE_SCREEN_MODERATE_THRESHOLD = 0.63
+
+COMPOSITE_SCREEN_STATUS_STRONG = "strong_screen_candidate"
+COMPOSITE_SCREEN_STATUS_MODERATE = "moderate_screen_candidate"
+COMPOSITE_SCREEN_STATUS_WEAK = "weak_screen_candidate"
+COMPOSITE_SCREEN_STATUS_UNAVAILABLE = "unavailable"
 
 def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Optional[float], interface_confidence: Optional[float] = None) -> str:
     """Enhanced quality classification incorporating interface confidence.
     Starts from the original 2-metric tier and adjusts based on the composite interface confidence score.
+    Decision #38 adopted thresholds: upgrade Low -> High at composite >= 0.64;
+    upgrade Medium -> High at composite >= 0.85; downgrade High -> Medium at
+    composite <= 0.63.
     This catches:
       - False negatives: Low/Medium tier with excellent interface evidence (pDockQ is size-sensitive and can penalise small genuine interfaces)
       - False positives: High tier where interface metrics are poor (headline scores mask a weak binding site)
@@ -618,12 +727,45 @@ def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Op
     # Downgrade: poor interface despite good headline metrics
     if base_tier == 'High' and interface_confidence <= DOWNGRADE_HIGH_THRESHOLD:
         return 'Medium'
-    
+
     return base_tier
+
+
+def classify_composite_screen_status(
+    *,
+    composite_is_calibrated,
+    interface_confidence_score,
+    iptm,
+    pdockq,
+) -> str:
+    """Screening-status label for a row's composite interface confidence.
+
+    This is a prioritisation / screening label, NOT a quality tier and NOT a
+    probability. Returns "unavailable" when the row is outside the calibrated
+    dimer scope, when the composite is unavailable, or when either headline
+    metric required for apples-to-apples interpretation (ipTM, pDockQ) is
+    missing. Accepts both Python booleans and CSV-loaded string sentinels for
+    composite_is_calibrated via _coerce_bool, so the same function is safe to
+    call from the toolkit in-process row path AND from the backfill / audit
+    CSV-row paths.
+    """
+    if not _coerce_bool(composite_is_calibrated):
+        return COMPOSITE_SCREEN_STATUS_UNAVAILABLE
+    if not _has_value(interface_confidence_score):
+        return COMPOSITE_SCREEN_STATUS_UNAVAILABLE
+    if not _has_value(iptm) or not _has_value(pdockq):
+        return COMPOSITE_SCREEN_STATUS_UNAVAILABLE
+    score = float(interface_confidence_score)
+    if score >= COMPOSITE_SCREEN_STRONG_THRESHOLD:
+        return COMPOSITE_SCREEN_STATUS_STRONG
+    if score >= COMPOSITE_SCREEN_MODERATE_THRESHOLD:
+        return COMPOSITE_SCREEN_STATUS_MODERATE
+    return COMPOSITE_SCREEN_STATUS_WEAK
+
 
 #------------------------------------------------------Core Processing---------------------------------------------------------------------------------
 
-def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interface_pae: bool, verbose: bool) -> tuple[Optional[np.ndarray], bool]:
+def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interface_pae: bool, verbose: bool) -> tuple[Optional[np.ndarray], Optional[str]]:
     """Extract ipTM, pTM, pLDDT metrics from a PKL file and optionally retain the PAE matrix.
     Args:
         file_paths: Dict with optional 'pdb' and 'pkl' Path entries.
@@ -631,17 +773,24 @@ def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interfac
         run_interface_pae: Whether to retain the PAE matrix for downstream interface analysis.
         verbose: Whether to print per-step progress.
     Returns:
-        Tuple of (pae_matrix or None, pkl_load_failed). The boolean is True
-        only when the loader actually raised (caller stamps the partial_reason
-        diagnostic from this signal — distinct from "PKL absent" or "PKL
-        readable but missing fields").
+        Tuple of (pae_matrix or None, partial_reason).
+        ``partial_reason`` is ``None`` on full success. On failure or
+        post-load incompleteness it is the granular ``PARTIAL_REASON_*``
+        constant the caller should stamp via ``_stamp_partial_reason``.
+        Distinguishes "loader raised" from "PKL absent" from "PKL readable
+        but missing required fields" using stdlib exception types and the
+        compressed-file suffix.
     """
     pae_matrix = None
     if 'pkl' not in file_paths:
-        return pae_matrix, False
+        return pae_matrix, None
+
+    pkl_path = file_paths['pkl']
+    suffixes = Path(pkl_path).suffixes
+    is_compressed = ".bz2" in suffixes or ".gz" in suffixes
 
     try:
-        prediction_result = load_pkl_without_jax(file_paths['pkl'])
+        prediction_result = load_pkl_without_jax(pkl_path)
         pkl_metrics = extract_metrics(prediction_result)
         row.update(pkl_metrics)
         row['plddt_source'] = 'pkl'
@@ -651,11 +800,43 @@ def _extract_pkl_metrics(file_paths: dict[str, Path], row: dict, *, run_interfac
             pae_matrix = np.asarray(prediction_result['predicted_aligned_error'])
         if verbose:
             print(f"  PKL -> ipTM={pkl_metrics.get('iptm', 'N/A')}")
-        return pae_matrix, False
 
+        # Post-load completeness diagnostics. Distinguish between "loader raised"
+        # (handled below) and "loader returned but the row would be uncalibratable"
+        # because a required field is absent. Pin the cause at the source rather
+        # than letting `_finalise_calibration_flag` see only an opaque "composite
+        # missing".
+        if not _has_value(pkl_metrics.get('iptm')):
+            return pae_matrix, PARTIAL_REASON_PKL_LOADED_MISSING_IPTM
+        if run_interface_pae and pae_matrix is None:
+            return pae_matrix, PARTIAL_REASON_PKL_LOADED_MISSING_PAE
+        return pae_matrix, None
+
+    except PermissionError as error:
+        print(f"  Warning: PKL permission error for {pkl_path}: {error}", file=sys.stderr)
+        return pae_matrix, PARTIAL_REASON_PKL_IO_ERROR
+    except (EOFError, pickle.UnpicklingError) as error:
+        # EOFError on a compressed file usually indicates truncated decompression;
+        # on an uncompressed file it indicates truncated pickle. Disambiguate by suffix.
+        print(f"  Warning: PKL truncated/unpickle error for {pkl_path}: {error}", file=sys.stderr)
+        return pae_matrix, (PARTIAL_REASON_PKL_DECOMPRESSION_ERROR
+                            if is_compressed
+                            else PARTIAL_REASON_PKL_UNPICKLE_ERROR)
+    except gzip.BadGzipFile as error:
+        print(f"  Warning: PKL gzip decompression failed for {pkl_path}: {error}", file=sys.stderr)
+        return pae_matrix, PARTIAL_REASON_PKL_DECOMPRESSION_ERROR
+    except OSError as error:
+        # bz2 corrupt streams surface as OSError (`bz2.BZ2File` is a class, not
+        # an exception). Disambiguate by suffix.
+        print(f"  Warning: PKL OSError for {pkl_path}: {error}", file=sys.stderr)
+        return pae_matrix, (PARTIAL_REASON_PKL_DECOMPRESSION_ERROR
+                            if is_compressed
+                            else PARTIAL_REASON_PKL_IO_ERROR)
     except Exception as error:
-        print(f"  Warning: PKL extraction failed for {file_paths['pkl']}: {error}", file=sys.stderr)
-        return pae_matrix, True
+        # Genuinely unclassified — fall back to the legacy alias so downstream
+        # callers still see a non-empty reason.
+        print(f"  Warning: PKL extraction failed for {pkl_path}: {error}", file=sys.stderr)
+        return pae_matrix, PARTIAL_REASON_UNREADABLE_PKL
 
 def _extract_pdb_plddt(file_paths: dict[str, Path], row: dict, *, verbose: bool) -> None:
     """Extract per-residue pLDDT from PDB b-factors as a fallback when PKL is unavailable.
@@ -688,7 +869,7 @@ def _compute_pdockq_and_chain_info(
     *,
     run_interface_pae: bool,
     verbose: bool,
-) -> tuple[Optional[object], Optional[object], Optional[tuple], Optional[tuple], Optional[list], Optional[dict]]:
+) -> tuple[Optional[object], Optional[object], Optional[tuple], Optional[tuple], Optional[list], Optional[dict], Optional[str]]:
     """Read PDB chain structure, find the best interacting chain pair, and compute pDockQ.
     Also pre-computes PAE chain offsets and CB-to-CA maps needed for downstream interface analysis.
     Args:
@@ -699,10 +880,11 @@ def _compute_pdockq_and_chain_info(
         verbose: Whether to print per-step progress.
     Returns:
         Tuple of (contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps,
-        pair_results, all_chain_offsets). Any element may be None if the
-        corresponding step was skipped or failed. pair_results is the list of
-        per-pair geometry records from compute_all_chain_pairs; all_chain_offsets
-        maps every chain id to its PAE row/column offset (for PAE pair aggregation).
+        pair_results, all_chain_offsets, partial_reason). Any of the first six
+        elements may be ``None`` if the corresponding step was skipped or failed.
+        ``partial_reason`` is the granular PARTIAL_REASON_* constant the caller
+        should stamp on classification failure (or ``None`` on success / when
+        no PDB was supplied).
     """
     contact_result = None
     chain_info = None
@@ -710,15 +892,21 @@ def _compute_pdockq_and_chain_info(
     cb_to_ca_maps = None
     pair_results: Optional[list] = None
     all_chain_offsets: Optional[dict] = None
+    failure_reason: Optional[str] = None
 
     # n_chains is authoritatively set by parse_complex_identity / _populate_identity_fields
     # (filename_n_chains when no PDB, else PDB chain count, with mismatch flagging).
 
     if 'pdb' not in file_paths:
-        return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets
+        return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets, failure_reason
 
     try:
         chain_info = read_pdb_with_chain_info(str(file_paths['pdb']))
+        if len(chain_info.chain_ids) == 0:
+            # Parsed but empty — surface as no_chains rather than parse_error.
+            failure_reason = PARTIAL_REASON_PDB_NO_CHAINS
+            chain_info = None
+            return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets, failure_reason
         if len(chain_info.chain_ids) >= 2:
             # Find the best interacting chain pair - also handles multi-chain
             ch_a, ch_b, contact_result = find_best_chain_pair(chain_info, t=8)
@@ -776,15 +964,54 @@ def _compute_pdockq_and_chain_info(
                 print(f"  PDB -> pDockQ={row['pdockq']}")
         else:
             print(f"  Warning: <2 chains in {file_paths['pdb']}", file=sys.stderr)
+            # Single-chain parse counts as "no usable chains for interface analysis".
+            failure_reason = PARTIAL_REASON_PDB_NO_CHAINS
 
+    except FileNotFoundError as error:
+        print(f"  Warning: PDB not found {file_paths['pdb']}: {error}", file=sys.stderr)
+        contact_result = None
+        chain_info = None
+        pair_results = None
+        all_chain_offsets = None
+        failure_reason = PARTIAL_REASON_PDB_IO_ERROR
+    except PermissionError as error:
+        print(f"  Warning: PDB permission error for {file_paths['pdb']}: {error}", file=sys.stderr)
+        contact_result = None
+        chain_info = None
+        pair_results = None
+        all_chain_offsets = None
+        failure_reason = PARTIAL_REASON_PDB_IO_ERROR
+    except (ValueError, IndexError, KeyError) as error:
+        contact_result = None
+        chain_info = None
+        pair_results = None
+        all_chain_offsets = None
+        msg = str(error).lower()
+        if "no chains" in msg or "empty" in msg:
+            failure_reason = PARTIAL_REASON_PDB_NO_CHAINS
+        else:
+            failure_reason = PARTIAL_REASON_PDB_PARSE_ERROR
+        print(f"  Warning: PDB parse error for {file_paths['pdb']}: {error}", file=sys.stderr)
+    except OSError as error:
+        # By the time this helper runs the PDB has already been decompressed
+        # (Section 4 of the plan), so OSError here is genuinely an I/O failure
+        # against the on-disk decompressed file rather than a corrupt stream.
+        print(f"  Warning: PDB OSError for {file_paths['pdb']}: {error}", file=sys.stderr)
+        contact_result = None
+        chain_info = None
+        pair_results = None
+        all_chain_offsets = None
+        failure_reason = PARTIAL_REASON_PDB_IO_ERROR
     except Exception as error:
+        # Genuinely unclassified — fall back to the legacy alias.
         print(f"  Warning: pDockQ failed for {file_paths['pdb']}: {error}", file=sys.stderr)
         contact_result = None
         chain_info = None
         pair_results = None
         all_chain_offsets = None
+        failure_reason = PARTIAL_REASON_UNREADABLE_PDB
 
-    return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets
+    return contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets, failure_reason
 
 
 def _compute_interface_features(
@@ -975,13 +1202,15 @@ def _finalise_calibration_flag(row: dict, *, run_interface_pae: bool) -> None:
 
     # Stamp MISSING_COMPOSITE only when interface+PAE was attempted and the
     # row should have been calibrated but isn't. Skip basic-mode and N>2.
+    # _stamp_partial_reason's priority map enforces the existing gating: any
+    # prior reason outranks MISSING_COMPOSITE so the stamp is a no-op when an
+    # upstream failure has already been recorded.
     if (
         run_interface_pae
         and row.get('tier_scope') == 'dimer_validated'
         and not row['composite_is_calibrated']
-        and row.get('partial_reason') in (PARTIAL_REASON_NONE, None)
     ):
-        row['partial_reason'] = PARTIAL_REASON_MISSING_COMPOSITE
+        _stamp_partial_reason(row, PARTIAL_REASON_MISSING_COMPOSITE)
 
 
 def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, run_interface: bool = False, run_interface_pae: bool = False, export_interfaces: bool = False, stash_variant_data: bool = False, verbose: bool = False) -> dict:
@@ -1002,12 +1231,33 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
     # inside read_pdb_with_chain_info_New, and the SASA parser) all consume
     # plain-disk text instead of re-decompressing a slow sequential codec each
     # time. Plain .pdb inputs pass through unchanged.
+    has_pdb_originally = 'pdb' in file_paths
+    pdb_decompression_failure: Optional[str] = None
+
     with ExitStack() as _pdb_stack:
-        if 'pdb' in file_paths:
-            effective_pdb = _pdb_stack.enter_context(
-                decompressed_pdb_view(file_paths['pdb'])
-            )
-            file_paths = {**file_paths, 'pdb': effective_pdb}
+        if has_pdb_originally:
+            original_pdb_path = file_paths['pdb']
+            suffixes = Path(original_pdb_path).suffixes
+            is_compressed = ".bz2" in suffixes or ".gz" in suffixes
+            try:
+                effective_pdb = _pdb_stack.enter_context(
+                    decompressed_pdb_view(original_pdb_path)
+                )
+                file_paths = {**file_paths, 'pdb': effective_pdb}
+            except (gzip.BadGzipFile, EOFError, OSError) as error:
+                # Corrupt compressed stream or uncompressed I/O failure during
+                # decompression. Record the failure, drop 'pdb' from file_paths
+                # so downstream readers don't try the corrupt original, but keep
+                # has_pdb=True (the resolver did discover a PDB file).
+                print(
+                    f"  Warning: PDB decompression failed for {original_pdb_path}: {error}",
+                    file=sys.stderr,
+                )
+                pdb_decompression_failure = (
+                    PARTIAL_REASON_PDB_DECOMPRESSION_ERROR if is_compressed
+                    else PARTIAL_REASON_PDB_IO_ERROR
+                )
+                file_paths = {k: v for k, v in file_paths.items() if k != 'pdb'}
 
         # Phase 2: parse full ComplexIdentity from filename. pdb_n_chains is unknown
         # at this point; populate initial identity fields so downstream steps always
@@ -1016,7 +1266,10 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
         initial_identity = parse_complex_identity(complex_name, pdb_n_chains=None)
 
         row: dict = {
-            'has_pdb': 'pdb' in file_paths,
+            # has_pdb reflects discovery, not usability — `composite_is_calibrated`
+            # is the computability guarantee, and `partial_reason` records why a
+            # discovered file was unusable.
+            'has_pdb': has_pdb_originally,
             'has_pkl': 'pkl' in file_paths,
             'geometry_available': False,
             'species': 'Homo sapiens (9606)',
@@ -1024,24 +1277,37 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
             # Always-present diagnostic; populated below on any failure path.
             'partial_reason': PARTIAL_REASON_NONE,
             'composite_is_calibrated': False,
+            # Default screening status; the finalisation block at the end of this
+            # function overwrites this with the real classification.
+            'composite_screen_status': COMPOSITE_SCREEN_STATUS_UNAVAILABLE,
         }
         _populate_identity_fields(row, initial_identity)
         _populate_scope_flags(row)
 
-        pae_matrix, pkl_load_failed = _extract_pkl_metrics(
+        # Stamp PDB decompression failure (if any) before downstream stamping —
+        # priority ordering ensures it remains the dominant reason.
+        if pdb_decompression_failure:
+            _stamp_partial_reason(row, pdb_decompression_failure)
+
+        pae_matrix, pkl_failure_reason = _extract_pkl_metrics(
             file_paths, row, run_interface_pae=run_interface_pae, verbose=verbose,
         )
-        if pkl_load_failed:
-            row['partial_reason'] = PARTIAL_REASON_UNREADABLE_PKL
+        _stamp_partial_reason(row, pkl_failure_reason)
 
         _extract_pdb_plddt(file_paths, row, verbose=verbose)
-        contact_result, chain_info, pae_chain_offsets, cb_to_ca_maps, pair_results, all_chain_offsets = _compute_pdockq_and_chain_info(file_paths, row, pae_matrix, run_interface_pae=run_interface_pae, verbose=verbose)
-
-        # PDB-read failure (chain_info is None despite a PDB path being supplied)
-        # supersedes any earlier PKL-load failure in the diagnostic — without a
-        # PDB the row is structurally meaningless, not just metric-incomplete.
-        if 'pdb' in file_paths and chain_info is None:
-            row['partial_reason'] = PARTIAL_REASON_UNREADABLE_PDB
+        (
+            contact_result,
+            chain_info,
+            pae_chain_offsets,
+            cb_to_ca_maps,
+            pair_results,
+            all_chain_offsets,
+            pdb_failure_reason,
+        ) = _compute_pdockq_and_chain_info(
+            file_paths, row, pae_matrix,
+            run_interface_pae=run_interface_pae, verbose=verbose,
+        )
+        _stamp_partial_reason(row, pdb_failure_reason)
 
         # Geometry availability: True iff every chain pair was successfully enumerated.
         # Zero-contact pairs are valid geometry (still count toward the expected pair
@@ -1118,14 +1384,11 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
                 row['_confident_residue_numbers_b'] = row.get('confident_residue_numbers_b', [])
 
         # Zero-contact diagnostic — ill-defined composite (log(0) in pDockQ).
-        # Don't overwrite an earlier upstream failure (PDB/PKL).
+        # _stamp_partial_reason's priority map preserves the precedence rule
+        # (any earlier PDB/PKL failure outranks this).
         n_contacts = row.get('n_interface_contacts')
-        if (
-            _has_value(n_contacts)
-            and int(n_contacts) == 0
-            and row.get('partial_reason') in (PARTIAL_REASON_NONE, None)
-        ):
-            row['partial_reason'] = PARTIAL_REASON_ZERO_CONTACTS
+        if _has_value(n_contacts) and int(n_contacts) == 0:
+            _stamp_partial_reason(row, PARTIAL_REASON_ZERO_CONTACTS)
 
         # Final strict calibration flag — replaces the optimistic per-identity
         # assignment that used to fire from `_populate_scope_flags` before
@@ -1135,6 +1398,16 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
         # Quality tier classification
         row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
         row['quality_tier_v2'] = classify_prediction_quality_v2(row.get('iptm'), row.get('pdockq'), row.get('interface_confidence_score'))
+
+        # Composite screening interpretation (Decision #43). Runs after the v2
+        # tier and after _finalise_calibration_flag has set composite_is_calibrated,
+        # so the inputs the classifier reads are all final.
+        row['composite_screen_status'] = classify_composite_screen_status(
+            composite_is_calibrated=row.get('composite_is_calibrated'),
+            interface_confidence_score=row.get('interface_confidence_score'),
+            iptm=row.get('iptm'),
+            pdockq=row.get('pdockq'),
+        )
 
         return row
 
@@ -1285,78 +1558,286 @@ def is_annotatable(row: dict) -> bool:
 
 #------------------Enrichment (gene symbols, database sources)-----------------------
 
-def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_sets: Optional[dict[str, set]] = None, database_evidence: Optional[dict[str, set]] = None, mapper=None) -> None:
-    """Enrich result rows with gene symbols, protein names, and database sources. Modifies the result dictionary in-place.
+def _resolve_missing_proteins_batched(
+    identifiers: list[str],
+    mapper,
+    batch_size: int = ENRICH_API_BATCH_SIZE,
+) -> dict[str, str]:
+    """Resolve identifiers to ENSP IDs via STRING API, with cache-aware batching.
+
+    Replaces the per-row ``mapper.resolve_id`` calls that used to dominate
+    ``enrich_results``. The fast path is a per-protein cache lookup that
+    matches the cache-key shape of the legacy ``get_string_ids([id])`` calls,
+    so caches written by previous toolkit runs (Run 2 / Run 3 single-protein
+    keys) are fully reused. Cache misses are batched into one API call per
+    ``batch_size`` identifiers; each batch response is then decomposed and
+    written back as per-protein cache entries so subsequent runs skip the
+    network entirely.
+
     Args:
-        results: List of per-complex result dicts from batch processing.
-        lookup: UniProt-keyed lookup dict from build_uniprot_lookup().
-        database_pair_sets: Optional dict of {db_name: set of normalised UniProt pairs} for "source of complex" tagging.
-        database_evidence: Optional dict of {db_name: set of evidence type strings}, pre-computed once to avoid scanning large DataFrames per complex.
-        mapper: Optional IDMapper instance for API-backed resolution of
-            proteins missing from the lookup table.
+        identifiers: Identifiers (UniProt accessions, gene names, etc.) that
+            missed the local lookup table.
+        mapper: ``IDMapper`` instance — only ``mapper._api_available`` is
+            consulted (and latched off on ``StringAPIError``). Pass ``None``
+            to disable API resolution entirely.
+        batch_size: Number of identifiers per batched API call.
+
+    Returns:
+        Dict ``{input_id: ensp}`` for resolved proteins. Identifiers absent
+        from the dict either have no STRING mapping (true negative) or were
+        skipped because the API latch was off.
+    """
+    if not identifiers or mapper is None:
+        return {}
+    if not getattr(mapper, "_api_available", True):
+        return {}
+
+    from string_api import (
+        _cache_key,
+        _read_cache,
+        _resolve_cache_dir,
+        _write_cache,
+        get_string_ids,
+        StringAPIError,
+        STRING_API_SPECIES,
+    )
+    from id_mapper import STRING_TAXONOMY_PREFIX
+
+    cache_dir = _resolve_cache_dir(None)
+    resolved: dict[str, str] = {}
+    to_batch: list[str] = []
+
+    # Step 1: per-protein cache lookup. Single-id key shape matches what
+    # `get_string_ids([id])` would write, so any prior single-call cache
+    # hits here without a network round-trip.
+    for prot in identifiers:
+        if not cache_dir:
+            to_batch.append(prot)
+            continue
+        single_params = {
+            "identifiers": prot,
+            "species": STRING_API_SPECIES,
+            "echo_query": 1,
+        }
+        key = _cache_key("get_string_ids", single_params)
+        cached = _read_cache(cache_dir, key)
+        if cached is None:
+            to_batch.append(prot)
+            continue
+        # Cache hit. Empty list = known miss; leave unresolved.
+        if cached:
+            row = cached[0]
+            ensp = str(row.get("stringId", "")).removeprefix(
+                STRING_TAXONOMY_PREFIX
+            )
+            if ensp:
+                resolved[prot] = ensp
+
+    # Step 2: batch the residual.
+    for i in range(0, len(to_batch), batch_size):
+        chunk = to_batch[i:i + batch_size]
+        try:
+            df = get_string_ids(chunk)
+        except StringAPIError as e:
+            # HTTP 404 from STRING means "no matches in this batch" — common
+            # for batches of TrEMBL-only accessions, since STRING doesn't
+            # recognise any of them and returns a single 404 instead of an
+            # empty 200. Treat as an empty response, cache the IDs as known
+            # misses, and continue with the next chunk. Other errors (5xx,
+            # timeouts, malformed responses) latch off the API entirely.
+            #
+            # The unpatched per-row code rarely hit this because single-ID
+            # calls return 200+[] for unknown IDs; only multi-ID batches
+            # where every member is unknown trigger the 404 path.
+            if "HTTP 404" in str(e):
+                if cache_dir:
+                    for prot in chunk:
+                        single_params = {
+                            "identifiers": prot,
+                            "species": STRING_API_SPECIES,
+                            "echo_query": 1,
+                        }
+                        key = _cache_key("get_string_ids", single_params)
+                        try:
+                            _write_cache(
+                                cache_dir, key, "get_string_ids", []
+                            )
+                        except OSError:
+                            pass
+                continue
+            mapper._api_available = False
+            break
+
+        records = (
+            df.to_dict(orient="records")
+            if df is not None and not df.empty
+            else []
+        )
+
+        per_prot: dict[str, list[dict]] = {}
+        for r in records:
+            query = str(r.get("queryItem", ""))
+            if not query:
+                continue
+            per_prot.setdefault(query, []).append(r)
+            ensp = str(r.get("stringId", "")).removeprefix(
+                STRING_TAXONOMY_PREFIX
+            )
+            if ensp and query not in resolved:
+                resolved[query] = ensp
+
+        # Step 3: write per-protein cache entries so future runs skip step 2.
+        if cache_dir:
+            for prot in chunk:
+                single_params = {
+                    "identifiers": prot,
+                    "species": STRING_API_SPECIES,
+                    "echo_query": 1,
+                }
+                key = _cache_key("get_string_ids", single_params)
+                rows_for_prot = per_prot.get(prot, [])
+                try:
+                    _write_cache(
+                        cache_dir, key, "get_string_ids", rows_for_prot
+                    )
+                except OSError:
+                    pass
+
+    return resolved
+
+
+def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_sets: Optional[dict[str, set]] = None, database_evidence: Optional[dict[str, set]] = None, mapper=None) -> None:
+    """Enrich result rows with gene symbols, protein names, and database sources.
+    Modifies the result dictionary in-place.
+
+    Performance design (post-Run-3 retune): three pre-passes hoist the work
+    that used to fire per-row out of the hot loop.
+
+      * Precomputed ``ensp_to_info`` reverse index replaces the
+        ``for acc, info in lookup.items()`` scan that used to fire on every
+        API-resolved miss (~72,000 dict items walked per scan over the 144K
+        lookup table).
+      * ``isoform_base`` precomputes ``split_isoform`` for every distinct
+        missing protein so the hot loop hits a base-accession entry in
+        ``lookup`` without re-parsing the isoform suffix per row. This
+        replaces the ``mapper._resolve_id_local → uniprot_to_ensembl``
+        local-resolution path that the unpatched code triggered per row.
+      * ``_resolve_missing_proteins_batched`` collects only the *truly*
+        missing identifiers (no lookup hit, no isoform-base hit) and
+        resolves them in chunks of ``ENRICH_API_BATCH_SIZE`` in one
+        pre-pass, replacing the per-row ``mapper.resolve_id`` HTTP
+        round-trips. On a 9.4K dataset with 18.6% miss rate this collapses
+        ~3,500 serial calls (~38 minutes wall-clock) into a handful of
+        batched calls.
+
+    Args:
+        results: Per-complex result dicts from batch processing.
+        lookup: UniProt-keyed lookup dict from ``build_uniprot_lookup()``.
+            Already indexes by both isoform-suffixed and base accession.
+        database_pair_sets: Optional ``{db_name: set of normalised UniProt
+            pairs}`` for source-of-complex tagging.
+        database_evidence: Optional ``{db_name: set of evidence type strings}``
+            pre-computed once upstream to avoid scanning large DataFrames
+            per row.
+        mapper: Optional ``IDMapper`` for API-backed resolution of proteins
+            absent from both the lookup and its isoform-base index.
     """
     from overlap_analysis import normalise_pair
+    from id_mapper import split_isoform
+
+    # Pre-pass 1: ENSP -> info reverse index (one-time O(N)).
+    ensp_to_info: dict[str, dict] = {}
+    for info in lookup.values():
+        ensp = info.get("ensembl_protein_id")
+        if ensp:
+            ensp_to_info.setdefault(ensp, info)
+
+    # Pre-pass 2: classify every distinct missing protein. Isoforms whose
+    # base accession is already in ``lookup`` are recoverable in-memory; only
+    # the residual goes to the API.
+    isoform_base: dict[str, str] = {}
+    truly_missing: set[str] = set()
+    seen: set[str] = set()
+    for row in results:
+        for prot in (row.get("protein_a", ""), row.get("protein_b", "")):
+            if not prot or prot in seen or prot in lookup:
+                continue
+            seen.add(prot)
+            base, _ = split_isoform(prot)
+            if base != prot and base in lookup:
+                isoform_base[prot] = base
+            else:
+                truly_missing.add(prot)
+
+    # Pre-pass 3: batch-resolve the truly-missing residual via STRING API.
+    api_resolved: dict[str, str] = {}
+    if (
+        mapper is not None
+        and getattr(mapper, "_api_available", True)
+        and truly_missing
+    ):
+        t0 = time.time()
+        api_resolved = _resolve_missing_proteins_batched(
+            sorted(truly_missing), mapper
+        )
+        print(
+            f"  Resolved {len(isoform_base):,} isoforms locally; "
+            f"batch-resolved {len(api_resolved):,}/{len(truly_missing):,} "
+            f"residual proteins via STRING API in {time.time() - t0:.1f}s",
+            file=sys.stderr,
+        )
+    elif isoform_base:
+        print(
+            f"  Resolved {len(isoform_base):,} isoforms locally "
+            f"(API path skipped)",
+            file=sys.stderr,
+        )
+
+    # Hoist the sort out of the hot loop.
+    sorted_db_items = (
+        sorted(database_pair_sets.items()) if database_pair_sets else []
+    )
 
     bar = _make_progress_bar(len(results), desc="Enriching")
     for row in results:
-        prot_a = row.get('protein_a', '')
-        prot_b = row.get('protein_b', '')
-        info_a = lookup.get(prot_a, {})
-        info_b = lookup.get(prot_b, {})
+        prot_a = row.get("protein_a", "")
+        prot_b = row.get("protein_b", "")
+        info_a = (
+            lookup.get(prot_a)
+            or lookup.get(isoform_base.get(prot_a))
+            or ensp_to_info.get(api_resolved.get(prot_a, ""), {})
+        )
+        info_b = (
+            lookup.get(prot_b)
+            or lookup.get(isoform_base.get(prot_b))
+            or ensp_to_info.get(api_resolved.get(prot_b, ""), {})
+        )
 
-        # API fallback: if protein not in lookup, try resolving via mapper
-        if not info_a and mapper is not None and prot_a:
-            resolved = mapper.resolve_id(prot_a, target='ensp')
-            if resolved:
-                # Check lookup by ENSP-linked UniProt entries
-                for acc, info in lookup.items():
-                    if info.get('ensembl_protein_id') == resolved:
-                        info_a = info
-                        break
-        if not info_b and mapper is not None and prot_b:
-            resolved = mapper.resolve_id(prot_b, target='ensp')
-            if resolved:
-                for acc, info in lookup.items():
-                    if info.get('ensembl_protein_id') == resolved:
-                        info_b = info
-                        break
-        row['gene_symbol_a'] = info_a.get('gene_symbol', '')
-        row['gene_symbol_b'] = info_b.get('gene_symbol', '')
-        row['protein_name_a'] = info_a.get('protein_name', '')
-        row['protein_name_b'] = info_b.get('protein_name', '')
-        row['ensembl_id_a'] = info_a.get('ensembl_protein_id', '')
-        row['ensembl_id_b'] = info_b.get('ensembl_protein_id', '')
+        row["gene_symbol_a"] = info_a.get("gene_symbol", "")
+        row["gene_symbol_b"] = info_b.get("gene_symbol", "")
+        row["protein_name_a"] = info_a.get("protein_name", "")
+        row["protein_name_b"] = info_b.get("protein_name", "")
+        row["ensembl_id_a"] = info_a.get("ensembl_protein_id", "")
+        row["ensembl_id_b"] = info_b.get("ensembl_protein_id", "")
+        row["secondary_accessions_a"] = info_a.get("secondary_accessions", "")
+        row["secondary_accessions_b"] = info_b.get("secondary_accessions", "")
 
-        # Secondary accessions - pipe-separated alternate UniProt accessions.
-        # A single ENSP in STRING aliases can map to multiple UniProt IDs (e.g. reviewed Swiss-Prot + unreviewed TrEMBL, or merged/legacy accessions). 
-        # The first (alphabetically sorted) is the primary accession used as protein_a/protein_b; the rest are joined with '|' here.  Example: "P38398|Q6IN68" for BRCA1.
-        ensp_a = info_a.get('ensembl_protein_id', '')
-        ensp_b = info_b.get('ensembl_protein_id', '')
-        row['secondary_accessions_a'] = info_a.get('secondary_accessions', '')
-        row['secondary_accessions_b'] = info_b.get('secondary_accessions', '')
-
-        # Database source tagging
-        if database_pair_sets:
+        if sorted_db_items:
             pair = normalise_pair(prot_a, prot_b)
-            sources = [
-                name for name, pair_set in sorted(database_pair_sets.items())
-                if pair in pair_set
-            ]
-            row['database_source'] = '|'.join(sources)
-
-            # Collect evidence types from matched databases
+            sources = [name for name, ps in sorted_db_items if pair in ps]
+            row["database_source"] = "|".join(sources)
             if database_evidence:
                 evidence_set: set[str] = set()
                 for db_name in sources:
                     ev = database_evidence.get(db_name)
                     if ev:
                         evidence_set.update(ev)
-                row['evidence_types'] = '|'.join(sorted(evidence_set))
+                row["evidence_types"] = "|".join(sorted(evidence_set))
             else:
-                row['evidence_types'] = ''
+                row["evidence_types"] = ""
         else:
-            row['database_source'] = ''
-            row['evidence_types'] = ''
+            row["database_source"] = ""
+            row["evidence_types"] = ""
         bar.update(1)
     bar.__exit__(None, None, None)
 
@@ -1550,6 +2031,39 @@ def _read_skip_existing_names(results_csv_path: Path) -> set[str]:
     return names
 
 
+def _select_chunk(
+    sorted_eligible: list[tuple[str, dict]],
+    limit: int | None,
+    completed_names: set[str],
+) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]]:
+    """Apply --limit then --resume filtering in the correct order.
+
+    Args:
+        sorted_eligible: Alphabetically-sorted (name, paths) pairs already filtered
+            by --skip-existing (so only rows new vs the historical baseline).
+        limit: Optional max chunk size. None = unlimited.
+        completed_names: Names already present in the in-flight checkpoint
+            (from --resume). Removed from the chunk *after* limit is applied,
+            so chunk membership is stable across crash + resume - provided the
+            historical baseline used by --skip-existing has not changed.
+
+    Returns:
+        (selected_chunk, to_process)
+        selected_chunk: The full chunk membership (limit-applied), used for
+            provenance logging - the deterministic "this is what this chunk owns".
+        to_process: selected_chunk minus completed_names, the actual work list.
+    """
+    if limit is not None and len(sorted_eligible) > limit:
+        selected_chunk = sorted_eligible[:limit]
+    else:
+        selected_chunk = sorted_eligible
+    if completed_names:
+        to_process = [item for item in selected_chunk if item[0] not in completed_names]
+    else:
+        to_process = selected_chunk
+    return selected_chunk, to_process
+
+
 def _compute_incremental_delta(
     complexes: dict[str, dict[str, Path]],
     previous_fingerprints: dict[str, tuple[int, int, int, int]],
@@ -1729,12 +2243,55 @@ def _worker_initializer():
     # Import is intentionally unused - we only need the side effect of loading the module. "noqa: F401" suppresses the flake8 "imported but unused" warning.
     import toolkit  # noqa: F401
 
+def _build_worker_exception_row(complex_name: str, file_paths: dict, error: Exception) -> dict:
+    """Construct a sentinel row for a worker that raised before producing a row.
+
+    Worker-exception rows are explicit sentinels: they carry
+    ``partial_reason="worker_exception"`` so they are visible in
+    ``_aggregate_summary_statistics``, but they do not introduce a fourth
+    ``quality_tier_v2`` value (it is left ``None``). They count as both partial
+    and incomplete; both filters exclude them from calibrated/recoverable
+    analyses.
+    """
+    return {
+        'complex_name': complex_name,
+        'has_pdb': 'pdb' in file_paths,
+        'has_pkl': 'pkl' in file_paths,
+        'geometry_available': False,
+        'composite_is_calibrated': False,
+        'partial_reason': PARTIAL_REASON_WORKER_EXCEPTION,
+        'quality_tier': 'Error',
+        'quality_tier_v2': None,    # do NOT introduce a new v2 tier value
+        'composite_screen_status': COMPOSITE_SCREEN_STATUS_UNAVAILABLE,
+        'tier_scope': None,         # explicit sentinel: not classifiable
+        'complex_type': None,       # explicit sentinel: not classifiable
+        '_error': str(error),
+    }
+
+
+def _safe_process_single_complex(complex_name: str, file_paths: dict, **kwargs) -> dict:
+    """Crash-safe wrapper around `process_single_complex`.
+
+    Catches any exception escaping the per-complex pipeline and returns a
+    sentinel row instead. Used by both sequential (`workers == 1`) and parallel
+    paths so neither can kill the whole batch on a single complex's failure.
+    """
+    try:
+        return process_single_complex(complex_name, file_paths, **kwargs)
+    except Exception as error:
+        print(
+            f"\n  Error processing {complex_name}: {error}",
+            file=sys.stderr,
+        )
+        return _build_worker_exception_row(complex_name, file_paths, error)
+
+
 def _worker_process_complex(args_tuple: tuple) -> dict:
     """Top-level wrapper for process_single_complex that unpacks a tuple.
     ProcessPoolExecutor requires a picklable callable with a single argument. This unpacks the argument tuple and forwards to the real function.
     """
     complex_name, file_paths, kwargs = args_tuple
-    return process_single_complex(complex_name, file_paths, **kwargs)
+    return _safe_process_single_complex(complex_name, file_paths, **kwargs)
 
 def run_batch_parallel(
     sorted_complexes: list[tuple[str, dict[str, Path]]],
@@ -1799,7 +2356,11 @@ def run_batch_parallel(
         if workers == 1:
             #-------------------Sequential mode (preserves verbose output)---------------------
             for complex_name, file_paths, kwargs in work_items:
-                row = process_single_complex(complex_name, file_paths, **kwargs)
+                # _safe_process_single_complex catches any exception escaping
+                # the per-complex pipeline and returns a worker-exception
+                # sentinel row instead — so a single bad complex cannot kill
+                # the whole sequential batch.
+                row = _safe_process_single_complex(complex_name, file_paths, **kwargs)
                 results.append(row)
                 newly_processed += 1
                 tier = row.get('quality_tier', '?')
@@ -1815,10 +2376,16 @@ def run_batch_parallel(
             # verbose per-complex output is suppressed in parallel mode because interleaved prints from multiple workers are unreadable
             # Instead we show the most recent complex and its quality tier in the progress bar
             print(f"Starting {workers} worker processes...", flush=True)
+            # Capture file_paths per future so the exception handler can build a
+            # fully-populated sentinel row even though the worker may have died
+            # before returning anything.
+            future_to_item: dict = {}
             with ProcessPoolExecutor(max_workers=workers, initializer=_worker_initializer) as executor:
-                future_to_name = {executor.submit(_worker_process_complex, item): item[0] for item in work_items}
-                for future in as_completed(future_to_name):
-                    complex_name = future_to_name[future]
+                for item in work_items:
+                    fut = executor.submit(_worker_process_complex, item)
+                    future_to_item[fut] = (item[0], item[1])
+                for future in as_completed(future_to_item):
+                    complex_name, fp = future_to_item[future]
                     try:
                         row = future.result(timeout=300)
                         results.append(row)
@@ -1826,14 +2393,14 @@ def run_batch_parallel(
                         tier = row.get('quality_tier', '?')
                         pbar.set_postfix_str(f"{complex_name} -> {tier}")
                     except Exception as error:
+                        # The worker itself died (e.g. BrokenProcessPool, timeout).
+                        # `_safe_process_single_complex` would normally catch
+                        # in-worker exceptions, so reaching here means the
+                        # subprocess never returned a row.
                         print(f"\n  Error processing {complex_name}: {error}",
                               file=sys.stderr)
-                        # Create a minimal error row so we don't lose track
-                        results.append({
-                            'complex_name': complex_name,
-                            'quality_tier': 'Error',
-                            '_error': str(error),
-                        })
+                        results.append(_build_worker_exception_row(complex_name, fp, error))
+                        newly_processed += 1
                     pbar.update(1)
                     if enable_checkpoint and newly_processed % CHECKPOINT_INTERVAL == 0:
                         last_checkpoint_count = append_checkpoint(
@@ -2122,6 +2689,19 @@ Examples:
                              "supplied, the toolkit first builds the incremental "
                              "delta from --skip-existing, then removes complexes "
                              "already completed in the current checkpoint.")
+    parser.add_argument("--limit", type=int, default=None, metavar="N",
+                        help="Process at most N complexes per run, taken from the "
+                             "alphabetically-sorted post-(--skip-existing) delta. "
+                             "Used to chunk large HPC runs into memory-bounded batches. "
+                             "The chunk membership is fixed BEFORE --resume filtering, "
+                             "so a crashed-and-resumed chunk processes exactly the same "
+                             "complexes as a clean run - provided --skip-existing's "
+                             "RESULTS_CSV is unchanged between attempts. Combine with "
+                             "--skip-existing across successive runs to walk the dataset "
+                             "in deterministic chunks. NOTE: --skip-existing must point "
+                             "at the unfiltered historical results.csv (NOT a "
+                             "strict-calibrated subset), or partial/zero-contact rows "
+                             "will be reprocessed every chunk. Omit for unlimited (default).")
     parser.add_argument("--enrich", metavar="ALIASES_PATH",
                         help="Enrich output with gene symbols, protein names, and "
                              "cross-references using a STRING aliases file.")
@@ -2320,6 +2900,9 @@ def main() -> None:
     if args.resume:
         args.checkpoint = True
 
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be a positive integer (omit the flag for unlimited)")
+
     if args.workers < 1:
         print("Error: --workers must be >= 1", file=sys.stderr)
         sys.exit(1)
@@ -2426,15 +3009,42 @@ def main() -> None:
         else:
             print("No checkpoint found, starting from scratch")
 
-    # Sequential filter: apply skip-existing first (delta_filter), then resume
-    # (completed_names). Both filters are unioned via short-circuit per-name.
-    sorted_complexes = []
+    # Sequential filter:
+    #   1. apply --skip-existing (delta_filter) and sort alphabetically
+    #   2. apply --limit to pin chunk membership (deterministic across crashes)
+    #   3. apply --resume (completed_names) to drop already-checkpointed rows
+    #      from the selected chunk
+    #
+    # --limit MUST sit between skip-existing and resume; applying it after
+    # resume causes chunk-boundary drift on a crashed-and-resumed run.
+    eligible_complexes: list[tuple[str, dict]] = []
     for name, paths in sorted(complexes.items()):
         if delta_filter is not None and name not in delta_filter:
             continue
-        if name in completed_names:
-            continue
-        sorted_complexes.append((name, paths))
+        eligible_complexes.append((name, paths))
+    total_eligible = len(eligible_complexes)
+
+    selected_chunk, sorted_complexes = _select_chunk(
+        eligible_complexes, args.limit, completed_names,
+    )
+    skipped_completed = len(selected_chunk) - len(sorted_complexes)
+
+    if args.limit is not None:
+        if selected_chunk:
+            print(
+                f"Limit requested: selected {len(selected_chunk):,} of "
+                f"{total_eligible:,} eligible complexes "
+                f"(chunk first: {selected_chunk[0][0]}, "
+                f"chunk last: {selected_chunk[-1][0]}, "
+                f"checkpoint-completed within chunk: {skipped_completed:,}, "
+                f"remaining to process: {len(sorted_complexes):,})",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Limit requested: 0 eligible complexes after --skip-existing.",
+                file=sys.stderr,
+            )
 
     if not sorted_complexes and resumed_results:
         print("All complexes already processed - writing final output.")
