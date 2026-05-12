@@ -1195,11 +1195,13 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False,
         jitter = np.random.normal(0, 0.06, size=len(data))
         ax_a.scatter(positions_a[idx] + jitter, data, c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
 
-    # Decision threshold lines.
-    # 0.63 (High -> Medium downgrade) and 0.64 (Low -> High upgrade) sit so close
-    # together that two side-by-side labels overlap. Draw both lines, but merge
-    # the labels into a single bracket-style annotation that names the
-    # 0.63-0.64 boundary band rather than two unreadable labels.
+    # Decision threshold lines (primary fused V2):
+    #   0.63 -> High downgrades to Medium
+    #   0.64 -> Low rescues to Medium (moderate-composite band)
+    #   0.85 -> Low/Medium promotes to High (strong-composite band)
+    # The 0.63 and 0.64 lines sit so close together that two side-by-side
+    # labels overlap; draw both lines but merge their labels into a single
+    # bracket-style annotation on the boundary band.
     ax_a.axhline(y=DOWNGRADE_HIGH_THRESHOLD, color='#2ecc71',
                  linestyle=':', linewidth=1.2, alpha=0.7)
     ax_a.axhline(y=UPGRADE_LOW_THRESHOLD, color='#e74c3c',
@@ -1209,10 +1211,10 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False,
     x_right = ax_a.get_xlim()[1]
     band_mid = (DOWNGRADE_HIGH_THRESHOLD + UPGRADE_LOW_THRESHOLD) / 2
     ax_a.text(x_right, band_mid,
-              f' 0.63-0.64 boundary\n  (High downgrade /\n  Low->High upgrade)',
+              f' 0.63-0.64 boundary\n  (High downgrade /\n  Low->Medium rescue)',
               va='center', fontsize=7, color='#555555', alpha=0.9)
     ax_a.text(x_right, UPGRADE_MEDIUM_THRESHOLD,
-              f' Medium->High upgrade ({UPGRADE_MEDIUM_THRESHOLD})',
+              f' Strong composite ({UPGRADE_MEDIUM_THRESHOLD})\n  Low/Medium -> High',
               va='center', fontsize=8, color='#f39c12', alpha=0.8)
 
     ax_a.set_xticks(positions_a)

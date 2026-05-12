@@ -697,37 +697,76 @@ COMPOSITE_SCREEN_STATUS_WEAK = "weak_screen_candidate"
 COMPOSITE_SCREEN_STATUS_UNAVAILABLE = "unavailable"
 
 def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Optional[float], interface_confidence: Optional[float] = None) -> str:
-    """Enhanced quality classification incorporating interface confidence.
-    Starts from the original 2-metric tier and adjusts based on the composite interface confidence score.
-    Decision #38 adopted thresholds: upgrade Low -> High at composite >= 0.64;
-    upgrade Medium -> High at composite >= 0.85; downgrade High -> Medium at
-    composite <= 0.63.
-    This catches:
-      - False negatives: Low/Medium tier with excellent interface evidence (pDockQ is size-sensitive and can penalise small genuine interfaces)
-      - False positives: High tier where interface metrics are poor (headline scores mask a weak binding site)
-    Falls back to original v1 classification when the composite score is unavailable (no PAE data).
+    """Primary fused V2 quality classification.
+
+    quality_tier_v2 is a composite-informed reclassification of the V1
+    quality_tier. V1 (ipTM + pDockQ) remains the global-confidence prior;
+    interface_confidence_score (composite) acts as interface-specific
+    evidence that can either rescue a V1 Low row, promote a V1 Medium row,
+    or downgrade a V1 High row.
+
+    Transitions (`UPGRADE_LOW_THRESHOLD = 0.64`,
+    `UPGRADE_MEDIUM_THRESHOLD = 0.85`, `DOWNGRADE_HIGH_THRESHOLD = 0.63`):
+      - V1 Low + composite < 0.64                   -> Low
+      - V1 Low + 0.64 <= composite < 0.85           -> Medium  (rescue)
+      - V1 Low + composite >= 0.85                  -> High    (strong-composite rescue)
+      - V1 Medium + composite < 0.85                -> Medium
+      - V1 Medium + composite >= 0.85               -> High    (promote)
+      - V1 High + composite <= 0.63                 -> Medium  (downgrade)
+      - V1 High + composite > 0.63                  -> High
+
+    V1 Medium is never downgraded to Low under this policy: a Medium V1 row
+    has already passed both medium global-confidence gates, so weak
+    composite means "not enough interface evidence to promote", not
+    "interface evidence overrides global".
+
+    The rationale for the rescue-to-Medium band is to remove the rhetorical
+    contradiction in the earlier V2 policy: a V1 Low row with moderate
+    composite (0.64-0.85) was promoted directly to V2 High while the
+    parallel composite_screen_status called it only a moderate screen
+    candidate. Under primary fused, V1 Low needs strong composite evidence
+    (>= 0.85) to reach High.
+
+    Missing or non-finite composite (None, NaN, +/-inf, unparseable)
+    preserves the V1 tier unchanged. If classify_prediction_quality returns
+    anything other than 'Low'/'Medium'/'High', that value is also returned
+    unchanged - the current V1 always returns one of the three tiers in
+    practice, so the fallthrough is defensive only.
+
     Args:
         iptm_score: Interface pTM score (or None if unavailable).
         pdockq_score: pDockQ docking quality score (or None if unavailable).
-        interface_confidence: Composite interface confidence score from compute_interface_confidence() [0.0-1.0] or None if unavailable.
+        interface_confidence: Composite interface confidence score from
+            compute_interface_confidence() [0.0-1.0] or None if unavailable.
+
     Returns:
-        Quality tier string: 'High', 'Medium', or 'Low'.
+        Quality tier string: 'High', 'Medium', or 'Low' under normal
+        operation; the upstream V1 tier string verbatim if V1 returns an
+        unrecognised sentinel.
     """
     base_tier = classify_prediction_quality(iptm_score, pdockq_score)
 
-    if interface_confidence is None:
+    try:
+        score = float(interface_confidence)
+    except (TypeError, ValueError):
+        return base_tier
+    if not math.isfinite(score):
         return base_tier
 
-    # Upgrade: strong interface evidence overrides weak headline metrics
-    if base_tier == 'Low' and interface_confidence >= UPGRADE_LOW_THRESHOLD:
-        return 'High'
-    if base_tier == 'Medium' and interface_confidence >= UPGRADE_MEDIUM_THRESHOLD:
-        return 'High'
-
-    # Downgrade: poor interface despite good headline metrics
-    if base_tier == 'High' and interface_confidence <= DOWNGRADE_HIGH_THRESHOLD:
+    if base_tier == 'Low':
+        if score >= UPGRADE_MEDIUM_THRESHOLD:
+            return 'High'
+        if score >= UPGRADE_LOW_THRESHOLD:
+            return 'Medium'
+        return 'Low'
+    if base_tier == 'Medium':
+        if score >= UPGRADE_MEDIUM_THRESHOLD:
+            return 'High'
         return 'Medium'
-
+    if base_tier == 'High':
+        if score <= DOWNGRADE_HIGH_THRESHOLD:
+            return 'Medium'
+        return 'High'
     return base_tier
 
 
