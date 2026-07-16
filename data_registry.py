@@ -1,10 +1,13 @@
-"""
-Data dependency registry for the protein-complexes-toolkit.
+"""Data dependency registry for the protein-complexes-toolkit.
 
-Centralises every data-file path that the full pipeline requires,
-and provides a pre-flight validation function so that
-``--full-pipeline`` can check all inputs exist before starting a
-multi-hour run.
+Centralises every data-file path that the full pipeline requires, and provides a
+pre-flight validation function so that ``--full-pipeline`` can check all inputs
+exist before starting a multi-hour run.
+
+Operational infrastructure: the single source of truth for the external
+data-file locations and an existence check; it is not itself a reported result.
+``toolkit.py --full-pipeline`` and ``SpeciesClassifier`` resolve paths through
+``get_default_path`` and validate them through ``validate_data_dependencies``.
 
 Usage (standalone)::
 
@@ -344,7 +347,7 @@ def validate_data_dependencies(
                           file=sys.stderr)
                     print(f"      Required by: {dep.source_file} "
                           f"({group_label})", file=sys.stderr)
-                    print(f'      See README section: "Setting Up Data"',
+                    print(f'      See README section: "Setting up external data"',
                           file=sys.stderr)
                     filename = dep.expected_path.rsplit("/", 1)[-1]
                     print(f"      If you have a newer version of this "

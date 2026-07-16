@@ -8,6 +8,12 @@ the same orientation (chain/interface and pLDDT confidence), composes the approv
 figure (two legends, the two views, one metric box, an explanatory footer), writes exactly
 one PNG, and removes every intermediate file automatically.
 
+Role in the submitted dissertation: this renders the dissertation's Figure 6 — the
+single-complex worked examples showing how interface-localised evidence changed a
+prediction's classification. Each run writes one PNG; the submitted two-panel figure was
+composed from two such runs. It is the dedicated single-complex renderer, distinct from
+``pymol_scripts.py`` (general batch ``.pml`` output).
+
 Scope: dimers only (the interface-informed assessment is calibrated on dimers). No network
 access is required; gene/protein names fall back to accessions when the local alias table
 is unavailable. PyMOL is an external runtime invoked via ``--pymol-executable``.

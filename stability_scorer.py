@@ -1,29 +1,33 @@
-"""
-Stability scoring for AlphaFold2-predicted protein-protein complex variants.
+"""EVE stability scoring for AlphaFold2-predicted protein-protein complex variants.
 
-Integrates EVE (Evolutionary model of Variant Effect) pre-computed pathogenicity
-predictions with the variant mapping from Phase C. EVE provides deep-learning
-pathogenicity scores for ~3,211 human proteins based on evolutionary sequence
-conservation.
+Adds EVE (Evolutionary model of Variant Effect) pre-computed pathogenicity
+predictions to the variants found by the variant-mapping stage. EVE provides
+deep-learning pathogenicity scores for ~3,211 human proteins from evolutionary
+sequence conservation.
 
-Architecture:
-    - Offline-first: reads local EVE CSV files and UniProt ID mapping file
-    - Lazy loading: only parses EVE CSVs for proteins present in the pipeline run
-    - Integrates into toolkit.py via --stability flag (requires --variants)
-    - Standalone CLI for EVE score lookup and coverage statistics
+Architecture
+    - Offline-first: reads local EVE CSV files and the UniProt ID mapping file.
+    - Lazy loading: only parses EVE CSVs for proteins present in the run.
+    - Invoked by ``toolkit.py --stability`` (requires --variants); also a
+      standalone CLI for lookup and coverage statistics.
 
-Data sources:
-    - EVE_all_data/*.csv (per-protein EVE pathogenicity scores, keyed by entry name)
+Data sources
+    - EVE_all_data/*.csv (per-protein EVE pathogenicity scores, by entry name)
     - HUMAN_9606_idmapping.dat (UniProt accession-to-entry-name mapping)
 
-Usage (standalone):
-    python stability_scorer.py summary --stability-dir data/stability
-    python stability_scorer.py lookup --stability-dir data/stability --protein P61981
-    python stability_scorer.py lookup --stability-dir data/stability --protein P61981 --position 45
+Role in the submitted dissertation
+    Dissertation-supporting / extended. The per-chain EVE mean, pathogenic count
+    and coverage feed the supplementary stability-predictor concordance
+    comparison (EVE vs AlphaMissense vs FoldX).
 
-Usage (via toolkit.py):
-    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants --stability
-    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants --stability data/stability
+Scope
+    EVE scores a substitution's predicted pathogenicity from evolutionary
+    conservation of the single protein sequence. It is a per-residue,
+    single-chain measure: it does not measure disruption of the predicted
+    inter-chain interface, and its coverage is limited to the ~3,211 proteins in
+    the EVE download.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md``.
 """
 
 import argparse

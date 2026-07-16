@@ -1,33 +1,27 @@
 """Canonical row filters for visualise_results.py.
 
-Populations validated against results_516744.csv on 2026-05-11; see
-Output/final_csv_schema_audit/audit_summary.json.
+Each figure restricts its input to one named population — all_rows, recoverable,
+calibrated_dimer, the human subsets, the composite screen bands, and so on — and
+this module is the single definition of those masks. It also owns parse_boolish
+and the numeric-presence helpers. visualise_results.py imports from here; never
+import visualise_results from here.
 
-Ownership: this module owns parse_boolish and the numeric-presence helpers.
-visualise_results.py imports from here. Never import visualise_results from here.
+Role in the submitted dissertation
+    Operational / dissertation-supporting. These masks encode the analysis
+    populations the figures report on — in particular ``calibrated_dimer``, the
+    principal calibrated-dimer population. The same population definitions are
+    documented for users in ``Docs/OUTPUT_SCHEMA.md``. This module defines the
+    populations; it is not itself a reported result.
 
-Canonical filters (14 total):
+Canonical filters (14): all_rows, recoverable, calibrated_dimer,
+composite_status_present, composite_screenable, strong_screen_candidate,
+moderate_screen_candidate, weak_screen_candidate, human_broad, human_strict,
+multimer_exploratory, partial_error, calibrated_human_broad,
+calibrated_human_strict.
 
-    Filter                          Audit N (516,744 corpus)
-    ---------------------------     ------------------------
-    all_rows                        516,744 (100.00%)
-    recoverable                     406,244 ( 78.62%)
-    calibrated_dimer                402,846 ( 77.96%)
-    composite_status_present        516,744 (100.00%)
-    composite_screenable            402,846 ( 77.96%)
-    strong_screen_candidate           8,635 (  1.67%)
-    moderate_screen_candidate        21,998 (  4.26%)
-    weak_screen_candidate           372,213 ( 72.03%)
-    human_broad                     474,444 ( 91.81%)
-    human_strict                    465,655 ( 90.11%)
-    multimer_exploratory              5,644 (  1.09%)
-    partial_error                   110,500 ( 21.38%)
-    calibrated_human_broad          364,357 ( 70.51%)
-    calibrated_human_strict         357,073 ( 69.10%)
-
-`mask_degenerate_empty_rows` is a diagnostic helper only and is not part of the
-FILTER_REGISTRY because subtracting it from `recoverable` would invalidate the
-audit row counts above.
+``mask_degenerate_empty_rows`` is a diagnostic helper only and is deliberately
+NOT part of the FILTER_REGISTRY: subtracting it from ``recoverable`` would change
+the recoverable population's definition.
 """
 import re
 from typing import Iterable
@@ -126,9 +120,7 @@ def mask_all_rows(df: pd.DataFrame) -> pd.Series:
 def mask_recoverable(df: pd.DataFrame) -> pd.Series:
     """Rows whose `partial_reason` is empty/NaN — the structurally usable subset.
 
-    The audit defines this as `partial_reason` NaN OR a lowercase-stripped
-    value in EMPTY_TOKENS. Mirroring the audit ensures the count of 406,244
-    is reproduced.
+    Defined as `partial_reason` NaN OR a lowercase-stripped value in EMPTY_TOKENS.
     """
     if "partial_reason" not in df.columns:
         return pd.Series(True, index=df.index)
@@ -242,9 +234,8 @@ def mask_calibrated_human_strict(df: pd.DataFrame) -> pd.Series:
 
 def mask_degenerate_empty_rows(df: pd.DataFrame) -> pd.Series:
     """Diagnostic mask flagging rows that are blank/NaN across the key identity
-    columns. The audit observed 7 such rows. Used for reporting only;
-    `recoverable` retains its audit-exact definition, so these rows are caught
-    by `require_columns()` at figure-time.
+    columns. Used for reporting only; `recoverable` keeps its exact definition,
+    so these rows are instead caught by `require_columns()` at figure time.
     """
     key_cols = [
         "complex_name",

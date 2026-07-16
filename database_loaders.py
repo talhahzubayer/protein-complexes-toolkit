@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
-"""
-PPI Database Loading Module.
-Parses protein-protein interaction data from 4 databases (STRING, BioGRID, HuRI, HuMAP) into standardised DataFrames with columns: protein_a, protein_b, source, confidence_score, evidence_type
+"""PPI database loading for the protein complexes toolkit.
 
-Features:
-    - STRING: combined-score filtering, automatic species-prefix stripping (Ensembl protein IDs)
-    - BioGRID: column-name-based loading, human-only filtering (taxonomy ID 9606)
-    - HuRI: binary TSV loading with Ensembl gene IDs
-    - HuMAP: probability-based filtering with optional UniProt ID validation
-    - Unified loader: loads all four databases in one call with configurable thresholds
+Parses protein-protein interaction data from four databases (STRING, BioGRID,
+HuRI, HuMAP) into standardised DataFrames with columns: protein_a, protein_b,
+source, confidence_score, evidence_type.
 
-Usage (as importable module):
-    from database_loaders import load_string, load_biogrid, load_huri, load_humap
-    df = load_string("data/ppi/9606.protein.links.v12.0.txt", min_score=700)
-    df = load_biogrid("data/ppi/BIOGRID-ALL-5.0.253.tab3.txt")
-    df = load_huri("data/ppi/HuRI.tsv")
-    df = load_humap("data/ppi/humap2_ppis_ACC_20200821.pairsWprob", min_probability=0.5)
+Features
+    - STRING: combined-score filtering, automatic species-prefix stripping.
+    - BioGRID: column-name-based loading, human-only filtering (taxon 9606).
+    - HuRI: binary Y2H TSV loading with Ensembl gene IDs.
+    - HuMAP: probability-based filtering with optional UniProt-ID validation.
+    - Unified loader for all four databases with configurable thresholds and an
+      optional spot-check of loaded IDs against the STRING API.
 
-Usage (standalone):
-    python database_loaders.py --data-dir data/ppi --database all --output interactions.csv -v
-    python database_loaders.py --data-dir data/ppi --database string --min-string-score 700 -v
+Role in the submitted dissertation
+    Operational infrastructure (database ingestion). The standardised tables
+    feed the cross-database overlap / Venn analysis and the
+    ``toolkit.py --databases`` source-tagging that records which databases list
+    a given protein pair.
+
+Scope
+    These are curated interaction records: a protein pair appearing in one of
+    these databases is prior evidence that the two proteins interact, which
+    provides biological context. It is not validation of the predicted complex
+    or its interface — the databases describe interactions, not the correctness
+    of any AlphaFold2 structure.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md``.
 """
 
 import sys

@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""
-Database Overlap Analysis and Venn Diagram Generation.
-Computes pairwise and multi-way overlaps between PPI databases (STRING, BioGRID, HuRI, HuMAP) after mapping all identifiers to UniProt and generates UpSet or Venn diagrams and overlap summary statistics.
+"""Database overlap analysis and Venn/UpSet diagram generation.
 
-Features:
-    - Pair normalisation: canonical ordering for symmetric comparison
-    - Pairwise and multi-way overlap computation across 2-4 databases
-    - Base-accession level analysis (isoform-collapsed comparisons)
-    - Venn diagram generation (2/3/4-way) with proportional sizing
-    - STRING threshold comparison figures
-    - Full overlap statistics report export
+Computes pairwise and multi-way overlaps between the four PPI databases (STRING,
+BioGRID, HuRI, HuMAP) after mapping all identifiers to UniProt, and generates
+Venn (2/3-way) or UpSet-style (4-way) diagrams and overlap summary statistics.
 
-Usage (as importable module):
-    from overlap_analysis import extract_pair_set, compute_overlaps, plot_venn_diagram
-    pair_sets = {name: extract_pair_set(df) for name, df in databases.items()}
-    stats = compute_overlaps(pair_sets)
-    plot_venn_diagram(pair_sets, "output/venn_overlap.png")
+Features
+    - Pair normalisation: canonical ordering for symmetric comparison.
+    - Pairwise and multi-way overlap computation across 2-4 databases.
+    - Base-accession level analysis (isoform-collapsed comparisons).
+    - Venn / UpSet diagrams and a STRING confidence-threshold comparison.
+    - Full overlap-statistics report export.
 
-Usage (standalone):
-    python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --output Output/venn_overlap.png -v
-    python overlap_analysis.py --data-dir data/ppi --aliases data/ppi/9606.protein.aliases.v12.0.txt --string-min-score 700 --output Output/venn_overlap_700.png
+Role in the submitted dissertation
+    Operational / supporting (part of the database-ingestion aim). The overlap
+    statistics and Venn/UpSet diagrams show how much the four curated PPI
+    databases agree; this is background characterisation of the interaction-data
+    landscape, not part of the interface-triage argument.
+
+Scope
+    These overlaps compare curated interaction records between databases. They
+    describe each database's coverage of known interactions and how consistent
+    the databases are with each other; they say nothing about the AlphaFold2
+    predictions or their interfaces.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md``.
 """
 
 import sys
@@ -53,7 +58,7 @@ DB_COLOURS = {
     'HuMAP': '#C44E52',
 }
 
-#---------P----------------air Normalisation---------------------------------
+#---------------------------- Pair Normalisation ----------------------------
 
 def normalise_pair(id_a: str, id_b: str) -> tuple[str, str]:
     """Return a canonical (sorted) pair for symmetric comparison.

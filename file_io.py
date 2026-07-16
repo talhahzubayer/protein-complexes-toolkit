@@ -1,10 +1,13 @@
 """Transparent open() for plain, gzip, and bzip2 files.
 
-The toolkit's PDB readers used to assume plain-text input. This module is
-the single point of truth for opening any input file regardless of its
-compression suffix. Use it everywhere a PDB or other text/binary input is
-opened so that ``.pdb.bz2`` (HPC layout) and ``.pdb`` (local Test_Data)
-both work without per-call dispatch.
+The single point of truth for opening any input file regardless of its
+compression suffix, so that ``.pdb.bz2`` (HPC layout) and ``.pdb`` (local
+Test_Data) both work without per-call dispatch. Use it everywhere a PDB or other
+text/binary input is opened; the toolkit's PDB readers rely on it so they can
+assume plain-text handles.
+
+Low-level operational infrastructure: file access only, no analysis, and not a
+reported result.
 """
 
 from __future__ import annotations
@@ -54,8 +57,9 @@ def decompressed_pdb_view(pdb_path: Path | str) -> Iterator[Path]:
     five times across different readers (``extract_plddt_from_pdb``,
     three passes inside ``read_pdb_with_chain_info_New``, and the SASA
     parser). Doing five separate bz2 decompressions per complex adds up
-    at HPC scale (41k complexes × ~600 KB × 5 reads ≈ tens of minutes of
-    redundant CPU work even before the rest of the pipeline runs).
+    at HPC scale (tens of thousands of complexes, each ~600 KB read five
+    times), a large amount of redundant CPU work before the rest of the
+    pipeline even runs.
     Decompressing once per complex collapses that to a single bz2 read
     and makes downstream ``open()`` calls plain-disk text IO.
 

@@ -1,30 +1,43 @@
-"""
-PyMOL script generation for AlphaFold2-predicted protein-protein complexes.
+"""PyMOL script generation for AlphaFold2-predicted protein-protein complexes.
 
-Generates .pml command files that load a PDB structure and apply layered
-visualisation: chain colouring, pLDDT confidence colouring, interface residue
-highlighting, and (optionally) variant position colouring by structural context.
+Generates reusable ``.pml`` command files that load a PDB structure and apply
+layered visualisation: chain colouring, pLDDT confidence colouring, interface
+residue highlighting, and (optionally) variant, AlphaMissense, disease and
+pathway overlays. Optional rendering commands and a py3Dmol fallback are also
+provided.
 
-Architecture:
-    - Pure string generators (no I/O) produce each visualisation layer
-    - build_pymol_script() assembles layers into a complete .pml file
-    - extract_interface_data() re-reads a PDB to get interface residue numbers
-    - generate_pymol_scripts_for_results() is the toolkit.py entry point
-    - Optional py3Dmol fallback for in-notebook rendering
+Architecture
+    - Pure string generators (no I/O) produce each visualisation layer.
+    - build_pymol_script() assembles the layers into a complete .pml file.
+    - extract_interface_data() re-reads a PDB to get interface residue numbers.
+    - generate_pymol_scripts_for_results() is the toolkit.py entry point.
+    - Optional py3Dmol fallback for in-notebook rendering.
 
-Data sources:
-    - PDB files from AlphaFold2 predictions (pLDDT in B-factor column)
-    - Interface data via pdockq.read_pdb_with_chain_info_New / find_best_chain_pair_New
-    - Variant details from variant_mapper.format_variant_details() output
+Data sources
+    - PDB files from AlphaFold2 predictions (pLDDT in the B-factor column).
+    - Interface data via pdockq.read_pdb_with_chain_info_New / find_best_chain_pair_New.
+    - Variant and annotation fields from the toolkit results CSV.
 
-Usage (standalone):
-    python pymol_scripts.py generate --pdb complex.pdb
-    python pymol_scripts.py generate --pdb complex.pdb --output pymol_output/ --render
-    python pymol_scripts.py batch --csv results.csv --pdb-dir D:\\ProteinComplexes
+Project context
+    Invoked by ``toolkit.py --pymol`` as a side-effect output (it adds no CSV
+    columns) and runnable standalone. By default it produces inspection scripts
+    for High-tier complexes.
 
-Usage (via toolkit.py):
-    python toolkit.py --dir DIR --output results.csv --interface --pae --pymol
-    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants --pymol --pymol-render
+Role in the submitted dissertation
+    Extended toolkit functionality / supporting infrastructure for batch
+    structural inspection. It is not the source of the dissertation's Figure 6:
+    those single-complex worked examples were rendered by
+    ``render_complex_summary.py``, not by treating this general ``.pml`` output
+    as the final figure.
+
+Scope
+    The scripts are a visualisation aid. The interface, variant, AlphaMissense,
+    disease and pathway overlays are interpretive annotations layered on a
+    predicted structure; drawing them does not establish that the interface is
+    correct or that the interaction occurs biologically.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import argparse
@@ -543,7 +556,7 @@ def generate_protvar_highlighting(
         return ''
 
     # First pass: find most severe AM class per (chain, position)
-    # so each residue appears in exactly one AM selection (fixes C/D).
+    # so each residue appears in exactly one AM selection.
     pos_best: dict[tuple[str, int], str] = {}
     for chain, rec in all_records:
         am_class = rec.get('am_class') or 'unknown'

@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
-"""
-ID Cross-Reference and Mapping Module.
-Parses the STRING aliases file to build in-memory lookup dictionaries for efficient cross-referencing between Ensembl protein IDs (ENSP), Ensembl gene IDs (ENSG), UniProt accessions, and gene symbols.
-Isoform-aware: preserves full isoform-specific UniProt accessions (e.g., Q9UKT4-2) as primary keys and uses base accessions (e.g., Q9UKT4) as grouping fields.
+"""ID cross-reference and species classification.
 
-Features:
-    - ENSP -> UniProt cross-referencing via STRING aliases
-    - ENSG -> UniProt cross-referencing via ENSP intermediary
-    - UniProt -> gene symbol and protein name resolution
-    - Secondary accession detection and canonical accession prioritisation
-    - Master lookup table export (CSV) with all cross-references
-    - Single-identifier resolution for interactive debugging
+Parses the STRING aliases file into in-memory lookup dictionaries for efficient
+cross-referencing between Ensembl protein IDs (ENSP), Ensembl gene IDs (ENSG),
+UniProt accessions and gene symbols, with an optional STRING API fallback. Also
+provides SpeciesClassifier, which labels accessions as reviewed_human /
+trembl_human / non_human.
 
-Usage (as importable module):
-    from id_mapper import IDMapper
-    mapper = IDMapper("data/ppi/9606.protein.aliases.v12.0.txt")
+Isoform-aware: full isoform-specific UniProt accessions (e.g. Q9UKT4-2) are kept
+as primary keys and base accessions (e.g. Q9UKT4) are used as grouping fields.
 
-    # -> ['P04637']
-    mapper.ensembl_to_uniprot("ENSP00000269305") 
+Features
+    - ENSP <-> UniProt / gene symbol / protein name resolution via STRING aliases
+    - ENSG -> UniProt via the ENSP intermediary
+    - Secondary-accession detection and canonical (Swiss-Prot) prioritisation
+    - Master lookup-table export (CSV) and single-identifier resolution
 
-    # -> 'TP53' 
-    mapper.uniprot_to_gene_symbol("P04637")
+Project context
+    Operational infrastructure. ``toolkit.py --enrich`` uses it to attach gene
+    symbols, protein names and Ensembl IDs, and SpeciesClassifier produces the
+    reviewed_human / trembl_human / non_human labels that scope the human-only
+    analyses. It is not itself a reported result.
 
-    # -> ['P04637']        
-    mapper.ensg_to_uniprot("ENSG00000141510")      
-
-Usage (standalone):
-    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --stats
-    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --export lookup.csv
-    python id_mapper.py --aliases data/ppi/9606.protein.aliases.v12.0.txt --resolve P04637
+The complete command reference is in ``Docs/Toolkit_Commands_List.md``.
 """
 
 import sys
@@ -613,8 +607,7 @@ class IDMapper:
         """Return non-primary UniProt accessions mapped to an ENSP ID.
         Design decision: We use the STRING aliases file rather than the UniProt REST API or the 8 GB idmapping.dat download. 
         STRING aliases already contain secondary accessions as alternative ENSP mappings.
-        Trade-off: proteins removed entirely from UniProt (not just merged) are not caught. 
-        See Documentation/Research_Project_Roadmap.md for the full rationale and future alternatives.
+        Trade-off: proteins removed entirely from UniProt (not just merged) are not caught.
         The primary accession is the first entry (prioritised by the Swiss-Prot-first sort key). 
         Secondary accessions are all remaining entries - these may be older UniProt accessions that have been merged into the primary or TrEMBL alternatives.
         Args:
@@ -903,7 +896,7 @@ def main() -> None:
             if len(all_uniprots) > 1:
                 print(f"  All UniProt:  {', '.join(all_uniprots)}")
 
-        # A.4.1: Validate unresolved IDs against STRING API
+        # Validate unresolved IDs against STRING API
         if args.validate_ids_api and not uniprot:
             try:
                 import warnings
@@ -929,7 +922,7 @@ def main() -> None:
             except Exception as e:
                 print(f"  Warning: STRING API query failed: {e}", file=sys.stderr)
 
-    # A.4.2: Cross-validate local interactions against STRING API
+    # Cross-validate local interactions against STRING API
     if args.cross_validate_api > 0:
         try:
             import random

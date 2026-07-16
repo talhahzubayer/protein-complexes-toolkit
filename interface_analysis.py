@@ -12,7 +12,7 @@ Features (structural):
 Additional features (PAE-aware, requires PKL data):
     - Interface PAE mapping and statistics (bidirectional max over PAE[A,B]/PAE[B,A])
     - PAE-only confident contacts (PAE < 5Å) and strict confident contacts (PAE < 5Å AND both pLDDT >= 70)
-    - Computational hot-spot residue extraction
+    - Confident interface-residue extraction
 
 Composite interface confidence score (heuristic, not calibrated):
     score = WEIGHT_PLDDT * f(interface_plddt_combined)
@@ -21,8 +21,9 @@ Composite interface confidence score (heuristic, not calibrated):
           + WEIGHT_DENSITY  * min(contacts_per_interface_residue / DENSITY_NORMALIZATION, 1.0)
 
     The composite is a screening heuristic, NOT a calibrated estimate of interface correctness.
-    Weights are expert-chosen, partially informed by the 9,573-complex dataset distribution,
-    but have NOT been fitted against DockQ, pDockQ2, or any benchmarked ground truth.
+    The weights were chosen by design, informed by the development-set distribution
+    (see the dissertation's §3.4 and Appendix B), and were NOT fitted against DockQ,
+    pDockQ2, or any benchmarked ground truth.
 
     - pLDDT and strict-confident-contact fraction are the confidence-bearing components.
     - Interface symmetry is a geometric plausibility feature, not a confidence feature.
@@ -33,15 +34,21 @@ Composite interface confidence score (heuristic, not calibrated):
       Dense interfaces can still be misdocked; sparse interfaces can be biologically real
       for transient or motif-mediated binding.
 
-Usage (standalone):
-    python interface_analysis.py --pdb structure.pdb
-    python interface_analysis.py --pdb structure.pdb --json output.json
-    python interface_analysis.py --pdb structure.pdb --pkl result.pkl
+Role in the submitted dissertation
+    Dissertation core: interface pLDDT, interface PAE, the strict
+    confident-contact fraction, the composite score and the diagnostic flags are
+    the interface-aware method itself. Directional-PAE diagnostics and the
+    multimer all-pairs aggregates are supporting; the confident-residue exports
+    and the standalone CLI are wider functionality.
 
-Usage (as importable module):
-    from interface_analysis import analyse_interface, analyse_interface_with_pae
-    result = analyse_interface("structure.pdb", threshold=8.0)
-    result_pae = analyse_interface_with_pae("structure.pdb", pae_matrix, chain_lengths)
+Scope
+    Every output here is a model-confidence or geometric descriptor. A confident,
+    well-formed predicted interface is not evidence that the interaction occurs
+    biologically or that the structure is experimentally correct; the composite
+    is calibrated for dimers only.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import sys
@@ -80,7 +87,9 @@ PAE_CONFIDENT_THRESHOLD = 5.0
 # Geometry thresholds for flagging
 MIN_INTERFACE_CONTACTS = 5          # Below this, interface is negligible
 
-# Calibrated from 9,573-complex dataset to flag unusually sparse interfaces for contacts_per_interface_residue below this value (20th percentile density = 1.15 among contacts >= 5)
+# Flags unusually sparse interfaces: contacts_per_interface_residue below this value.
+# From the development-set density distribution (~20th percentile among interfaces
+# with >= 5 contacts).
 SPARSE_INTERFACE_DENSITY = 1.15
 
 ASYMMETRIC_INTERFACE_RATIO = 0.5    # interface_symmetry below this is flagged as asymmetric
@@ -89,13 +98,13 @@ ASYMMETRIC_INTERFACE_RATIO = 0.5    # interface_symmetry below this is flagged a
 SUBSTANTIAL_DISORDER_FRACTION = 0.3  # >30% residues below pLDDT 50
 PLDDT_DISORDER_THRESHOLD = 50
 
-# Composite score normalisation (calibrated from 9,573-complex dataset)
+# Composite score normalisation (development-set density distribution; see Appendix B)
 # Density is a packing plausibility feature, not a confidence feature:
 # dense interfaces can still be misdocked and sparse interfaces can be biologically real.
 DENSITY_NORMALIZATION = 2.0          # density / 2.0, capped at 1.0 (95th percentile density = 1.70; rounded up to 2.0)
 
 # Composite score weights - HEURISTIC, not fitted against DockQ/pDockQ2 or any benchmarked
-# ground truth. Ordering is expert-chosen, partially informed by the 9,573-complex dataset:
+# ground truth. Chosen by design, informed by the development-set distribution (§3.4, Appendix B):
 #   - interface pLDDT and strict confident-contact fraction are treated as the
 #     confidence-bearing components
 #   - interface symmetry is a geometric plausibility feature (asymmetric interfaces can be
@@ -111,11 +120,12 @@ WEIGHT_DENSITY = 0.15
 # Paradox detection thresholds (High-quality + substantial disorder)
 PARADOX_IPTM_THRESHOLD = 0.75
 PARADOX_PDOCKQ_THRESHOLD = 0.5
-PARADOX_CONFIDENT_CONTACT_GENUINE = 0.73  # above -> likely genuine binding (calibrated from 9,573-complex dataset: median of 138 paradox complexes)
-PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.50 # below -> likely artefactual (calibrated from 9,573-complex dataset: 25th percentile of 138 paradox complexes)
+PARADOX_CONFIDENT_CONTACT_GENUINE = 0.73  # above: high confident-contact fraction despite disorder (development-set paradox distribution)
+PARADOX_CONFIDENT_CONTACT_ARTEFACT = 0.50 # below: low confident-contact fraction, disorder-dominated (development-set paradox distribution)
 
 # Metric disagreement threshold (ipTM vs pDockQ)
-# All disagreement cases in 9,573-complex dataset are ipTM >> pDockQ, confirming pDockQ is systematically more stringent - often penalising genuine interfaces in disordered complexes.
+# In the development set the disagreement is systematically ipTM >> pDockQ, i.e. pDockQ
+# is the more stringent of the two metrics for disordered complexes.
 METRIC_DISAGREEMENT_THRESHOLD = 0.52  # 90th percentile of |iptm - pdockq| distribution
 
 # Bidirectional PAE handling
@@ -186,7 +196,7 @@ def identify_interface_contacts(chain_coords: dict[str, np.ndarray], chain_plddt
 def compute_interface_geometry(contact_result: ContactResult) -> dict:
     """Compute geometric properties of the protein-protein interface.
     Produces metrics that characterise interface size, shape, and symmetry.
-    These features help distinguish genuine biological interfaces (typically large, symmetric, dense) from crystal-packing artefacts or prediction errors (small, asymmetric, sparse).
+    These features characterise interface size, shape and symmetry. Well-formed predicted interfaces tend to be larger, more symmetric and denser, but geometry alone does not establish that an interface is biologically real.
     Args:
         contact_result: ContactResult from identify_interface_contacts().
     Returns:
@@ -245,8 +255,8 @@ def compute_interface_geometry(contact_result: ContactResult) -> dict:
 
 def compute_interface_plddt(contact_result: ContactResult) -> dict:
     """Compare pLDDT confidence at the interface vs the bulk of each chain.
-    This is the computational replacement for PyMOL eyeballing.  
-    A positive interface_vs_bulk_delta indicates the interface is MORE confident than the overall structure - characteristic of genuine interactions and the "paradox complexes" where disordered proteins fold upon binding.
+    This is the computational replacement for PyMOL eyeballing.
+    A positive interface_vs_bulk_delta means the interface is modelled more confidently than the bulk of the chains. This is a model-confidence pattern; it does not by itself show that the interaction is real or that the region folds upon binding.
     Args:
         contact_result: ContactResult from identify_interface_contacts().
     Returns:
@@ -544,7 +554,7 @@ def compute_interface_pae_features(contact_result: ContactResult, pae_matrix: np
         'interface_pae_directional_delta_max': round(float(np.max(directional_abs_delta)), 2),
     }
 
-#-----------------Confident Interface Residues (Computational Hot Spots)------------
+#-----------------Confident Interface Residues------------
 
 def identify_confident_interface_residues(contact_result: ContactResult, pae_matrix: np.ndarray, chain_lengths: Optional[tuple[int, int]] = None,
     chain_residue_numbers: Optional[dict[str, list[int]]] = None,
@@ -554,8 +564,8 @@ def identify_confident_interface_residues(contact_result: ContactResult, pae_mat
     chain_offsets: Optional[tuple[int, int]] = None,
     cb_to_ca_maps: Optional[tuple[list[int], list[int]]] = None) -> dict:
     """Identify interface residues that pass both PAE and pLDDT confidence filters.
-    These are the "computational hot spots" - residue pairs at the interface where AlphaFold2 is confident about both the local structure (pLDDT) and the relative positioning between chains (PAE).  
-    These are the primary drug-discovery-relevant output.
+    These are the interface residues where AlphaFold2 is confident about both the local structure (pLDDT) and the relative positioning between chains (PAE).
+    They are a confidence-filtered subset for downstream inspection, not experimentally established binding hot spots.
     Args:
         contact_result: ContactResult from identify_interface_contacts().
         pae_matrix: Full PAE matrix from the PKL file.
@@ -644,7 +654,7 @@ def identify_confident_interface_residues(contact_result: ContactResult, pae_mat
         'confident_contacts': confident_contact_details,
     }
 
-#---------------All-Pairs Metrics (Multimer Refactor Phase 3)---------------------
+#---------------All-Pairs Metrics (multimer aggregates)---------------------
 
 @dataclass
 class PairMetricRecord:
@@ -802,7 +812,7 @@ def compute_all_pair_metrics(
 def aggregate_pair_metrics(records: list[PairMetricRecord]) -> dict:
     """Roll per-pair records up into the per-complex aggregate scalars.
 
-    Aggregation policy (from the dissertation-safe plan):
+    Aggregation policy:
         pdockq_mean                    unweighted mean across all pairs (zero-contact pairs contribute 0.0)
         pdockq_min                     min across all pairs (includes zero-contact)
         contact_count_total            sum across pairs
@@ -1017,7 +1027,7 @@ def analyse_interface_from_contact_result(contact_result: ContactResult, pae_mat
     Use this when the batch pipeline has already called calc_pdockq_and_contacts() and you want to avoid re-reading the PDB.
     Args:
         contact_result: Pre-computed ContactResult.
-        pae_matrix: Optional PAE matrix for Phase 2 features.
+        pae_matrix: Optional PAE matrix for the PAE-derived features.
         chain_lengths: Legacy dimer chain lengths; prefer chain_offsets.
         chain_residue_numbers: Optional for PDB residue number mapping.
         chain_offsets: Tuple of (offset_A, offset_B) in the PAE matrix. Required for multi-chain complexes.
@@ -1092,8 +1102,7 @@ def _compute_flags(features: dict) -> list[str]:
 
     # PAE flags
     # Keep pointing at the PAE-only fraction (pae_confident_contact_fraction), not the strict
-    # fraction: the 0.2 threshold was calibrated against the PAE-only definition. Any
-    # recalibration should happen alongside the paradox and quality-tier thresholds.
+    # fraction: the 0.2 threshold was set against the PAE-only definition.
     confident_fraction = features.get('pae_confident_contact_fraction')
     if confident_fraction is not None:
         if confident_fraction < 0.2:
@@ -1120,9 +1129,10 @@ def compute_interface_confidence(metrics: dict) -> Optional[float]:
 
     Components 1 and 2 carry confidence information; components 3 and 4 are plausibility
     features retained because they correlate with typical binding geometries but should not
-    be read as confidence in their own right. Weights are expert-chosen, partially informed
-    by the 9,573-complex distribution, and have NOT been fitted against DockQ, pDockQ2, or
-    any benchmarked ground truth. Treat the composite as a screening/aggregation heuristic.
+    be read as confidence in their own right. The weights were chosen by design, informed
+    by the development-set distribution (§3.4, Appendix B), and were NOT fitted against
+    DockQ, pDockQ2, or any benchmarked ground truth. Treat the composite as a
+    screening/aggregation heuristic.
 
     Requires PAE data (strict_confident_contact_fraction). Returns None when PAE features
     are unavailable.
@@ -1176,10 +1186,9 @@ def compute_extended_flags(interface_features: dict, iptm: Optional[float] = Non
             and pdockq >= PARADOX_PDOCKQ_THRESHOLD
             and disorder_fraction > SUBSTANTIAL_DISORDER_FRACTION):
 
-        # Keep pointing at the PAE-only fraction: the GENUINE (0.73) and ARTEFACT (0.50)
-        # thresholds were calibrated against 138 paradox complexes scored with the
-        # PAE-only definition. Any recalibration to the strict definition is deferred
-        # to a future pass alongside quality_tier_v2 threshold recalibration.
+        # Apply these thresholds to the PAE-only fraction: the 0.73 and 0.50 cut-offs were
+        # derived from the PAE-only confident-contact fraction on the development-set paradox
+        # distribution, so they are used with the same fraction for consistency.
         conf_frac = interface_features.get('pae_confident_contact_fraction')
 
         if conf_frac is not None and conf_frac > PARADOX_CONFIDENT_CONTACT_GENUINE:
@@ -1188,7 +1197,8 @@ def compute_extended_flags(interface_features: dict, iptm: Optional[float] = Non
             flags.append('paradox_artefactual')
 
     # Metric disagreement: large gap between ipTM and pDockQ
-    # Systematically ipTM >> pDockQ in the 9,573-complex dataset, confirming pDockQ penalises genuine interfaces in disordered complexes.
+    # In the development set the disagreement is systematically ipTM >> pDockQ (pDockQ is
+    # the more stringent metric for disordered complexes).
     if (iptm is not None and pdockq is not None
             and abs(iptm - pdockq) > METRIC_DISAGREEMENT_THRESHOLD):
         flags.append('metric_disagreement')
@@ -1210,8 +1220,8 @@ def build_interface_export_record(complex_name: str, protein_a: str, protein_b: 
     interface_plddt_combined: Optional[float] = None) -> dict:
     """Build a structured record for interface residue export.
     Produces a JSON-serialisable dictionary suitable for JSONL output.
-    Each record describes a complex's confident interface residues - the computationally identified binding hot-spots that pass both PAE and pLDDT confidence filters.
-    These records feed into downstream analyses: pathway mapping, genetic variant analysis, and drug target identification.
+    Each record describes a complex's confident interface residues - the interface residues that pass both the PAE and pLDDT confidence filters.
+    These records feed downstream analyses: pathway mapping, genetic variant analysis and drug-target annotation.
     Args:
         complex_name: Parsed complex identifier (e.g. "P12345_Q67890").
         protein_a: UniProt ID for chain A.
@@ -1284,14 +1294,14 @@ Usage (as importable module):
             prediction = load_pkl_without_jax(args.pkl)
             pae_matrix = np.asarray(prediction.get('predicted_aligned_error'))
             if pae_matrix is None:
-                print("Warning: No PAE matrix in PKL, falling back to Phase 1 only", file=sys.stderr)
+                print("Warning: No PAE matrix in PKL, falling back to PDB-only analysis", file=sys.stderr)
                 result = analyse_interface(args.pdb, threshold=args.threshold)
             else:
                 result = analyse_interface_with_pae(
                     args.pdb, pae_matrix, threshold=args.threshold
                 )
         except Exception as e:
-            print(f"Warning: PAE analysis failed ({e}), falling back to Phase 1", file=sys.stderr)
+            print(f"Warning: PAE analysis failed ({e}), falling back to PDB-only analysis", file=sys.stderr)
             result = analyse_interface(args.pdb, threshold=args.threshold)
     else:
         result = analyse_interface(args.pdb, threshold=args.threshold)

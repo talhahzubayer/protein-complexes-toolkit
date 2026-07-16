@@ -1,9 +1,9 @@
-"""
-Pathway mapping and network analysis module for the protein complexes toolkit.
+"""Pathway mapping and network analysis for the protein complexes toolkit.
 
-Maps pipeline proteins to Reactome pathways using local flat files (offline-first),
-optionally enriches with STRING API functional enrichment (GO/KEGG/Reactome p-values),
-and builds interaction networks with NetworkX for downstream visualisation.
+Maps pipeline proteins to Reactome pathways using local flat files
+(offline-first), optionally adds STRING API functional-enrichment significance
+(GO/KEGG/Reactome FDR) and per-pathway PPI-enrichment statistics, and builds
+interaction networks with NetworkX for downstream visualisation.
 
 Data sources
 ------------
@@ -13,19 +13,26 @@ Local (offline-first, in ``data/pathways/``):
 
 STRING API (optional, via ``string_api.py``):
   - ``query_enrichment()`` — Functional enrichment with FDR
-  - ``query_ppi_enrichment()`` — Network enrichment test
+  - ``query_ppi_enrichment()`` — Network (PPI) enrichment test
   - ``query_network()`` — Interaction edges
 
-Usage
------
-Standalone CLI::
+Role in the submitted dissertation
+    Dissertation-supporting. Per-pathway PPI-enrichment (the observed/expected
+    edge ratio) contributes to the biological-corroboration analysis, where
+    higher-quality tiers show stronger pathway-level interaction enrichment. The
+    Reactome pathway lists, functional-enrichment FDR, GO terms and the network
+    plots are supporting/operational context rather than central results.
 
-    python pathway_network.py summary --csv results.csv
-    python pathway_network.py network --csv results.csv --output-dir Output/networks/
+Scope
+    Pathway membership and PPI-enrichment describe biological context and
+    population-level corroboration: proteins that share a pathway or interact
+    more than expected are consistent with a real interaction, but this does not
+    confirm that any individual predicted interface is correct or occurs in
+    cells. STRING enrichment adds statistical significance to the local Reactome
+    assignments; it does not validate the structure.
 
-Toolkit integration::
-
-    python toolkit.py Test_Data/ -o results.csv --interface --pae --enrich aliases.txt --pathways
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 from __future__ import annotations
@@ -658,8 +665,6 @@ def plot_network_by_pdockq(
 ) -> None:
     """Spring layout network with edges coloured by pDockQ.
 
-    This is the spec requirement: 'Network plot coloured by predicted pDockQ'.
-
     Parameters
     ----------
     graph : nx.Graph
@@ -947,9 +952,9 @@ def annotate_results_with_pathways(
 
     When *enrichment_df* is provided (from STRING API ``query_enrichment``),
     it augments the local Reactome pathway assignments with statistical
-    significance (FDR values). This follows the offline-first + API validation
-    pattern: local Reactome provides the base, STRING enrichment validates
-    with p-values and FDR.
+    significance (FDR values): the local Reactome mapping provides the base and
+    the STRING enrichment adds p-values and FDR. This is statistical
+    corroboration of the pathway annotation, not validation of the structure.
 
     Parameters
     ----------
@@ -979,7 +984,7 @@ def annotate_results_with_pathways(
         print(f"  Annotating {len(results)} complexes with pathway data...",
               file=sys.stderr)
 
-    # Pre-compute enrichment FDR lookup (STRING API validation of local Reactome)
+    # Pre-compute enrichment FDR lookup (STRING API significance for local Reactome terms)
     enrichment_fdr: dict[str, float] = {}
     if enrichment_df is not None and len(enrichment_df) > 0:
         for _, erow in enrichment_df.iterrows():

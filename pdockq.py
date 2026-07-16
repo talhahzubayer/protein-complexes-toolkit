@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
-"""
-pDockQ - Predicted DockQ Score Calculator for AlphaFold2-predicted protein complexes.
-Uses the FoldDock parameterisation which normalises by the average pLDDT value at the interface.
-Based on: pdockq = L / (1 + exp(-k*(x-x0))) + b where L=0.724, x0=152.611, k=0.052, b=0.018, and x = avg_interface_plddt * log10(n_contacts).
+"""pDockQ - predicted DockQ score for AlphaFold2-predicted protein complexes.
 
-Usage (standalone):
-    python pdockq.py --pdbfile structure.pdb
+Reads CB atoms and per-residue pLDDT from a PDB, identifies inter-chain
+contacts, and applies the published FoldDock sigmoid:
+    pdockq = L / (1 + exp(-k*(x - x0))) + b
+with L=0.724, x0=152.611, k=0.052, b=0.018 and x = avg_interface_plddt *
+log10(n_contacts). A calibration table maps the score to a positive predictive
+value (PPV).
 
-Usage (as importable module):
-    from pdockq import read_pdb_Edited, calc_pdockq_Edited, calc_pdockq_and_contacts_New
-    chain_coords, chain_plddt = read_pdb_Edited("structure.pdb")
-    pdockq, ppv = calc_pdockq_Edited(chain_coords, chain_plddt, t=8)
+Project context
+    Low-level structural module. Its CB-atom / chain-info readers
+    (``read_pdb_with_chain_info_New`` and friends) and contact identification
+    are the parsing layer that ``interface_analysis.py`` and ``toolkit.py`` build
+    on: pdockq.py owns the geometry, interface_analysis owns the PAE features.
 
-Extended version with full contact details (for interface analysis):
-    # result.contacts, result.avg_if_plddt, result.chain_ids, etc.
-    result = calc_pdockq_and_contacts_New(chain_coords, chain_plddt, t=8) 
+Role in the submitted dissertation
+    Dissertation core. pDockQ is one of the two headline confidence metrics
+    (with ipTM) that define the v1 quality tier, and its interface geometry
+    feeds the composite score.
+
+Scope
+    pDockQ is a model-derived estimate of docking quality, not experimental
+    ground truth: the sigmoid parameters and the PPV table come from the
+    published FoldDock calibration against DockQ on heterodimers, so scores for
+    other assemblies or very sparse interfaces should be read with that
+    calibration context in mind.
+
+Naming: functions and classes carry ``_Edited`` / ``_New`` suffixes from an
+earlier refactor and are imported under aliases by downstream modules. The
+``pdockq`` and ``ppv`` output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import sys
@@ -324,7 +338,7 @@ class PairContactResult:
     This is the geometry-only record produced by `compute_all_chain_pairs`. PAE
     features and the final JSON-serialisable view live in
     `interface_analysis.PairMetricRecord` — pdockq.py owns geometry, interface_analysis
-    owns PAE (Phase 3 of the multimer refactor).
+    owns PAE.
 
     Zero-contact pairs are represented with n_contacts=0, pdockq=0.0, ppv=None,
     interface_plddt=None, and empty residue sets. They must not be silently dropped:
@@ -405,8 +419,7 @@ def calc_pdockq_whole_complex(
     contact in the complex, so that dangling chains and weakly-coupled secondary
     interfaces are both reflected in a single number.
 
-    For N=2 this exactly equals the best-pair pDockQ (metric identity — protected
-    by the Phase 6 dimer regression test).
+    For N=2 this exactly equals the best-pair pDockQ (metric identity).
     """
     from itertools import combinations
 

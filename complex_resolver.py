@@ -1,5 +1,11 @@
 """Discover paired AlphaFold2 PDB/PKL files in flat or sharded layouts.
 
+Operational / audit infrastructure. ``toolkit.py`` calls ``find_complexes`` (via
+``find_paired_data_files``) to enumerate the complexes to process in the
+flat-dir and sharded HPC layouts, and the fingerprinted manifest it writes
+underpins the incremental ``--skip-existing`` run mode. It discovers inputs and
+records an audit trail; it is not itself a reported result.
+
 Library API
 -----------
 

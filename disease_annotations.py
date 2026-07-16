@@ -1,27 +1,31 @@
-"""
-Disease & biological annotation module for the protein complexes toolkit.
+"""Disease and biological annotation for the protein complexes toolkit.
 
-Parses UniProt SwissProt XML to extract disease associations, post-translational
-modifications (PTM), Gene Ontology terms, KEGG pathway identifiers, and drug
-target status for proteins in the pipeline. Supports offline-first annotation
-from a local XML file with optional UniProt REST API fallback for missing entries.
+Parses UniProt Swiss-Prot XML to extract disease associations, drug-target
+status, post-translational modifications (PTM), Gene Ontology terms and KEGG
+pathway identifiers for the proteins in a run. Offline-first from a local XML
+file, with an optional UniProt REST API fallback for entries missing locally.
 
 Data source
 -----------
-``data/pathways/uniprot_sprot_human.xml`` — full UniProt SwissProt reviewed human
-proteome (20,431 entries, ~1.1 GB). Parsed via ``xml.etree.ElementTree.iterparse``
-for streaming (low peak memory).
+``data/pathways/uniprot_sprot_human.xml`` — the full UniProt Swiss-Prot reviewed
+human proteome (20,431 entries, ~1.1 GB), stream-parsed via
+``xml.etree.ElementTree.iterparse`` for low peak memory.
 
-Usage
------
-Standalone CLI::
+Role in the submitted dissertation
+    Dissertation-supporting: the per-chain disease counts and drug-target status
+    provide the disease and drug-target context used in the
+    biological-corroboration discussion. The PTM and Gene Ontology fields are
+    additional toolkit outputs that were not central to the submitted argument.
+    Offline XML parsing and the API fallback are operational.
 
-    python disease_annotations.py summary
-    python disease_annotations.py lookup --protein P04637
+Scope
+    These are database annotations attached by protein accession. They provide
+    biological context — a chain's known disease links, drug-target status,
+    modifications and functions — and are shaped by annotation coverage
+    (well-studied proteins are more heavily annotated). They do not validate the
+    predicted interaction or the interface.
 
-Toolkit integration::
-
-    python toolkit.py Test_Data/ -o results.csv --interface --pae --enrich aliases.txt --disease
+The complete command reference is in ``Docs/Toolkit_Commands_List.md``.
 """
 
 from __future__ import annotations

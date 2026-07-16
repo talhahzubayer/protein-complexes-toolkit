@@ -1,27 +1,40 @@
-"""
-Variant mapping to AlphaFold2-predicted protein-protein complex structures.
-Maps genetic variants from UniProt/ClinVar/ExAC databases onto predicted complex structures. 
-Classifies each variant by structural context (interface_core, interface_rim, surface_non_interface, buried_core) and computes enrichment of pathogenic variants at interaction interfaces.
+"""Variant mapping to AlphaFold2-predicted protein-protein complex structures.
 
-Architecture:
-    - Offline-first: reads flat variant database files as primary data
-    - Chunked streaming for large files (UniProt 33M rows, ClinVar 8.9M rows)
-    - Integrates into toolkit.py via --variants flag
-    - Standalone CLI for variant analysis on pre-computed JSONL exports
+Maps human sequence variants from UniProt/ClinVar/ExAC onto predicted complex
+structures and classifies each variant by structural context (interface_core,
+interface_rim, surface_non_interface, buried_core) relative to the predicted
+inter-chain interface, then computes the enrichment of variants at interface
+positions and attaches gene-level constraint scores.
 
-Data sources:
+Architecture
+    - Offline-first: reads flat variant database files as the primary source.
+    - Chunked streaming for the large files (UniProt ~33M rows, ClinVar ~8.9M).
+    - Invoked by ``toolkit.py --variants``; also runnable standalone.
+
+Data sources
     - homo_sapiens_variation.txt (UniProt protein-level variants, HGVS format)
     - variant_summary.txt (ClinVar clinical significance and review quality)
-    - forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt (ExAC gene-level constraint)
+    - forweb_cleaned_exac_r03_march16_z_data_pLI_CNV-final.txt (ExAC gene-level
+      constraint: pLI, mis_z)
 
-Usage (standalone):
-    python variant_mapper.py summary --variants-dir data/variants
-    python variant_mapper.py lookup --variants-dir data/variants --protein P24534
-    python variant_mapper.py map --interfaces interfaces.jsonl --pdb-dir DIR --variants-dir data/variants --output variant_analysis.csv
+Role in the submitted dissertation
+    Dissertation-supporting. Pathogenic-variant counts at the predicted
+    interface and gene-constraint (pLI) values feed the biological-corroboration
+    and prediction-bias analysis. Variant-file parsing, ClinVar enrichment and
+    SASA computation are operational; the detailed per-chain variant_details
+    fields and the standalone map/lookup modes are wider functionality.
 
-Usage (via toolkit.py):
-    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants
-    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants data/variants --no-clinvar
+Scope
+    Structural contexts are assigned relative to the *predicted* inter-chain
+    interface, not an experimentally determined one. A pathogenic variant
+    mapping to a predicted interface is population-level corroboration, not
+    proof that the interface is real or that the variant disrupts binding.
+    Results depend on annotation burden and database coverage. The gene-level
+    pLI/mis_z scores describe constraint on the whole gene and are used to probe
+    prediction bias, not to measure structural correctness.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import argparse
@@ -1133,15 +1146,13 @@ def annotate_results_with_variants(
 
         # Note: `interface_a` / `interface_b` above are the CONFIDENT interface residue
         # sets produced by identify_confident_interface_residues() in interface_analysis.py,
-        # not the full pdockq contact residue sets. The 2026-04-24 composite-score
-        # methodology revision switched the confidence filter to bidirectional PAE
-        # (max(forward, reverse)), which is strictly stricter than the previous one-
-        # directional indexing - so roughly 42 percent of complexes ended up with a
-        # smaller confident-residue set post-revision, which cascades here into fewer
-        # interface_core/interface_rim variant classifications and lower
-        # interface_variant_enrichment values. This tightening is intended: a variant
-        # only counts as "at the interface" when AF2 is bidirectionally confident
-        # about the underlying residue's interface status.
+        # not the full pdockq contact residue sets. The confidence filter uses
+        # bidirectional PAE (max(forward, reverse)), which is stricter than a
+        # one-directional test and yields smaller confident-residue sets; that
+        # cascades here into fewer interface_core/interface_rim classifications and
+        # lower interface_variant_enrichment values. This tightening is intended: a
+        # variant only counts as "at the interface" when AF2 is bidirectionally
+        # confident about the underlying residue's interface status.
 
         # Build cross-chain interface CB coords for core/rim classification
         cross_cb_for_a, _ = _build_interface_cb_coords(interface_b, res_numbers_b, cb_coords_b)

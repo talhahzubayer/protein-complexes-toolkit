@@ -1,31 +1,38 @@
-"""
-Offline pathogenicity and stability scoring for protein complex variants.
+"""Offline pathogenicity and stability scoring for protein complex variants.
 
-Integrates two pre-computed data sources to score variant effects without
-any API dependency:
+Integrates two pre-computed data sources to score variant effects with no API
+dependency:
 
-1. AlphaMissense (DeepMind) — deep-learning pathogenicity predictions for
-   all possible human amino acid substitutions (~216M variants).
+1. AlphaMissense (DeepMind) — deep-learning pathogenicity predictions for all
+   possible human amino acid substitutions (~216M variants).
 2. AFDB FoldX export (EBI) — pre-computed FoldX ΔΔG values on monomeric
    AlphaFold structures with per-position pLDDT (~209M substitutions).
 
-Architecture:
-    - Offline-first: reads local TSV/CSV files, no API calls
-    - Lazy loading: streams files and filters for pipeline proteins only
-    - Integrates into toolkit.py via --protvar flag (requires --variants)
-    - Standalone CLI for score lookup and coverage statistics
+Architecture
+    - Offline-first: reads local TSV/CSV files, no API calls.
+    - Lazy loading: streams both files and keeps only the pipeline's proteins.
+    - Invoked by ``toolkit.py --protvar`` (requires --variants); also a
+      standalone CLI for lookup and coverage statistics.
 
-Data sources:
+Data sources
     - AlphaMissense_aa_substitutions.tsv (pathogenicity scores)
     - afdb_foldx_export_20250210.csv (monomeric FoldX ΔΔG + pLDDT)
 
-Usage (standalone):
-    python protvar_client.py summary
-    python protvar_client.py lookup --protein P61981
-    python protvar_client.py lookup --protein P61981 --position 4
+Role in the submitted dissertation
+    Dissertation-supporting / extended. The per-chain AlphaMissense mean and
+    pathogenic count and the monomeric FoldX mean feed the supplementary
+    stability-predictor concordance comparison (EVE vs AlphaMissense vs FoldX).
+    The ``--protvar`` flag, the ``protvar_*`` column names and this file name
+    are retained from an earlier ProtVar-API implementation that was replaced by
+    these two offline files.
 
-Usage (via toolkit.py):
-    python toolkit.py --dir DIR --output results.csv --interface --pae --enrich ALIASES --variants --protvar
+Scope
+    AlphaMissense scores a substitution's predicted pathogenicity and FoldX ΔΔG
+    its predicted effect on monomeric fold stability. Both are per-residue,
+    single-chain measures: they do not measure disruption of the predicted
+    inter-chain interface, and they do not confirm that the interaction occurs.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md``.
 """
 
 import argparse
@@ -475,7 +482,7 @@ def _score_chain_variants_protvar(
 
     Args:
         accession: UniProt accession for this chain.
-        details_str: Pipe-separated variant detail string from Phase C.
+        details_str: Pipe-separated variant detail string from the variant-mapping stage.
         protvar_index: Combined index from build_protvar_index().
 
     Returns:
@@ -585,7 +592,7 @@ def annotate_results_with_protvar(
                 row[f'protvar_details_{suffix}'] = ''
 
     if verbose:
-        print(f"  ProtVar offline: annotated {annotated} chains with scores "
+        print(f"  Offline scoring: annotated {annotated} chains with scores "
               f"across {len(results)} complexes", file=sys.stderr)
 
 
@@ -634,7 +641,7 @@ def _cli_summary(foldx_path: str, am_path: str) -> None:
     foldx_file = Path(foldx_path)
     am_file = Path(am_path)
 
-    print("ProtVar Offline Data Summary")
+    print("Offline AlphaMissense + FoldX Data Summary")
     print("=" * 50)
 
     # AlphaMissense

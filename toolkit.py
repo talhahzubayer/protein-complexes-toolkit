@@ -1,45 +1,49 @@
 #!/usr/bin/env python3
-"""
-Batch Processor for AlphaFold2 Protein Complex Quality Assessment - processes multiple AlphaFold2 predictions by directly importing analysis functions.
+"""Batch orchestrator for interface-aware AlphaFold2-Multimer quality assessment.
 
-Integrated analysis modules:
-    - read_af2_nojax     -> PKL metric extraction (JAX-free)
-    - pdockq             -> Interface quality scoring (pDockQ/PPV)
-    - interface_analysis -> Interface geometry, pLDDT, PAE features, and export
-    - id_mapper          -> Gene symbols, protein names, Ensembl IDs (via --enrich)
-    - database_loaders   -> Database source tagging and evidence types (via --databases)
+Discovers paired PDB/PKL predictions, runs the per-complex analysis pipeline,
+assembles the results CSV (and optional interface JSONL / PyMOL scripts), and
+prints a summary. Analysis functions are imported directly rather than run as
+subprocesses, so a single process drives metric extraction, pDockQ, interface
+analysis, quality tiering, composite screening and the optional biological
+annotations.
 
-Scalability features:
-    - Multiprocessing    -> --workers N for parallel processing via ProcessPoolExecutor
-    - Progress tracking  -> tqdm progress bar (auto-fallback to print if not installed)
-    - Checkpointing      -> --checkpoint saves progress every 50 complexes
-    - Resume capability  -> --resume skips already-processed complexes
+Integrated analysis modules
+    read_af2_nojax     -> PKL metric extraction (JAX-free)
+    pdockq             -> pDockQ / PPV interface scoring, chain-pair selection
+    interface_analysis -> interface geometry, pLDDT, PAE features, export records
+    id_mapper          -> species classification and gene/protein/Ensembl enrichment
+    database_loaders   -> database source tagging and evidence types
+    variant_mapper, stability_scorer, protvar_client, disease_annotations and
+    pathway_network own the remaining optional annotation stages.
 
-Enrichment features:
-    - --enrich           -> Adds gene symbols, protein names, Ensembl IDs, amino acid sequences via id_mapper.py (requires STRING aliases file)
-    - --databases        -> Tags each complex with source databases (STRING, BioGRID, HuRI, HuMAP) and evidence types via database_loaders.py
-    - Base output is 28 columns (incl. species_a/b/status) and enriched output is up to 124 columns with all features
+Project context
+    The central production stage: it turns a directory of predictions into the
+    single results CSV that visualise_results.py and the downstream audit
+    scripts consume. It owns the toolkit's base + interface + PAE columns and
+    the schema-assembly logic; each annotation module contributes its own
+    column block.
 
-Usage:
-    # Basic (sequential, no checkpointing)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae
+Role in the submitted dissertation
+    Dissertation core for the structural method: per-complex metric extraction,
+    the v1 (ipTM + pDockQ) and v2 (composite-informed) quality tiers, the
+    composite screening status and the calibrated-dimer scope all originate
+    here. Operational/audit for input discovery, partial-row handling,
+    checkpointing and the incremental / chunked run modes (``--skip-existing``,
+    ``--resume``, ``--limit``). Dissertation-supporting for the
+    biological-annotation stages it orchestrates. Some flag combinations and
+    output modes are wider toolkit functionality that was not reported in the
+    dissertation.
 
-    # Full analysis with parallel workers and checkpointing
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --checkpoint
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
+Scope
+    The composite score and v2 tiers are calibrated for dimers only
+    (``tier_scope == 'dimer_validated'``); multimer rows are recorded as
+    provisional. The outputs rank and classify predictions by model confidence;
+    they do not establish that an interface occurs biologically or that a
+    structure is experimentally correct.
 
-    # With enrichment (gene symbols, protein names, sequences)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "C:\\Users\\Talhah Zubayer\\Documents\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt"
-
-    # With enrichment + database source tagging
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "C:\\Users\\Talhah Zubayer\\Documents\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --databases "C:\\Users\\Talhah Zubayer\\Documents\\protein-complexes-toolkit\\data\\ppi"
-
-    # Resume an interrupted run
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --resume
-
-    # Verbose (sequential only - verbose is suppressed with -w > 1)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -v
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import gc
@@ -119,13 +123,17 @@ PAE_CONFIDENT_THRESHOLD = 5.0
 ENRICH_API_BATCH_SIZE = 200
 
 # Schema version marker - bump when column semantics change.
-# Readers must treat a missing schema_version column as "legacy" (pre-refactor).
+# Readers must treat a missing schema_version column as legacy (written before
+# this column was added).
 SCHEMA_VERSION = "multimer_v1"
 
 # Diagnostic reasons for the `partial_reason` column.
-# Empty string is the "fully calibrated, nothing wrong" sentinel — chosen for
+# Empty string is the "no recorded processing failure" sentinel — chosen for
 # CSV friendliness over None (csv.DictWriter renders None as empty anyway, but
 # downstream pandas reads NaN; a literal "" round-trips as "" without coercion).
+# An empty partial_reason does not by itself mean the row is calibrated;
+# inclusion in calibrated analyses is decided separately by tier_scope and
+# composite_is_calibrated (see the dissertation's Appendix C).
 #
 # The vocabulary is a controlled single-column failure taxonomy. Any non-empty
 # value excludes the row from recoverable / calibrated analyses. Values are
@@ -248,7 +256,7 @@ CSV_FIELDNAMES_BASE = [
     'has_pdb', 'has_pkl', 'geometry_available', 'plddt_source',
     'species', 'structure_source',
     'species_a', 'species_b', 'species_status',
-    # Multimer-safe identity columns (Phase 2 - multimer_v1 schema)
+    # Multimer-safe identity columns (multimer_v1 schema)
     'stoichiometry', 'is_homomeric',
     'unique_accessions', 'chain_ids', 'accession_chain_map',
     'tier_scope',
@@ -286,7 +294,7 @@ THREE_TO_ONE = {
 #   `interface_fraction_*` etc. describe the BEST pair (max contacts). The
 #   `pair_metrics` JSON + `*_mean` / `*_min` / `pdockq_whole_complex` /
 #   `contact_count_total` aggregates describe the full complex and are required
-#   to avoid the pre-refactor order-statistic bias of `max(all pairs)`.
+#   to avoid the order-statistic bias of `max(all pairs)`.
 CSV_FIELDNAMES_INTERFACE = [
     'n_interface_contacts', 'n_interface_residues_a', 'n_interface_residues_b',
     'interface_residues_a', 'interface_residues_b',
@@ -319,19 +327,18 @@ CSV_FIELDNAMES_INTERFACE_PAE = [
     'n_confident_residues_a', 'n_confident_residues_b',
     'interface_confidence_score',
     'quality_tier_v2',
-    # Composite screening interpretation (Decision #43): strong / moderate / weak
-    # / unavailable, derived from interface_confidence_score + calibration flag +
-    # headline metrics. Decoupled from quality_tier_v2 - this is a prioritisation
-    # label, not a tier and not a probability.
+    # Composite screening interpretation: strong / moderate / weak / unavailable,
+    # derived from interface_confidence_score + calibration flag + headline
+    # metrics. Decoupled from quality_tier_v2 - this is a prioritisation label,
+    # not a tier and not a probability.
     'composite_screen_status',
     # Multimer_v1: contact-weighted PAE aggregates across all pairs
     'pae_confident_fraction_mean', 'strict_confident_fraction_mean',
-    # Multimer_v1 scope flag. True only for N=2 - the existing composite uses
-    # best-pair inputs (strict fraction, symmetry, density) which are order-
-    # statistic biased for N>2. A calibrated multimer composite is deferred
-    # (optional Phase 8) - downstream code should treat N>2 composites as
-    # uncalibrated and filter to tier_scope == "dimer_validated" for any
-    # headline confidence claim.
+    # Multimer_v1 scope flag. True only for N=2 - the composite uses best-pair
+    # inputs (strict fraction, symmetry, density) which are order-statistic
+    # biased for N>2. A calibrated multimer composite is not implemented;
+    # downstream code should treat N>2 composites as uncalibrated and filter to
+    # tier_scope == "dimer_validated" for any headline confidence claim.
     'composite_is_calibrated',
 ]
 
@@ -675,19 +682,19 @@ def classify_prediction_quality(iptm_score: Optional[float], pdockq_score: Optio
     else:
         return 'Low'
 
-# Interface confidence thresholds for tier reclassification.
-# The constants now reflect Decision #38 adoption after the 9K / 41K / 60K
-# recalibration comparison. UPGRADE_LOW is held from the pre-recalibration set;
-# UPGRADE_MEDIUM and DOWNGRADE_HIGH are the post-recalibration values.
-UPGRADE_LOW_THRESHOLD = 0.64     # Low    -> High when composite score >= 0.64 (Decision #38 adopted; held from pre-recalibration)
-UPGRADE_MEDIUM_THRESHOLD = 0.85  # Medium -> High when composite score >= 0.85 (Decision #38 adopted; was 0.80)
-DOWNGRADE_HIGH_THRESHOLD = 0.63  # High   -> Medium when composite score <= 0.63 (Decision #38 adopted; was 0.65)
+# Composite-score cut-offs that reclassify the v1 tier into quality_tier_v2.
+# The dissertation's Appendix B (Table B.1) documents how each cut-off was
+# selected from the development set and checked for stability across larger
+# runs; §3.5 (Table 4) states the full reclassification rules these implement.
+UPGRADE_LOW_THRESHOLD = 0.64     # v1 Low       -> Medium when composite score >= 0.64
+UPGRADE_MEDIUM_THRESHOLD = 0.85  # v1 Low/Medium -> High  when composite score >= 0.85
+DOWNGRADE_HIGH_THRESHOLD = 0.63  # v1 High      -> Medium when composite score <= 0.63
 
 # Composite screening thresholds - interpretation of interface_confidence_score
 # as a prioritisation signal, NOT a quality tier and NOT a probability.
 # A row with composite >= 0.85 is a "strong" screening candidate; 0.63-0.85 is
 # "moderate"; below 0.63 is "weak". Decoupled from quality_tier_v2 so the two
-# layers can be reasoned about separately (Roadmap Decisions #38, #43).
+# layers can be reasoned about separately.
 COMPOSITE_SCREEN_STRONG_THRESHOLD = 0.85
 COMPOSITE_SCREEN_MODERATE_THRESHOLD = 0.63
 
@@ -697,7 +704,7 @@ COMPOSITE_SCREEN_STATUS_WEAK = "weak_screen_candidate"
 COMPOSITE_SCREEN_STATUS_UNAVAILABLE = "unavailable"
 
 def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Optional[float], interface_confidence: Optional[float] = None) -> str:
-    """Primary fused V2 quality classification.
+    """Composite-informed v2 quality classification.
 
     quality_tier_v2 is a composite-informed reclassification of the V1
     quality_tier. V1 (ipTM + pDockQ) remains the global-confidence prior;
@@ -720,12 +727,13 @@ def classify_prediction_quality_v2(iptm_score: Optional[float], pdockq_score: Op
     composite means "not enough interface evidence to promote", not
     "interface evidence overrides global".
 
-    The rationale for the rescue-to-Medium band is to remove the rhetorical
-    contradiction in the earlier V2 policy: a V1 Low row with moderate
-    composite (0.64-0.85) was promoted directly to V2 High while the
-    parallel composite_screen_status called it only a moderate screen
-    candidate. Under primary fused, V1 Low needs strong composite evidence
-    (>= 0.85) to reach High.
+    A direct V1 Low -> High reclassification therefore requires strong
+    interface evidence (composite >= 0.85); moderate composite evidence
+    (0.64-0.85) only rescues a V1 Low row to Medium. This keeps the tier
+    consistent with the parallel composite_screen_status, which calls the same
+    0.64-0.85 band a moderate rather than a strong screening candidate. The
+    dissertation's §3.5 (Table 4) states these rules and Appendix B records how
+    the cut-offs were selected.
 
     Missing or non-finite composite (None, NaN, +/-inf, unparseable)
     preserves the V1 tier unchanged. If classify_prediction_quality returns
@@ -954,8 +962,8 @@ def _compute_pdockq_and_chain_info(
             row['ppv'] = round(contact_result.ppv, 4)
 
             # Multimer_v1: enumerate every inter-chain pair (includes zero-contact pairs)
-            # and compute the whole-complex pDockQ. For N=2 whole-complex exactly equals
-            # best-pair pDockQ (protected by Phase 6 dimer regression test).
+            # and compute the whole-complex pDockQ. For N=2 the whole-complex value is
+            # metric-identical to the best-pair pDockQ.
             acc_map_raw = row.get('accession_chain_map')
             try:
                 acc_map = json.loads(acc_map_raw) if isinstance(acc_map_raw, str) else (acc_map_raw or {})
@@ -1033,8 +1041,8 @@ def _compute_pdockq_and_chain_info(
         print(f"  Warning: PDB parse error for {file_paths['pdb']}: {error}", file=sys.stderr)
     except OSError as error:
         # By the time this helper runs the PDB has already been decompressed
-        # (Section 4 of the plan), so OSError here is genuinely an I/O failure
-        # against the on-disk decompressed file rather than a corrupt stream.
+        # (in process_single_complex), so OSError here is genuinely an I/O
+        # failure against the on-disk decompressed file rather than a corrupt stream.
         print(f"  Warning: PDB OSError for {file_paths['pdb']}: {error}", file=sys.stderr)
         contact_result = None
         chain_info = None
@@ -1161,7 +1169,7 @@ def _populate_identity_fields(row: dict, identity: ComplexIdentity) -> None:
 
     Sets the multimer_v1 identity columns plus the legacy fields (`complex_name`,
     `protein_a`, `protein_b`, `complex_type`, `n_chains`) so callers see a
-    consistent view. For N=2 this preserves the pre-refactor legacy semantics.
+    consistent view. For N=2 this preserves the legacy two-slot semantics.
     """
     row['schema_version'] = SCHEMA_VERSION
     row['complex_name'] = identity.complex_id
@@ -1298,7 +1306,7 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
                 )
                 file_paths = {k: v for k, v in file_paths.items() if k != 'pdb'}
 
-        # Phase 2: parse full ComplexIdentity from filename. pdb_n_chains is unknown
+        # Parse the full ComplexIdentity from the filename. pdb_n_chains is unknown
         # at this point; populate initial identity fields so downstream steps always
         # see stoichiometry/tier_scope. After the PDB is read we re-parse with
         # pdb_n_chains and overwrite - this is what surfaces filename/PDB mismatches.
@@ -1438,8 +1446,8 @@ def process_single_complex(complex_name: str, file_paths: dict[str, Path], *, ru
         row['quality_tier'] = classify_prediction_quality(row.get('iptm'), row.get('pdockq'))
         row['quality_tier_v2'] = classify_prediction_quality_v2(row.get('iptm'), row.get('pdockq'), row.get('interface_confidence_score'))
 
-        # Composite screening interpretation (Decision #43). Runs after the v2
-        # tier and after _finalise_calibration_flag has set composite_is_calibrated,
+        # Composite screening interpretation. Runs after the v2 tier and after
+        # _finalise_calibration_flag has set composite_is_calibrated,
         # so the inputs the classifier reads are all final.
         row['composite_screen_status'] = classify_composite_screen_status(
             composite_is_calibrated=row.get('composite_is_calibrated'),
@@ -1493,7 +1501,7 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
         include_clustering: Whether to include clustering columns (cluster IDs, homologous pairs).
         include_variants: Whether to include variant mapping columns.
         include_stability: Whether to include stability scoring columns (EVE scores).
-        include_protvar: Whether to include ProtVar API cross-validation columns.
+        include_protvar: Whether to include offline ProtVar (AlphaMissense + monomeric FoldX) columns.
         include_disease: Whether to include disease annotation columns (disease, PTM, GO, drug target).
         include_pathways: Whether to include pathway and network columns.
     """
@@ -1506,7 +1514,7 @@ def write_results_csv(results: list[dict], output_path: str, include_interface: 
 
 def write_interface_exports(results: list[dict], output_path: str, min_tier: str = 'Medium') -> int:
     """Export confident interface residue data to a JSONL file.
-    Each line is a self-contained JSON record describing one complex's confident interface residues - the computationally identified binding hot-spots that pass both PAE and pLDDT confidence filters.
+    Each line is a self-contained JSON record describing one complex's confident interface residues - the interface residues that pass both the PAE and pLDDT confidence filters.
     Only exports complexes that meet the quality tier threshold and have confident residue data available.
     Args:
         results: List of per-complex result dictionaries from batch processing.
@@ -1604,11 +1612,10 @@ def _resolve_missing_proteins_batched(
 ) -> dict[str, str]:
     """Resolve identifiers to ENSP IDs via STRING API, with cache-aware batching.
 
-    Replaces the per-row ``mapper.resolve_id`` calls that used to dominate
-    ``enrich_results``. The fast path is a per-protein cache lookup that
-    matches the cache-key shape of the legacy ``get_string_ids([id])`` calls,
-    so caches written by previous toolkit runs (Run 2 / Run 3 single-protein
-    keys) are fully reused. Cache misses are batched into one API call per
+    The fast path is a per-protein cache lookup that matches the cache-key
+    shape of a single-identifier ``get_string_ids([id])`` call, so any
+    single-protein cache entry written by a previous run is reused without a
+    network round-trip. Cache misses are batched into one API call per
     ``batch_size`` identifiers; each batch response is then decomposed and
     written back as per-protein cache entries so subsequent runs skip the
     network entirely.
@@ -1685,9 +1692,9 @@ def _resolve_missing_proteins_batched(
             # misses, and continue with the next chunk. Other errors (5xx,
             # timeouts, malformed responses) latch off the API entirely.
             #
-            # The unpatched per-row code rarely hit this because single-ID
-            # calls return 200+[] for unknown IDs; only multi-ID batches
-            # where every member is unknown trigger the 404 path.
+            # Single-ID calls return 200+[] for unknown IDs, so this 404 path
+            # is reached only for multi-ID batches where every member is
+            # unknown (e.g. a batch of TrEMBL-only accessions).
             if "HTTP 404" in str(e):
                 if cache_dir:
                     for prot in chunk:
@@ -1749,25 +1756,18 @@ def enrich_results(results: list[dict], lookup: dict[str, dict], database_pair_s
     """Enrich result rows with gene symbols, protein names, and database sources.
     Modifies the result dictionary in-place.
 
-    Performance design (post-Run-3 retune): three pre-passes hoist the work
-    that used to fire per-row out of the hot loop.
+    Three pre-passes hoist work out of the per-row hot loop:
 
-      * Precomputed ``ensp_to_info`` reverse index replaces the
-        ``for acc, info in lookup.items()`` scan that used to fire on every
-        API-resolved miss (~72,000 dict items walked per scan over the 144K
-        lookup table).
+      * Precomputed ``ensp_to_info`` reverse index avoids re-scanning the full
+        (~144K-entry) lookup table on every API-resolved miss.
       * ``isoform_base`` precomputes ``split_isoform`` for every distinct
         missing protein so the hot loop hits a base-accession entry in
-        ``lookup`` without re-parsing the isoform suffix per row. This
-        replaces the ``mapper._resolve_id_local → uniprot_to_ensembl``
-        local-resolution path that the unpatched code triggered per row.
+        ``lookup`` without re-parsing the isoform suffix per row.
       * ``_resolve_missing_proteins_batched`` collects only the *truly*
-        missing identifiers (no lookup hit, no isoform-base hit) and
-        resolves them in chunks of ``ENRICH_API_BATCH_SIZE`` in one
-        pre-pass, replacing the per-row ``mapper.resolve_id`` HTTP
-        round-trips. On a 9.4K dataset with 18.6% miss rate this collapses
-        ~3,500 serial calls (~38 minutes wall-clock) into a handful of
-        batched calls.
+        missing identifiers (no lookup hit, no isoform-base hit) and resolves
+        them in chunks of ``ENRICH_API_BATCH_SIZE`` in one pre-pass, replacing
+        per-row ``mapper.resolve_id`` HTTP round-trips (the dominant cost on a
+        large run with a substantial miss rate).
 
     Args:
         results: Per-complex result dicts from batch processing.
@@ -2211,7 +2211,7 @@ def _compute_incremental_delta(
         [[n] for n in missing_names],
     )
 
-    # Self-describing summary file (matches plan schema).
+    # Self-describing summary file.
     summary_lines = [
         f"skip_existing_reference:         {results_csv_path}",
         f"historical_interfaces_reference: {output_jsonl if output_jsonl else 'none'}",
@@ -2641,15 +2641,15 @@ def print_summary(results: list[dict], include_interface: bool = False) -> None:
     # Composite interface confidence score
     if stats['composite_scores']:
         scores = stats['composite_scores']
-        print(f"\nComposite Interface Confidence (Phase 4):")
+        print(f"\nComposite Interface Confidence:")
         print(f"  Mean: {statistics.mean(scores):.3f}, "
               f"Median: {statistics.median(scores):.3f}, "
               f"Min: {min(scores):.3f}, Max: {max(scores):.3f}")
 
     # Quality tier v2 reclassification summary - this is the canonical
-    # distribution used by every figure (Figs 1-16) via the
-    # `quality_tier_v2` column. The v1 block above is kept only for
-    # transparency about what the composite-score reclassification adds.
+    # distribution used by every figure via the `quality_tier_v2` column. The
+    # v1 block above is kept only for transparency about what the
+    # composite-score reclassification adds.
     if 'v2_high' in stats:
         print(f"\nQuality Distribution (v2, composite-aware - used by all figures):")
         print(f"  High:   {stats['v2_high']} ({100 * stats['v2_high'] / total:.1f}%)")
@@ -2667,29 +2667,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="Batch process AlphaFold2 predictions - direct imports, no subprocesses",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-    # Basic (sequential, no checkpointing)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae
+Examples (see Docs/Toolkit_Commands_List.md for the full reference):
+    # Basic
+    python toolkit.py --dir <COMPLEX_DIR> --output results.csv --interface --pae
 
     # Full analysis with parallel workers and checkpointing
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --checkpoint
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --export-interfaces interfaces.jsonl -w 4 --checkpoint
+    python toolkit.py --dir <COMPLEX_DIR> --output results.csv --interface --pae -w 4 --checkpoint --export-interfaces interfaces.jsonl
 
-    # With enrichment (gene symbols, protein names, sequences)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt"
-
-    # With enrichment + database source tagging
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --databases "D:\\protein-complexes-toolkit\\data\\ppi"
-
-    # With clustering (sequence cluster annotation and homologous pairs)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae --enrich "D:\\protein-complexes-toolkit\\data\\ppi\\9606.protein.aliases.v12.0.txt" --clustering
+    # With enrichment, database tagging and clustering
+    python toolkit.py --dir <COMPLEX_DIR> --output results.csv --interface --pae --enrich <STRING_ALIASES> --databases <DATA_DIR> --clustering
 
     # Resume an interrupted run
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -w 4 --resume
-
-    # Verbose (sequential only - verbose is suppressed with -w > 1)
-    python toolkit.py --dir "D:\\ProteinComplexes" --output results.csv --interface --pae -v
+    python toolkit.py --dir <COMPLEX_DIR> --output results.csv --interface --pae -w 4 --resume
         """,
     )
 
@@ -2753,12 +2742,11 @@ Examples:
     parser.add_argument("--no-api", action="store_true",
                         help="Disable STRING API validation fallback. Use only offline "
                              "data files for ID resolution and enrichment.")
-    parser.add_argument("--clustering", choices=['string', 'foldseek', 'hybrid'],
+    parser.add_argument("--clustering", choices=['string'],
                         nargs='?', const='string', default=None,
-                        help="Enable sequence clustering analysis. Modes: string (default), "
-                             "foldseek (deferred), hybrid (deferred). Reads STRING clusters "
-                             "file to identify homologous pairs. Requires --enrich for ID "
-                             "resolution.")
+                        help="Enable sequence clustering analysis using STRING "
+                             "precomputed clusters to identify homologous pairs. "
+                             "Requires --enrich for ID resolution.")
     parser.add_argument("--clusters-file", metavar="PATH",
                         help="Path to STRING clusters file. Default: "
                              "data/clusters/9606.clusters.proteins.v12.0.txt. "
@@ -2809,7 +2797,7 @@ Examples:
                         help="Minimum quality tier for PyMOL script generation. "
                              "Default: High.")
     parser.add_argument("--full-pipeline", action="store_true",
-                        help="Activate all pipeline phases (A-F) using default "
+                        help="Activate all analysis stages using default "
                              "data paths. Only --dir and optionally --workers "
                              "are required. Validates all data files exist "
                              "before processing starts.")

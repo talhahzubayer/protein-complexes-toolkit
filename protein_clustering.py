@@ -1,26 +1,29 @@
-"""
-Protein clustering and homology analysis using STRING sequence clusters.
+"""Protein clustering and homology analysis using STRING sequence clusters.
 
 Parses STRING pre-computed cluster assignments, maps them to UniProt
 identifiers via the ID mapper, and annotates protein complex pairs with
-cluster membership and homologous pair information.
+cluster membership and homologous-pair information.
 
-Architecture:
-    - Offline-first: reads STRING clusters flat file as primary data source
-    - Optional API supplement via string_api.query_homology() for continuous
-      paralogy scores (disabled with --no-api)
-    - Integrates into toolkit.py via --clustering flag
+Project context
+    Optional annotation stage invoked by ``toolkit.py --clustering`` (and
+    runnable standalone). It reads the STRING clusters flat file as its primary
+    source and, unless ``--no-api`` is set, supplements it with continuous
+    homology bitscores from ``string_api.query_homology()``. It contributes the
+    clustering column block to the results CSV.
 
-Usage (standalone):
-    python protein_clustering.py --clusters-file data/clusters/9606.clusters.proteins.v12.0.txt \\
-        --aliases data/ppi/9606.protein.aliases.v12.0.txt --summary
-    python protein_clustering.py --clusters-file data/clusters/... --aliases data/ppi/... --protein P04637
-    python protein_clustering.py --clusters-file data/clusters/... --aliases data/ppi/... --pair P04637 Q04206
+Role in the submitted dissertation
+    Supplementary. Shared-cluster membership provides a homology signal used as
+    background context; it is not part of the central interface-triage
+    argument. The submitted workflow used the STRING pre-computed clusters.
 
-Usage (via toolkit.py):
-    python toolkit.py --dir DIR --output results.csv --enrich ALIASES --clustering
-    python toolkit.py --dir DIR --output results.csv --enrich ALIASES --clustering --clusters-file PATH
-    python toolkit.py --dir DIR --output results.csv --enrich ALIASES --clustering foldseek  # raises NotImplementedError
+Scope
+    Two proteins sharing a STRING sequence cluster are sequence-similar. This is
+    a homology signal only: it is not proof of paralogy, and it does not imply
+    that the two proteins interact. Cluster annotations describe sequence
+    relationships, not the predicted interface.
+
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import argparse
@@ -41,8 +44,8 @@ STRING_CLUSTERS_FILE = "9606.clusters.proteins.v12.0.txt"
 # File format
 CLUSTERS_SEPARATOR = '\t'
 
-# Valid clustering modes
-VALID_CLUSTERING_MODES = ('string', 'foldseek', 'hybrid')
+# Only STRING pre-computed clusters are supported.
+VALID_CLUSTERING_MODES = ('string',)
 
 # Display limit for pipe-separated homologous pairs in CSV cells
 HOMOLOGOUS_PAIRS_DISPLAY_LIMIT = 20
@@ -435,34 +438,22 @@ def annotate_results_with_clustering(
 
 
 def validate_clustering_mode(mode: str) -> str:
-    """Validate and return clustering mode.
+    """Validate and return the clustering mode.
 
     Args:
-        mode: Clustering mode string ('string', 'foldseek', or 'hybrid').
+        mode: Clustering mode string. Only 'string' (STRING pre-computed
+            clusters) is supported.
 
     Returns:
         The validated mode string.
 
     Raises:
-        NotImplementedError: If mode is 'foldseek' or 'hybrid' (deferred).
         ValueError: If mode is not a valid clustering mode.
     """
     if mode not in VALID_CLUSTERING_MODES:
         raise ValueError(
             f"Invalid clustering mode: '{mode}'. "
             f"Valid modes: {', '.join(VALID_CLUSTERING_MODES)}"
-        )
-
-    if mode == 'foldseek':
-        raise NotImplementedError(
-            "Foldseek clustering deferred — requires ≥35 GB RAM for AFDB50. "
-            "See Roadmap Decision 9."
-        )
-
-    if mode == 'hybrid':
-        raise NotImplementedError(
-            "Hybrid clustering deferred — requires Foldseek (Step B.2). "
-            "See Roadmap Decision 9."
         )
 
     return mode

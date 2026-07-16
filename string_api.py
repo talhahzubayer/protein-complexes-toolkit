@@ -1,38 +1,30 @@
 #!/usr/bin/env python3
-"""
-Centralised STRING API client for the protein-complexes-toolkit.
+"""Centralised STRING API client for the protein-complexes-toolkit.
 
-Provides a single module through which all STRING database API interactions are
-routed. The architecture is offline-first: local flat files (parsed by
-database_loaders.py and id_mapper.py) remain the primary data source. This
-module is an optional supplement invoked only when needed — for example, to
-resolve identifiers that fail local lookup, to retrieve quantitative homology
-scores, or to perform functional enrichment analysis.
+Routes all STRING database API interactions through a single module. The design
+is offline-first: local flat files (parsed by database_loaders.py and
+id_mapper.py) remain the primary data source, and this module is an optional
+supplement invoked only when needed — to resolve identifiers that fail local
+lookup, to retrieve quantitative homology scores, or to run functional /
+PPI-enrichment analysis.
 
-Features:
-    - Rate-limited requests with configurable pause between calls
+Features
+    - Rate-limited requests with a configurable pause between calls
     - Automatic retry with exponential backoff on HTTP 429 / 5xx errors
-    - Optional response caching (JSON files with SHA256-keyed filenames)
-    - Caller identity injection on every request (STRING API TOS requirement)
-    - Custom StringAPIError exception for clean error propagation
-    - 7 public functions covering ID resolution, interactions, homology,
-      enrichment, network retrieval, and version checking
+    - Optional response caching (JSON files under sha256-keyed, sharded paths)
+    - Caller-identity injection on every request (STRING API terms of service)
+    - Custom StringAPIError for clean error propagation
+    - Seven public functions: ID resolution, interaction partners, homology,
+      functional enrichment, PPI-enrichment, network retrieval, version
 
-Usage (as importable module):
-    from string_api import get_string_ids, get_version, StringAPIError
+Project context
+    Operational infrastructure. The optional API-backed stages of id_mapper,
+    protein_clustering and pathway_network call these functions; because the
+    toolkit is offline-first, the whole module is skipped when a run uses
+    ``--no-api``. It provides data access only and is not itself a reported
+    result.
 
-    try:
-        ids_df = get_string_ids(["P04637", "Q9UKT4"], species=9606)
-        version = get_version()
-    except StringAPIError as e:
-        print(f"STRING API unavailable: {e}")
-        # fall back to local data
-
-Usage (standalone):
-    python string_api.py --resolve P04637,Q9UKT4 --species 9606
-    python string_api.py --enrichment P04637,P12345,Q9UKT4 --species 9606
-    python string_api.py --network TP53,MDM2,BRCA1 --network-type physical
-    python string_api.py --version
+See the standalone CLI (``python string_api.py --help``) for query modes.
 """
 
 import sys
@@ -355,7 +347,7 @@ def get_interaction_partners(identifiers: list[str],
                              cache_dir: Optional[Union[str, bool]] = None) -> pd.DataFrame:
     """Retrieve interaction partners for the given proteins.
 
-    Cross-validates local STRING interactions against the live API, or
+    Cross-checks local STRING interactions against the live API, or
     retrieves interaction data for proteins not in local flat files.
 
     Args:

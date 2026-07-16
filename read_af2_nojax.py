@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
-"""
-JAX-Free AlphaFold2 PKL Reader - extracts metrics from AlphaFold2 result PKL files without requiring JAX.
-Uses module mocking to completely bypass JAX imports during pickle loading. Works regardless of JAX version installed or no JAX at all.
+"""JAX-free AlphaFold2 PKL reader — extract metrics from AF2 result pickles without JAX.
+
+Mocks the JAX modules before unpickling so an AlphaFold2 result ``.pkl`` (which
+references jax/jaxlib array types) loads into pure NumPy regardless of whether
+JAX is installed. Extracts the confidence metrics (ipTM, pTM, pLDDT summaries,
+PAE) as JSON-serialisable Python values.
+
+Project context
+    Upstream operational infrastructure and the first step of the pipeline:
+    ``toolkit.py`` loads each prediction's PKL through ``load_pkl_without_jax``
+    and reads its metrics via ``extract_metrics`` (pdockq / interface_analysis
+    then work from the same NumPy arrays). It surfaces AlphaFold2's own outputs,
+    computes no derived scores, and is not itself a reported result.
 
 Usage (standalone):
     python read_af2_nojax.py --pkl result.pkl
@@ -90,7 +100,7 @@ import numpy as np
 MAX_RECURSION_DEPTH = 100
 MAX_VALUE_PREVIEW_LENGTH = 50  # Character limit for value previews in key listing
 
-# pLDDT confidence band boundaries (Ångströms)
+# pLDDT confidence band boundaries (0-100 per-residue confidence score, not Ångströms)
 PLDDT_VERY_HIGH_THRESHOLD = 90
 PLDDT_HIGH_THRESHOLD = 70
 PLDDT_LOW_THRESHOLD = 50

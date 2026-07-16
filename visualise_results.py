@@ -1,62 +1,58 @@
 #!/usr/bin/env python3
-"""
-AlphaFold2 Analysis Visualisation Tool - generates up to 16 figures + 1b supplementary from the CSV produced by toolkit.py.  
-Figures are auto-detected from the columns present in the CSV, so only the relevant subset is generated for any given pipeline run.
+"""AlphaFold2-Multimer analysis visualisation tool.
 
-Figures are grouped by the Aim items listed on the MSc Research Project Plan document
+Reads the consolidated ``results.csv`` produced by ``toolkit.py`` and writes a
+suite of PNG figures to the output directory. It performs no metric
+computation: every value plotted is read from the CSV. The figure set is
+selected automatically from the columns present, and each figure applies a
+named population filter (from ``visualise_filters.py``) and skips gracefully,
+with a message, when a required column is absent.
 
-Item 5 - Structure prediction (Figs 1-9):
-  1.  ipTM vs pDockQ by Quality Tier (or falls back to disorder-fraction colouring [RdYlGn_r colourmap] if quality tiers are unavailable)
-  2.  Global PAE Health Check histogram
-  3.  Interface PAE by Quality Tier  (boxplots + strip)
-  4.  Composite Score & Quality Tier Validation  (violin + scatter)
-  5.  Interface vs Bulk pLDDT  (scatter with diagonal)
-  6.  Paradox Complexes Spotlight  (violin triptych)
-  7.  Complex Architecture Comparison  (Homo / Hetero / Multi-chain)
-  8.  ipTM/pDockQ Categorical Agreement  (3x3 matrix; old disagreement scatter is now supplementary)
-  9.  Chain-Count Quality Profile  (violin + scatter by chain count)
+Project context
+    Final stage of the pipeline: ``toolkit.py`` assembles the CSV, this module
+    turns it into figures. It reads the population/scope columns
+    (``tier_scope``, ``composite_is_calibrated``, ``partial_reason``,
+    ``species_status``) to restrict each figure to the appropriate subset, and
+    the optional annotation blocks (variants, disease, pathways, clustering,
+    stability) to populate the corresponding figures when present.
 
-Item 3 - Identify similar proteins/pairs (Fig 10, require --clustering):
- 10.  Sequence Clustering Validation  (cluster sharing by architecture + tier)
+Role in the submitted dissertation
+    Dissertation-supporting and operational: this module generates the figures
+    presented in the submitted Results. The output filenames use the
+    dissertation's Results numbering (``Fig_1``-``Fig_8_*.png`` correspond to
+    the dissertation's Figures 1-5 and 7-9); the dissertation's Figure 6, the
+    worked single-complex examples, is produced separately by
+    ``render_complex_summary.py``. The full filename-to-figure mapping is in
+    ``Docs/Toolkit_Commands_List.md``. The internal ``plot_figN`` function
+    names retain an older numbering that no longer matches the output
+    filenames, so a function name should not be used to identify a figure.
 
-Item 4 - Mapping genome variation (Figs 11-12, require --variants):
- 11.  Classified Variant Sankey  (significance -> structural context)
- 12.  Interface Variant Density vs Quality  (density scatter + Spearman)
+Scope
+    The figures visualise model-confidence patterns, the population structure
+    of the dataset, and biological-annotation context. They support
+    prioritisation and interpretation; they do not establish that a predicted
+    interface occurs biologically or that a structure is experimentally
+    correct. Calibrated interpretation applies to dimers
+    (``tier_scope == 'dimer_validated'``); multimer and species-split panels
+    are descriptive or exploratory and were not calibrated for the submitted
+    claims.
 
-Item 6 - Map stability scores (Fig 13, require --stability + --protvar):
- 13.  Stability Predictor Cross-Validation  (EVE vs ProtVar concordance)
+Additional functionality
+    Beyond the submitted figure set, the tool emits supplementary ``*_supp_*``
+    figures, species-subset variants (``--human-supplement`` /
+    ``--nonhuman-supplement``), a multimer-stoichiometry supplement, KDE
+    density overlays (``--density``), a recoverability dashboard, and on-demand
+    per-complex PAE heatmaps (``--pae-heatmaps``). At large N the scatter
+    figures adapt point size and alpha and rasterise the artist so exported
+    files stay bounded while still drawing one mark per complex.
 
-Disease & pathway analysis (Figs 14-15):
- 14.  Disease Enrichment by Quality Tier  (require --disease)
- 15.  Pathway-Level Network  (require --pathways, NetworkX)
+Dependencies
+    ``read_af2_nojax.py`` (JAX-free PKL loading), ``pdockq.py`` (chain offsets
+    for PAE heatmaps), pandas, numpy, matplotlib and scipy; seaborn and
+    networkx are optional.
 
-Synthesis (Fig 16, require --variants + --pathways):
- 16.  Prediction Quality Paradox  (2x2 panel: pathogenic interface variants and PPI density strengthen with quality while gene constraint, and disorder fraction reveal systematic AF2-Multimer prediction bias)
-
-Supplementary:
- 1b.  Disorder-coloured quality scatter (requires --disorder-scatter flag)
-
-Rendering approach:
-    All scatter figures use matplotlib scatter() at every dataset scale.
-    Point size and alpha adapt automatically based on dataset size so that small datasets (~500) show large readable dots and million-scale datasets approach a pixel-dot density look.
-    Status messages with timing are printed around blocking render calls so the user knows the script is not stuck, even for multi-minute renders at very large scale.
-    The --density flag adds KDE density contour overlays with percentile labels to scatter figures where density context aids interpretation.
-
-Per-complex PAE heatmaps are available on demand via --pae-heatmaps.
-When a matching PDB file is found, chain boundaries are drawn and the best interacting chain pair is highlighted.
-
-Dependencies:
-    read_af2_nojax.py   -> JAX mocking and PKL loading (same directory).
-    pdockq.py           -> Chain info / offsets for PAE heatmaps (optional).
-    pandas, matplotlib, numpy, scipy (stats + KDE), seaborn (optional), networkx (optional, for Fig 15).
-
-Usage:
-    python visualise_results.py results.csv                                    # auto-detect
-    python visualise_results.py results.csv --output-dir ./figures             # custom output
-    python visualise_results.py results.csv --density                          # KDE contours
-    python visualise_results.py results.csv --disorder-scatter                 # also Fig 1b
-    python visualise_results.py results.csv --pae-heatmaps /path/to/models     # PAE heatmaps
-    python visualise_results.py results.csv --pae-heatmaps /models --limit 50
+The complete command reference is in ``Docs/Toolkit_Commands_List.md`` and the
+output fields are defined in ``Docs/OUTPUT_SCHEMA.md``.
 """
 
 import os
@@ -126,14 +122,17 @@ PAE_CONFIDENT = 5.0 # Angstroms
 DISORDER_SUBSTANTIAL = 0.30
 METRIC_DISAGREEMENT_GAP = 0.52  # matches METRIC_DISAGREEMENT_THRESHOLD in interface_analysis.py
 
-# Reclassification thresholds - must match toolkit.py constants
-# (Decision #38, made live in toolkit.py by Decision #47 on 2026-05-11)
+# Composite-score cut-offs that reclassify v1 into quality_tier_v2 (must match
+# the corresponding constants in toolkit.py). How these cut-offs were selected
+# from the development set and checked for stability is documented in the
+# dissertation's Appendix B (Table B.1).
 UPGRADE_LOW_THRESHOLD = 0.64
 UPGRADE_MEDIUM_THRESHOLD = 0.85
 DOWNGRADE_HIGH_THRESHOLD = 0.63
 
-# Composite screening bands (Decision #43; classification axis is quality_tier_v2,
-# screening axis is composite_screen_status — never substitute one for the other).
+# Composite screening bands. The classification axis is quality_tier_v2 and the
+# screening axis is composite_screen_status; the two answer different questions
+# and must never be substituted for one another.
 COMPOSITE_SCREEN_BANDS = {
     "strong_screen_candidate":   (0.85, None),
     "moderate_screen_candidate": (0.63, 0.85),
@@ -173,7 +172,8 @@ SIGNIFICANCE_COLORS = {
     'Unknown': '#bdc3c7',
 }
 
-# Multimer refactor (Phase 5): scope labels + dissertation-safe filter.
+# Tier-scope labels and the dimer-only default filter. Calibrated interpretation
+# applies to dimers; multimer rows are treated as provisional.
 TIER_SCOPE_DIMER = 'dimer_validated'
 TIER_SCOPE_MULTIMER = 'multimer_provisional'
 DIMER_STOICHIOMETRIES = ('A2', 'AB')
@@ -181,12 +181,12 @@ DIMER_STOICHIOMETRIES = ('A2', 'AB')
 CAPTION_SCOPE_DIMER = 'dimer-validated'
 CAPTION_SCOPE_ALL_N = 'all-N descriptive'
 CAPTION_SCOPE_MULTIMER = 'multimer exploratory'
-# Final-corpus scope captions (Phase G, 2026-05-11): each figure's title/filename
-# must include one of these literals so the reader can tell at a glance which
-# subset of the 516,744-row corpus a figure speaks for.
+# Corpus scope captions: each figure's title/filename includes one of these
+# literals so the reader can tell at a glance which subset of the full corpus a
+# figure speaks for.
 CAPTION_SCOPE_CALIBRATED_DIMER = 'calibrated dimers'
-CAPTION_SCOPE_CALIBRATED_A2_AB = 'calibrated A2/AB dimers'  # Fig 7/10 only — slightly narrower than the headline calibrated_dimer set because A2/AB-only.
-CAPTION_SCOPE_RECOVERABLE_ALL_N = 'recoverable all-N descriptive'  # Figs 2 and 9 — the structurally usable subset, not all 516,744 rows.
+CAPTION_SCOPE_CALIBRATED_A2_AB = 'calibrated A2/AB dimers'  # architecture figures only — narrower than calibrated_dimer because A2/AB-only.
+CAPTION_SCOPE_RECOVERABLE_ALL_N = 'recoverable all-N descriptive'  # PAE-health and chain-count figures — the structurally usable subset, not every row.
 CAPTION_SCOPE_CALIBRATED_HUMAN_BROAD = 'calibrated dimer x human'
 CAPTION_SCOPE_CALIBRATED_HUMAN_STRICT = 'calibrated dimer x reviewed-human'
 CAPTION_SCOPE_PARTIAL = 'input recoverability diagnostic'
@@ -194,7 +194,7 @@ CAPTION_SCOPE_SCREENING = 'screening / prioritisation'
 CAPTION_SCOPE_CORPUS_FUNNEL = 'dataset audit / analysis population definition'
 
 # -------------------------------------------------------------------------
-# Round 4: human-readable display labels for code tokens.
+# Human-readable display labels for code tokens.
 # Canonical values stay unchanged in DataFrame logic and filter names.
 # This dict only governs how those tokens are RENDERED in figure titles,
 # axis labels, legends, and captions.
@@ -224,7 +224,7 @@ DISPLAY_LABELS: dict[str, str] = {
     # tier_scope (2)
     'dimer_validated':           'Dimer-validated',
     'multimer_provisional':      'Multimer-provisional',
-    # FULL partial_reason vocabulary (16 values per Decision #45) - Fig 18 relies on this.
+    # Full partial_reason vocabulary; the recoverability dashboard renders every value.
     '':                                  'Calibrated (no failure)',
     'pdb_io_error':                      'PDB I/O error',
     'pdb_decompression_error':           'PDB decompression failure',
@@ -269,14 +269,15 @@ _LEGACY_CSV_WARNED = False
 
 
 def _derive_tier_scope(df: pd.DataFrame) -> pd.Series:
-    """Derive tier_scope for rows loaded from pre-refactor CSVs.
-    Pre-refactor CSVs lack `tier_scope` and `schema_version`. Legacy rows with
-    `n_chains == 2` are treated as dimer_validated; everything else as
-    multimer_provisional. Emits a one-time warning the first time this is invoked.
+    """Derive tier_scope for CSVs written before that column existed.
+
+    Such CSVs lack `tier_scope` and `schema_version`. Rows with `n_chains == 2`
+    are treated as dimer_validated and everything else as multimer_provisional.
+    Emits a one-time warning the first time this is invoked.
     """
     global _LEGACY_CSV_WARNED
     if not _LEGACY_CSV_WARNED:
-        print("  Warning: loaded CSV lacks schema_version/tier_scope (pre-multimer_v1). "
+        print("  Warning: loaded CSV lacks the schema_version/tier_scope columns. "
               "Deriving tier_scope from n_chains for backward compatibility.")
         _LEGACY_CSV_WARNED = True
     if 'n_chains' in df.columns:
@@ -287,8 +288,9 @@ def _derive_tier_scope(df: pd.DataFrame) -> pd.Series:
 
 def _filter_dimer_validated(df: pd.DataFrame) -> pd.DataFrame:
     """Return rows with tier_scope == 'dimer_validated'.
-    Dissertation-safe default for every figure whose thresholds were calibrated
-    against dimers (Figs 4, 5, 6, 8, 13 and Fig 7 primary panel).
+
+    The default population for figures whose thresholds were calibrated against
+    dimers; calibrated interpretation does not extend to larger assemblies.
     """
     if 'tier_scope' not in df.columns:
         return df
@@ -347,12 +349,11 @@ def warn_missing_required_rows(df: pd.DataFrame, required_cols: list[str],
 def _adaptive_scatter_params(n: int) -> Tuple[float, float, bool]:
     """Return (point_size, alpha, rasterize) scaled to dataset size.
 
-    Round 4 tweak (2026-05-11): returns a third value indicating whether the
-    scatter artist should be rasterised. At HPC scale (N>=50k) we rasterise
-    so the saved PNG is bounded in size even though we still draw one mark
-    per complex. Acceptance criterion 12 (no hexbin / no 2D-hist / no density
-    raster) remains satisfied - rasterizing the matplotlib artist is purely
-    a backend rendering choice, not a binning decision.
+    The third value indicates whether the scatter artist should be rasterised.
+    At large N (>=50k) we rasterise so the saved PNG stays bounded in size even
+    though we still draw one mark per complex: rasterising the matplotlib artist
+    is a backend rendering choice, not a binning or density-raster decision (the
+    figures remain one-mark-per-complex scatters, never hexbin or 2D-histogram).
     Args:
         n: Number of points to be plotted.
     Returns:
@@ -411,7 +412,7 @@ def detect_columns(df: pd.DataFrame) -> dict:
         'has_stability_data': 'eve_score_mean_a' in columns and 'protvar_am_mean_a' in columns,
         'has_clustering_data': 'sequence_cluster_count' in columns and 'shared_cluster_count' in columns,
         'has_paradox_data': ('quality_tier_v2' in columns and 'n_pathogenic_interface_variants' in columns and 'ppi_enrichment_ratio' in columns and 'gene_constraint_pli_a' in columns and 'gene_constraint_pli_b' in columns and 'plddt_below50_fraction' in columns),
-        # Final-corpus schema flags (Phase G, 2026-05-11)
+        # Corpus schema flags (population and calibration status)
         'has_partial_reason':       'partial_reason' in columns,
         'has_calibration_flag':     'composite_is_calibrated' in columns,
         'has_composite_screening':  'composite_screen_status' in columns,
@@ -423,16 +424,17 @@ def detect_columns(df: pd.DataFrame) -> dict:
 def load_data(csv_path: str, legacy_mode: bool = False) -> pd.DataFrame:
     """Load the analysis CSV into a pandas DataFrame.
 
-    Default mode (Phase G, 2026-05-11): coerces numerics, normalises
-    complex_type case, splits interface_flags on comma/pipe with exact-token
-    matching, and derives tier_scope on legacy CSVs. NO rows are dropped and
-    NO NaNs are filled — per-figure filters in visualise_filters.py handle
-    exclusion explicitly with logged before/after counts.
+    Default mode: coerces numerics, normalises complex_type case, splits
+    interface_flags on comma/pipe with exact-token matching, and derives
+    tier_scope on CSVs that predate that column. NO rows are dropped and NO
+    NaNs are filled — the per-figure filters in visualise_filters.py handle
+    exclusion explicitly with logged before/after counts. This all-rows
+    behaviour is the one used for the submitted analyses.
 
-    Legacy mode (--legacy-mode): re-enables the pre-2026-05-11 destructive
-    drop of rows with missing/zero ipTM and the NaN->0 fill on pDockQ. This
-    flag does NOT restore old v2 thresholds, old captions, or old figure
-    filtering. Use only for reproducing pre-2026-05-11 load behaviour.
+    Legacy mode (--legacy-mode): re-enables the older destructive drop of rows
+    with missing/zero ipTM and the NaN->0 fill on pDockQ. It does NOT restore
+    old v2 thresholds, captions, or figure filtering, and is retained only for
+    reproducing the older load behaviour on older CSVs.
 
     Also:
       - Case normalisation on complex_type (Homodimer -> homodimer).
@@ -485,7 +487,7 @@ def load_data(csv_path: str, legacy_mode: bool = False) -> pd.DataFrame:
     if 'complex_type' in df.columns:
         df['complex_type'] = df['complex_type'].astype(str).str.lower()
 
-    # Derive tier_scope for pre-refactor CSVs (post-refactor CSVs already ship it).
+    # Derive tier_scope for CSVs written before it existed (newer CSVs ship it).
     if 'tier_scope' not in df.columns:
         df['tier_scope'] = _derive_tier_scope(df)
 
@@ -585,9 +587,9 @@ def _format_pvalue(p: float) -> str:
 
 
 # -------------------------------------------------------------------------
-# Round 4: effect-size helpers.
-# p-values become non-informative at N >= 10^5 (everything is significant);
-# these helpers headline tier comparisons with effect-size measures.
+# Effect-size helpers.
+# p-values become non-informative at very large N (everything is significant),
+# so these helpers headline tier comparisons with effect-size measures instead.
 # -------------------------------------------------------------------------
 
 def _cramers_v(contingency) -> float:
@@ -913,7 +915,7 @@ def plot_pae_matrix(pkl_path: str, models_dir: str) -> None:
 
 #----------------------------------------------------------------------------------FIGURE FUNCTIONS----------------------------------------------------------------------------------------
 
-#---------------------------------Item 5: Structure prediction (Figs 1-9)--------------------------------------------
+#---------------------------------Structure-prediction figures--------------------------------------------
 
 def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 1: Overall prediction quality landscape (calibrated dimer).
@@ -1074,8 +1076,8 @@ def plot_fig2_pae_health_check(df: pd.DataFrame, species_label: str = '') -> Non
     axes.legend(fontsize=FONT_TICK, loc='upper right')
     # Scope label specifically calls out that this is the subset of
     # recoverable rows with a usable `pae_mean`, not every recoverable row.
-    # 7 of the 406,244 recoverable rows lack a finite `pae_mean`, which
-    # would otherwise raise an N-mismatch flag against the corpus funnel.
+    # A small number of recoverable rows lack a finite `pae_mean`, which would
+    # otherwise raise an N-mismatch flag against the corpus funnel.
     scope_label = 'recoverable rows with global PAE available'
     title = (f"Supplementary: Global PAE distribution \u2014 descriptive input-confidence audit "
              f"(n={len(pae_values):,}, median {median_pae:.1f} \u00c5, {below_threshold} below {PAE_CONFIDENT} \u00c5) "
@@ -1195,7 +1197,8 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False,
         jitter = np.random.normal(0, 0.06, size=len(data))
         ax_a.scatter(positions_a[idx] + jitter, data, c=TIER_COLORS.get(TIER_ORDER[idx], '#cccccc'), alpha=0.3, s=15, zorder=3, edgecolors='none')
 
-    # Decision threshold lines (primary fused V2):
+    # v2 reclassification boundaries on the composite-score axis (dissertation
+    # Appendix B records how these cut-offs were selected):
     #   0.63 -> High downgrades to Medium
     #   0.64 -> Low rescues to Medium (moderate-composite band)
     #   0.85 -> Low/Medium promotes to High (strong-composite band)
@@ -1367,7 +1370,7 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False, sp
         _overlay_kde_contours(axes, non_paradox['bulk_plddt_combined'].values, non_paradox['interface_plddt_combined'].values)
 
     # Paradox complexes - outline-only triangles so they're visible but don't
-    # dominate the 363k-point background. Adaptive sizing scales with paradox N.
+    # dominate the very large non-paradox background. Adaptive sizing scales with paradox N.
     paradox_df = plot_df[paradox_mask]
     paradox_n = len(paradox_df)
     if paradox_n > 0:
@@ -1494,7 +1497,7 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> No
         bp['boxes'][1].set_facecolor(colour_non_paradox)
         bp['boxes'][1].set_alpha(0.5)
 
-        # Force box bodies and whiskers above the 400k strip cloud (zorder=3).
+        # Force box bodies and whiskers above the large strip cloud (zorder=3).
         # Median lines stay at zorder=10 so they remain the topmost element.
         for patch in bp['boxes']:
             patch.set_zorder(8)
@@ -1503,9 +1506,10 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> No
         for median_line in bp['medians']:
             median_line.set_zorder(10)
 
-        # Jittered strip. Non-paradox has ~363k points on the audit corpus, so
-        # use much smaller markers + lower alpha to avoid a solid blue cloud
-        # that hides the box and medians. Paradox stays clearly visible.
+        # Jittered strip. The non-paradox group can be very large (hundreds of
+        # thousands of points), so use much smaller markers + lower alpha to
+        # avoid a solid blue cloud that hides the box and medians. Paradox stays
+        # clearly visible.
         para_pts_size, para_pts_alpha = 18, 0.45
         nonpara_pts_size, nonpara_pts_alpha, _ = _adaptive_scatter_params(len(data_non_paradox))
         # Floor alpha further so the strip doesn't dominate at HPC scale.
@@ -1759,11 +1763,11 @@ def _plot_fig7_multimer_supplement(df: pd.DataFrame, species_label: str = '') ->
     _save_figure(figure, f'7_supp_Multimer_Stoichiometry{species_label}.png')
 
 def plot_fig8_iptm_pdockq_delta_histogram(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
-    """Fig 5 (Results §4.5): ipTM and pDockQ categorical agreement (calibrated dimers).
+    """Fig 5: ipTM and pDockQ categorical agreement (calibrated dimers).
 
     A single categorical agreement matrix - there are no other panels. ipTM and
     pDockQ are each classified INDEPENDENTLY into Low/Medium/High using their own
-    thresholds (ipTM 0.50 and 0.75; pDockQ 0.23 and 0.50; Methods §3.5). The 3x3
+    thresholds (ipTM 0.50 and 0.75; pDockQ 0.23 and 0.50). The 3x3
     matrix cross-tabulates the two independent classifications: the diagonal is
     categorical agreement and the off-diagonal is categorical disagreement. The
     banner reports the overall agreement/disagreement split (the dissertation's
@@ -1785,7 +1789,7 @@ def plot_fig8_iptm_pdockq_delta_histogram(df: pd.DataFrame, density_mode: bool =
         return
 
     # Classify ipTM and pDockQ INDEPENDENTLY into Low/Medium/High using their own
-    # thresholds (Methods §3.5). 0 = Low, 1 = Medium, 2 = High (display order on
+    # thresholds. 0 = Low, 1 = Medium, 2 = High (display order on
     # both axes). No raw subtraction, no Δ, no composite tier and no
     # metric_disagreement flag are used.
     IPTM_MED_MIN = 0.50      # v1 medium gate for ipTM (high gate is IPTM_HIGH)
@@ -1926,8 +1930,8 @@ def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: b
     # Descriptive highlight of large positive-Δ cases (ipTM >> pDockQ), using
     # METRIC_DISAGREEMENT_GAP only as a display cut-off for the highlight. This
     # is NOT the dissertation's metric-disagreement definition, which is
-    # categorical (ipTM-only vs pDockQ-only tiers, no Δ threshold; Methods
-    # §3.6) — the footer states that boundary so the two are not conflated.
+    # categorical (ipTM-only vs pDockQ-only tiers, no Δ threshold) — the footer
+    # states that boundary so the two are not conflated.
     extreme_mask = (plot_df['iptm'] - plot_df['pdockq']) > METRIC_DISAGREEMENT_GAP
     n_extreme = int(extreme_mask.sum())
     pct_extreme = n_extreme / len(plot_df) * 100 if len(plot_df) > 0 else 0
@@ -1957,7 +1961,7 @@ def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: b
     _save_figure(figure, f'8_supp_iptm_pdockq_scatter{species_label}.png')
 
 
-# Round-3 alias retained for any external callers; redirects to the new supp scatter.
+# Alias retained for backward compatibility with external callers; redirects to the supplementary scatter.
 plot_fig8_metric_disagreement = plot_fig8_supp_metric_disagreement_scatter
 
 def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
@@ -1968,7 +1972,8 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, 
         (c) pdockq_min         - worst-pair lower bound; surfaces dangling chains.
         (d) coherence gap (pdockq - pdockq_min) - 0 for every N=2 row by construction.
     The figure is descriptive across all N (CAPTION_SCOPE_ALL_N). Requires the
-    multimer-safe aggregates added in Phase 3; falls back gracefully otherwise.
+    multimer-safe aggregates (pdockq_mean/pdockq_min); falls back gracefully
+    otherwise.
     """
     base_required = ['n_chains', 'pdockq']
     if not all(col in df.columns for col in base_required):
@@ -1978,7 +1983,7 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, 
     aggregate_cols = ['pdockq_mean', 'pdockq_min']
     if not all(col in df.columns for col in aggregate_cols):
         print("  Skipping Fig 9: aggregate columns (pdockq_mean/pdockq_min) missing. "
-              "Regenerate with the multimer_v1 schema (Phase 3 of the refactor).")
+              "Regenerate the CSV with the multimer-aware schema that includes them.")
         return
 
     fig9_required = base_required + aggregate_cols
@@ -2077,10 +2082,10 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, 
         fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, f'9_supp_Chain_Count_Profile{species_label}.png')
 
-#--------------------------------------------Item 3: Identify similar proteins/pairs (Fig 10)---------------------------------------------------
+#--------------------------------------------Sequence-similarity figure---------------------------------------------------
 
 def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
-    """Fig 10: Item 3 - Identify similar proteins/pairs.
+    """Fig 10: sequence-cluster sharing by architecture and quality tier.
     Panel A - Homodimer ground truth scatter (shared vs total cluster count).
     Panel B - Shared cluster ratio by quality tier (heterodimers only).
     Requires clustering columns: sequence_cluster_count, shared_cluster_count, complex_type, quality_tier_v2.
@@ -2219,7 +2224,7 @@ def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
                 kw_p_str = _format_pvalue(kw_p)
                 n_total_kw = int(sum(len(g) for g in all_groups))
                 eps_sq = _epsilon_squared(h_stat, n_total_kw, len(all_groups))
-                # Headline effect size; K-W p as a small caption (round 4).
+                # Headline effect size; K-W p as a small caption.
                 stat_lines = [
                     f'Kruskal-Wallis ε² = {eps_sq:.3f}',
                     f'  (H = {h_stat:.1f}, {kw_p_str})',
@@ -2349,7 +2354,7 @@ def _draw_sankey_band(ax, left_y0, left_y1, right_y0, right_y1, x_left=0.15, x_r
     patch = mpatches.PathPatch(MplPath(verts, codes), facecolor=color, edgecolor='none', alpha=alpha)
     ax.add_patch(patch)
 
-#-------------------------------------Item 4: Mapping genome variation (Figs 11-12)---------------------------------------------
+#-------------------------------------Genome-variation figures---------------------------------------------
 
 def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
     """Fig 11: Where do clinically classified variants land structurally?
@@ -2492,7 +2497,7 @@ def plot_fig11_variant_consequence_flow(df: pd.DataFrame) -> None:
     _save_figure(figure, '11_supp_Variant_Consequence_Flow.png')
 
 def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> None:
-    """Fig 12: Item 4 - Mapping genome variation.
+    """Fig 12: interface variant density versus composite confidence.
     Scatter plot of interface variant density (variants per interface residue) against composite score, coloured by quality tier.
     Spearman and partial correlations annotated. Tier-stratified median densities in text box.
     """
@@ -2647,10 +2652,10 @@ def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> 
                 ha='center', fontsize=7, style='italic', color='#777')
     _save_figure(figure, 'Fig_7_Variant_Density_Versus_Composite_Confidence.png')
 
-#--------------------------------------Item 6: Map stability scores (Fig 13)-----------------------------------------------
+#--------------------------------------Stability-score figure-----------------------------------------------
 
 def plot_fig13_stability_crossvalidation(df: pd.DataFrame) -> None:
-    """Fig 13: Item 6 - Map stability scores.
+    """Fig 13: concordance between EVE, AlphaMissense and monomeric FoldX stability scores.
     Panel A - EVE vs AlphaMissense concordance scatter (pooled both chains).
     Panel B - AlphaMissense vs monomeric FoldX DDG scatter (chain A).
     Panel C - Coverage landscape grouped bar chart by quality tier.
@@ -3733,7 +3738,7 @@ def _print_paradox_table(all_rows):
 def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
     """Fig 16 - The Prediction Quality Paradox.
     Produces a 2x2 panel figure:
-      Top row  - "Interface-level validation":
+      Top row  - "Interface-level corroboration":
         A: Pathogenic interface variant rate by tier (grouped bar, signal strengthens)
         B: PPI enrichment ratio by tier (violin+box, signal strengthens)
       Bottom row - "Protein-level prediction bias":
@@ -3780,7 +3785,7 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
 
     def _annotate_panel(ax, res, is_binary=False, direction='up',
                         effect_lines=None):
-        """Add effect-size headline (round 4) + omnibus p-value note + arrow."""
+        """Add effect-size headline + omnibus p-value note + arrow."""
         lines = list(effect_lines) if effect_lines else []
         _, p_omni = res['omnibus']
         p_str = _format_pvalue(p_omni)
@@ -3839,7 +3844,7 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
     ax_b = axes[0, 1]
     col_b = 'ppi_enrichment_ratio'
     sub_b = wdf.dropna(subset=[col_b])
-    # Round 4: plot log10(ratio + 1) to handle zero values cleanly. The raw
+    # Plot log10(ratio + 1) to handle zero values cleanly. The raw
     # ratio is extremely right-skewed and contains zeros, both of which break
     # set_yscale('log').
     raw_b = {t: sub_b.loc[sub_b['quality_tier_v2'] == t, col_b].astype(float).values for t in tiers}
@@ -3919,7 +3924,7 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
             if isinstance(val, int) and val < 30 and val > 0:
                 print(f"  WARNING: Panel {r['panel']} ({r['subset']}): {tier_name} tier has only n={val} (<30)")
 
-#---------------------------------------Phase G additional figures (Fig 0, 17, 18)-----------------------------------------------
+#---------------------------------------Dataset-funnel, screening and recoverability figures-----------------------------------------------
 
 def plot_fig0_corpus_funnel(df: pd.DataFrame) -> None:
     """Fig 0: Final corpus analysis funnel.
@@ -3961,8 +3966,8 @@ def plot_fig0_corpus_funnel(df: pd.DataFrame) -> None:
     figure, (ax_main, ax_side) = plt.subplots(
         1, 2, figsize=(15, 6), gridspec_kw={'width_ratios': [3, 2]})
 
-    # Main funnel: horizontal bars, descending. Round 4: use _display() for the
-    # bucket name and append a "(X% of <parent>)" line so the relationship
+    # Main funnel: horizontal bars, descending. Uses _display() for the
+    # bucket name and appends a "(X% of <parent>)" line so the relationship
     # between consecutive funnel steps is visible at a glance.
     main_labels = []
     main_values = []
@@ -4097,7 +4102,7 @@ def plot_fig17_screening_landscape(df: pd.DataFrame) -> None:
     ax_a.legend(fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
     _despine(ax_a)
 
-    # Panel B (round 4): heatmap of quality_tier_v2 x composite_screen_status.
+    # Panel B: heatmap of quality_tier_v2 x composite_screen_status.
     # Stacked bars were dominated by the Low|weak cell; a heatmap with cells
     # showing raw N + row % makes the per-tier composition readable.
     crosstab = pd.crosstab(sub['quality_tier_v2'], sub['composite_screen_status'])
@@ -4325,7 +4330,7 @@ Examples:
         '--legacy-mode', action='store_true',
         help='Re-enable old load_data() row-drop on missing/zero ipTM only. Does '
              'NOT restore old v2 thresholds, old captions, or old figure filtering. '
-             'For reproducing pre-2026-05-11 load behaviour only.')
+             'For reproducing the older load behaviour only.')
     parser.add_argument(
         '--screening-figures', action=argparse.BooleanOptionalAction, default=True,
         help='Render Fig 17 screening landscape (use --no-screening-figures to disable).')
@@ -4340,7 +4345,7 @@ Examples:
         '--skip-diagnostics', action='store_true',
         help='Skip the warn_missing_required_rows() summaries.')
 
-    #======================Round 4: main vs supplement / species variants==========
+    #======================Main vs supplement / species variants==========
     parser.add_argument(
         '--full-figure-pack', action='store_true',
         help='Render every supplementary figure (*_supp_*) in addition to the '
@@ -4394,7 +4399,7 @@ def main() -> None:
     print(f"Output directory: {OUTPUT_DIR}")
     if models_dir:
         print(f"Models directory: {models_dir}")
-    # Round 4: resolve flag interactions BEFORE printing.
+    # Resolve flag interactions BEFORE printing.
     # --species-supplements is a deprecated alias that fans out to the two
     # explicit flags. --full-figure-pack implies the specialist supplementary
     # toggles (--disorder-scatter and --include-partial-diagnostics).
@@ -4486,7 +4491,7 @@ def main() -> None:
         chain_parts = [f"{int(n)}-chain: {count}" for n, count in chain_counts.items()]
         print(f"  Chain breakdown:   {', '.join(chain_parts)}")
 
-    # Console log replacing old pLDDT source bar chart (dropped Fig 4)
+    # Console summary of pLDDT source counts.
     if 'plddt_source' in df.columns:
         source_counts = df['plddt_source'].value_counts()
         source_parts = [f"{count} {source}" for source, count in source_counts.items()]
@@ -4495,19 +4500,18 @@ def main() -> None:
     figures_generated = 0
     interface_figs_skipped_warning_shown = False
 
-    # Fig 0 - Final corpus analysis funnel (Phase G; runs once on the full df).
+    # Fig 0 - dataset/analysis population funnel (runs once on the full df).
     if args.corpus_funnel:
         print("\nFig 0 - Final Corpus Analysis Funnel")
         plot_fig0_corpus_funnel(df)
         figures_generated += 1
 
-    # Round 4: primary pass runs structural figures on the FULL calibrated
-    # dimer population (N=402,846 on the audit corpus), unsplit by species.
-    # Each figure applies `calibrated_dimer` internally, so passing the full df
-    # produces the dissertation-default scope. Species-specific variants are
-    # opt-in via --human-supplement / --nonhuman-supplement. The fourth tuple
-    # element (run_supp) tells the per-pass loop whether to also emit
-    # supplementary figures for this pass.
+    # Primary pass runs structural figures on the full calibrated-dimer
+    # population, unsplit by species. Each figure applies `calibrated_dimer`
+    # internally, so passing the full df produces the dissertation-default
+    # scope. Species-specific variants are opt-in via --human-supplement /
+    # --nonhuman-supplement. The fourth tuple element (run_supp) tells the
+    # per-pass loop whether to also emit supplementary figures for this pass.
     structural_passes = [(df, '', 'Primary (all species)', render_supplements)]
     if args.human_supplement and 'species_status' in df.columns:
         structural_passes.append((df_all_human, '_human', 'Human', render_supplements))
@@ -4588,7 +4592,7 @@ def main() -> None:
         elif not interface_figs_skipped_warning_shown:
             print("\nInterface figures (3-8) require V2 quality tiers AND interface")
             print("columns in the CSV. Re-run the batch script with interface analysis")
-            print("enabled to generate the full 44-column CSV.")
+            print("enabled to include the interface columns.")
             interface_figs_skipped_warning_shown = True
 
         # Supp: Fig 9 (chain-count profile). Hard-skip non-human pass per plan A.3.
