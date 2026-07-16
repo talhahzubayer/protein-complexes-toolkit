@@ -560,5 +560,54 @@ Figures 3 / 4 / 4-supp / 5 / 6-supp / 7 / 8 / 8-supp / 9-supp require both `qual
 
 Population filters are centralised in `visualise_filters.py` as a 14-filter registry: `all_rows` / `recoverable` / `calibrated_dimer` / `composite_status_present` / `composite_screenable` / `strong_screen_candidate` / `moderate_screen_candidate` / `weak_screen_candidate` / `human_broad` / `human_strict` / `multimer_exploratory` / `partial_error` / `calibrated_human_broad` / `calibrated_human_strict`. Each figure declares its scope by name; the chosen filter's audit-aligned `before -> after` row counts print to stdout per figure for runtime traceability. The main-narrative scope is `calibrated_dimer` (six-clause definition: `tier_scope == 'dimer_validated'` AND `composite_is_calibrated == True` AND recoverable AND six numeric metrics non-NaN AND `n_interface_contacts > 0`); the `_human` dual-emit pass adds `species_status ∈ {reviewed_human, trembl_human}` on top.
 
+## Single-complex summary figure (`render_complex_summary.py`)
+
+A deliberately narrow CLI that turns **one** AlphaFold2-Multimer complex directory into **one** polished summary PNG. It reuses the production metric path (`toolkit.process_single_complex`) — no scientific formulas or tier thresholds are reimplemented — renders two PyMOL views in the same orientation (chain/interface and pLDDT confidence), composes the generic figure (two legends, the two views, and one metric box with the baseline → interface-informed tier transition and three descriptive rows), writes exactly one PNG, and removes every intermediate file automatically.
+
+- **Dimer-only** — the interface-informed assessment is calibrated on dimers; a non-dimer input fails with a clear message.
+- **Supported inputs** — one PDB and one PKL in the directory, in any of `.pdb` / `.pdb.gz` / `.pdb.bz2` and `.pkl` / `.pkl.gz` / `.pkl.bz2` (and the `*_relaxed_model_*` / `*_result_model_*` / `.results.pkl` forms).
+- **No network** — gene/protein display names come from the local alias table when present and fall back to accessions otherwise.
+
+```bash
+python render_complex_summary.py \
+    --input-dir "/scratch/prj/chmi_msa/Protein_Complexes/P6/P61088_Q9H4P4" \
+    --output    "P61088_Q9H4P4_summary.png" \
+    --pymol-executable "$HOME/envs/pymol/bin/pymol"
+# -> Wrote P61088_Q9H4P4_summary.png  (2000x1600)
+```
+
+Optional flags: `--overwrite` (replace an existing output; the default is to fail), `--width` / `--height` (positive integers), `--pymol-executable` (path to a headless PyMOL; defaults to `pymol` on `PATH`).
+
+**Output replacement:** if the output already exists the run fails unless `--overwrite` is given; the final PNG is written atomically, so a failed run never leaves a truncated image.
+
+### PyMOL runtime + dependency delta
+
+`render_complex_summary.py` adds **no new pip dependency**: it imports only the standard library, the toolkit's existing modules, and packages already pinned in `requirements.txt` (`matplotlib` composes the figure and bundles the DejaVu Sans font; `numpy`/`pandas` are used by the reused metric path). **`requirements.txt` is unchanged.**
+
+The one requirement beyond `requirements.txt` is a **headless PyMOL executable**, kept as an *external runtime* (invoked via `subprocess`, selected with `--pymol-executable`) rather than a pip dependency — `pip install pymol-open-source` is unreliable. On King's CREATE there is no PyMOL module (`module spider pymol` → not found), so install it once with the conda that is already on the login node, into a self-contained env that does not touch the toolkit's `.venv`:
+
+```bash
+# one-time install (login node is fine — it is only a download)
+conda create -y -p "$HOME/envs/pymol" -c conda-forge pymol-open-source
+# verify (headless CPU ray-tracing; no X server required) before submitting a SLURM job
+"$HOME/envs/pymol/bin/pymol" -cq -d "print('PyMOL', cmd.get_version()[0]); quit"
+```
+
+The PyMOL env brings its own Python and libraries and is **completely independent** of the toolkit's environment (they only communicate through the executable path), so you never `conda activate` it. To avoid passing `--pymol-executable` every time, make PyMOL discoverable from your toolkit environment once — either **symlink it onto `PATH`**:
+
+```bash
+ln -s "$HOME/envs/pymol/bin/pymol" "$VIRTUAL_ENV/bin/pymol"    # with the toolkit venv active
+```
+
+**or set `$PYMOL_EXECUTABLE`** (the CLI checks `--pymol-executable`, then `$PYMOL_EXECUTABLE`, then `pymol` on `PATH`) — persist it by appending to the venv's activate script:
+
+```bash
+echo 'export PYMOL_EXECUTABLE="$HOME/envs/pymol/bin/pymol"' >> "$VIRTUAL_ENV/bin/activate"
+```
+
+After either one-time step, activating the toolkit environment is all that's needed and the CLI runs with no `--pymol-executable` flag. (Verified route: conda-forge `pymol-open-source` 3.1.0.)
+
+**This output is an inspection and communication figure. It is not evidence that the predicted interaction is biologically real.**
+
 ## Acknowledgements
 Developed by Talhah Zubayer under the supervision of David Burke as part of the MSc Applied Bioinformatics programme at King's College London.

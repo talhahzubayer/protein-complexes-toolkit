@@ -13,7 +13,7 @@ Item 5 - Structure prediction (Figs 1-9):
   5.  Interface vs Bulk pLDDT  (scatter with diagonal)
   6.  Paradox Complexes Spotlight  (violin triptych)
   7.  Complex Architecture Comparison  (Homo / Hetero / Multi-chain)
-  8.  Metric Disagreement  (scatter with disagreement band)
+  8.  ipTM/pDockQ Categorical Agreement  (3x3 matrix; old disagreement scatter is now supplementary)
   9.  Chain-Count Quality Profile  (violin + scatter by chain count)
 
 Item 3 - Identify similar proteins/pairs (Fig 10, require --clustering):
@@ -184,7 +184,7 @@ CAPTION_SCOPE_MULTIMER = 'multimer exploratory'
 # Final-corpus scope captions (Phase G, 2026-05-11): each figure's title/filename
 # must include one of these literals so the reader can tell at a glance which
 # subset of the 516,744-row corpus a figure speaks for.
-CAPTION_SCOPE_CALIBRATED_DIMER = 'calibrated dimer'
+CAPTION_SCOPE_CALIBRATED_DIMER = 'calibrated dimers'
 CAPTION_SCOPE_CALIBRATED_A2_AB = 'calibrated A2/AB dimers'  # Fig 7/10 only — slightly narrower than the headline calibrated_dimer set because A2/AB-only.
 CAPTION_SCOPE_RECOVERABLE_ALL_N = 'recoverable all-N descriptive'  # Figs 2 and 9 — the structurally usable subset, not all 516,744 rows.
 CAPTION_SCOPE_CALIBRATED_HUMAN_BROAD = 'calibrated dimer x human'
@@ -974,7 +974,7 @@ def plot_fig1_quality_scatter(df: pd.DataFrame, col_flags: dict, density_mode: b
     axes.set_ylim(-0.02, 0.8)
     scope = _scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)
     title = (f"Calibrated dimer quality landscape: v2 tiers over ipTM/pDockQ space "
-             f"[{scope}; N={n_total:,}]")
+             f"[{scope}; n={n_total:,}]")
     _apply_common_style(axes, title, 'ipTM', 'pDockQ')
     # Inset note clarifying what colours and dashed lines mean.
     axes.text(0.02, 0.04,
@@ -1041,7 +1041,7 @@ def plot_fig1b_disorder_scatter(df: pd.DataFrame, density_mode: bool = False, sp
     _apply_common_style(
         axes,
         f"Quality Scatter - Disorder Colouring (Supplementary) "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={n_points:,}]",
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={n_points:,}]",
         'ipTM', 'pDockQ')
     _save_figure(figure, f'1b_supp_Disorder_Scatter{species_label}.png')
 
@@ -1144,10 +1144,10 @@ def plot_fig3_interface_pae_by_tier(df: pd.DataFrame, species_label: str = '') -
     axes.text(0.5, -0.12, median_text, transform=axes.transAxes, ha='center', fontsize=FONT_TICK, style='italic', color='#555555')
     _apply_common_style(
         axes,
-        f"Interface PAE separates calibrated dimer quality tiers "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={len(plot_df):,}]",
+        f"Interface PAE by quality tier "
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={len(plot_df):,}]",
         '', 'Interface PAE (\u00c5)', grid=False)
-    _save_figure(figure, f'3_Interface_PAE_by_Tier{species_label}.png')
+    _save_figure(figure, f'Fig_2A_Interface_PAE_by_Quality_Tier{species_label}.png')
 
 def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
     """Fig 4: Why should I trust the quality tier assigned?
@@ -1224,11 +1224,6 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False,
     tier_legend = [mpatches.Patch(color=TIER_COLORS[t], alpha=0.6, label=t) for t in TIER_ORDER]
     ax_a.legend(handles=tier_legend, fontsize=FONT_TICK - 1, loc='upper left', framealpha=0.9)
     _apply_common_style(ax_a, "(a) Composite Score by Tier", '', 'Interface Confidence Score', grid=False)
-    # Caption caveat (rendered as a small footnote below axis a).
-    ax_a.text(0.5, -0.18,
-              'Note: Panel (b) is a component-consistency check, not independent validation.',
-              transform=ax_a.transAxes, ha='center', va='top', fontsize=7,
-              style='italic', color='#777')
 
     #====================================Panel (b): Composite vs strict confident contact fraction====================================
     n_panel_b = len(plot_df)
@@ -1256,21 +1251,24 @@ def plot_fig4_composite_validation(df: pd.DataFrame, density_mode: bool = False,
 
     _apply_common_style(ax_b, "(b) Composite score tracks its strict confident-contact component", 'Strict Confident Contact Fraction (PAE < 5 Å & pLDDT ≥ 70)', 'Interface Confidence Score')
     figure.suptitle(
-        f"Composite score behaviour across calibrated dimer tiers "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={len(plot_df):,}]",
+        f"Composite score behaviour across quality tiers "
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={len(plot_df):,}]",
         fontsize=14, fontweight='bold', y=1.02)
-    # Figure-wide framing: quality_tier_v2 is defined by the composite-score
-    # decision rules, so this figure is a tier-behaviour and component-
-    # consistency diagnostic — it is not an independent external validation
-    # of the composite score.
+    # Figure-wide framing: panel (b)'s x-axis (strict confident-contact
+    # fraction) is itself a direct input to the composite score on its
+    # y-axis, and quality_tier_v2 is assigned from the composite-score
+    # decision rules. This is a component-consistency check by construction,
+    # not an independent external validation. (Non-visible note kept; the
+    # diagonal trend itself is already obvious from the scatter.)
     figure.text(0.5, -0.04,
-                'This figure describes how the adopted composite-score '
-                'decision rules stratify calibrated dimers. It is a '
-                'tier-behaviour and component-consistency diagnostic, '
-                'not an independent external validation.',
+                'Panel (b) is a component-consistency check, not an '
+                'independent validation: the strict confident-contact '
+                'fraction (x-axis) is a direct input to the composite '
+                'score (y-axis), and the tiers shown are themselves defined '
+                'by the composite-score decision rules.',
                 ha='center', va='top', fontsize=8, style='italic',
                 color='#555555', wrap=True)
-    _save_figure(figure, f'4_Composite_Tier_Validation{species_label}.png')
+    _save_figure(figure, f'Fig_3_Composite_Score_Behaviour{species_label}.png')
 
 
 def plot_fig4_supp_strict_vs_pae_only(df: pd.DataFrame, species_label: str = '') -> None:
@@ -1328,7 +1326,7 @@ def plot_fig4_supp_strict_vs_pae_only(df: pd.DataFrame, species_label: str = '')
                 title_fontsize=FONT_TICK, loc='lower right')
     _apply_common_style(axes,
                         f"Strict vs PAE-only Confident Contact Fraction "
-                        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={len(plot_df):,}]",
+                        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={len(plot_df):,}]",
                         'PAE-only Confident Contact Fraction (PAE < 5 Å)',
                         'Strict Confident Contact Fraction (PAE < 5 Å & pLDDT ≥ 70)')
     _save_figure(figure, f'4_supp_Strict_vs_PAE_Only_Fraction{species_label}.png')
@@ -1412,15 +1410,19 @@ def plot_fig5_interface_vs_bulk(df: pd.DataFrame, density_mode: bool = False, sp
                 loc='lower left', framealpha=0.9)
     _apply_common_style(
         axes,
-        f"Interface pLDDT versus bulk pLDDT in calibrated dimers "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={len(plot_df):,}]",
+        f"Interface pLDDT versus bulk pLDDT "
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={len(plot_df):,}]",
         'Bulk pLDDT', 'Interface pLDDT')
+    # Non-visible note: the legend marks the paradox subset by count only, so
+    # spell out what defines it (the diagonal relationship itself is visible).
     axes.text(0.5, -0.10,
-              'A substantial subset has interface confidence decoupled from bulk confidence; '
-              'paradox triangles highlight confident interfaces despite poor/disordered bulk regions.',
+              f'Paradox triangles mark the subset with ipTM ≥ {IPTM_HIGH}, '
+              f'pDockQ ≥ {PDOCKQ_HIGH} and ≥ {int(DISORDER_SUBSTANTIAL * 100)}% '
+              f'of residues at pLDDT < 50: confident interfaces despite a substantial '
+              f'low-pLDDT, disorder-associated bulk.',
               transform=axes.transAxes, ha='center', va='top', fontsize=7,
               style='italic', color='#777')
-    _save_figure(figure, f'5_Interface_vs_Bulk{species_label}.png')
+    _save_figure(figure, f'Fig_2B_Interface_pLDDT_vs_Bulk_pLDDT{species_label}.png')
 
 def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> None:
     """Fig 6: Can disordered proteins form confident interfaces?
@@ -1536,20 +1538,23 @@ def plot_fig6_paradox_spotlight(df: pd.DataFrame, species_label: str = '') -> No
     ]
     ax_a.legend(handles=legend_handles, fontsize=FONT_TICK, loc='upper right', framealpha=0.9)
     figure.suptitle(
-        f"Supplementary: Paradox complexes — high-confidence interfaces in disordered structural contexts "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={len(plot_df):,}]",
+        f"Prediction-quality paradox interface characteristics "
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={len(plot_df):,}]",
         fontsize=14, fontweight='bold', y=1.06)
 
-    subtitle = (f"Comparing {n_paradox} paradox vs {n_non_paradox} "
-                f"non-paradox complexes")
+    # Non-visible note: the panels show the comparison and the per-group counts
+    # (in the tick labels), but not the paradox definition itself; state it
+    # here so the dissertation caption can reference exact thresholds.
+    subtitle = (f"Paradox: ipTM ≥ {IPTM_HIGH} and pDockQ ≥ {PDOCKQ_HIGH} (v1 High) "
+                f"with ≥ {int(DISORDER_SUBSTANTIAL * 100)}% of residues at pLDDT < 50")
     if n_paradox_missing_data > 0:
-        subtitle += (f" ({n_paradox_missing_data} paradox complexes excluded "
-                     f"due to incomplete interface data)")
+        subtitle += (f"  ({n_paradox_missing_data} paradox complexes excluded: "
+                     f"incomplete interface data)")
 
     # Subtitle sits below the suptitle; both anchored above the axes to avoid
     # the prior ghost-overlap at y=0.99 / y=1.04.
     figure.text(0.5, 1.00, subtitle, ha='center', fontsize=FONT_AXIS_LABEL, style='italic', color='#555555')
-    _save_figure(figure, f'6_supp_Paradox_Spotlight{species_label}.png')
+    _save_figure(figure, f'Fig_6_Prediction_Quality_Paradox{species_label}.png')
 
 def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '',
                              multimer_supplement: bool = False) -> None:
@@ -1650,7 +1655,7 @@ def plot_fig7_homo_vs_hetero(df: pd.DataFrame, species_label: str = '',
     _apply_common_style(ax_b, "(b) Interface Symmetry (calibrated dimer)", '', 'Symmetry Score', grid=False)
     figure.suptitle(
         f"Prediction Quality by Complex Architecture "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_A2_AB, species_label)}; N={len(primary_df):,}]",
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_A2_AB, species_label)}; n={len(primary_df):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     figure.text(0.5, -0.01,
                 'Note: Restricted to A2/AB stoichiometry; calibrated dimers with ambiguous '
@@ -1749,113 +1754,132 @@ def _plot_fig7_multimer_supplement(df: pd.DataFrame, species_label: str = '') ->
     _apply_common_style(ax_b, "(b) Best-pair Interface Symmetry", '', 'Symmetry Score', grid=False)
     figure.suptitle(
         f"Multimer Architecture Supplement "
-        f"[{_scope_with_species(CAPTION_SCOPE_MULTIMER, species_label)}; N={len(multimer_df):,}]",
+        f"[{_scope_with_species(CAPTION_SCOPE_MULTIMER, species_label)}; n={len(multimer_df):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, f'7_supp_Multimer_Stoichiometry{species_label}.png')
 
 def plot_fig8_iptm_pdockq_delta_histogram(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
-    """Fig 8 (main, round 4): distribution of Δ = ipTM − pDockQ across calibrated dimers.
+    """Fig 5 (Results §4.5): ipTM and pDockQ categorical agreement (calibrated dimers).
 
-    Two panels:
-      (a) raw count Δ histogram across all calibrated dimers — overall divergence
-          magnitude and the long tail.
-      (b) tier-normalised Δ histogram (each tier sums to 100%) overlaid as step
-          histograms — per-tier shape difference without the Low tier swamping
-          High/Medium.
+    A single categorical agreement matrix - there are no other panels. ipTM and
+    pDockQ are each classified INDEPENDENTLY into Low/Medium/High using their own
+    thresholds (ipTM 0.50 and 0.75; pDockQ 0.23 and 0.50; Methods §3.5). The 3x3
+    matrix cross-tabulates the two independent classifications: the diagonal is
+    categorical agreement and the off-diagonal is categorical disagreement. The
+    banner reports the overall agreement/disagreement split (the dissertation's
+    41.4% categorical disagreement result for calibrated dimers).
 
-    Replaces the round-3 y=x scatter as the main view. The y=x framing
-    over-claimed: ipTM and pDockQ are not calibrated to the same numerical
-    scale, so distance from y=x is not a direct agreement metric. The
-    descriptive scatter remains available as `plot_fig8_supp_metric_disagreement_scatter`.
+    ipTM and pDockQ are on different numerical scales, so this figure makes NO
+    raw ipTM - pDockQ subtraction, and uses no continuous Δ histogram, no Δ
+    threshold, no composite score and no metric_disagreement flag. Neither metric
+    is treated as ground truth. The descriptive ipTM-vs-pDockQ scatter remains
+    available as `plot_fig8_supp_metric_disagreement_scatter`.
+
+    density_mode is accepted for dispatch-signature compatibility and is unused.
     """
-    required = ['iptm', 'pdockq', 'quality_tier_v2']
-    plot_df, _, _ = apply_filter(df, 'calibrated_dimer', fig_label='Fig 8')
-    plot_df, _, n_plot = require_columns(plot_df, required, fig_label='Fig 8')
+    required = ['iptm', 'pdockq']
+    plot_df, _, _ = apply_filter(df, 'calibrated_dimer', fig_label='Fig 5')
+    plot_df, _, n_plot = require_columns(plot_df, required, fig_label='Fig 5')
     if len(plot_df) == 0:
-        print("  Skipping Fig 8: 0 rows after calibrated_dimer + required columns.")
+        print("  Skipping Fig 5: 0 rows after calibrated_dimer + required columns.")
         return
-    delta_series = plot_df['iptm'].astype(float) - plot_df['pdockq'].astype(float)
-    delta = delta_series.values
-    finite = np.isfinite(delta)
-    if not finite.any():
-        print("  Skipping Fig 8: no finite Δ values.")
+
+    # Classify ipTM and pDockQ INDEPENDENTLY into Low/Medium/High using their own
+    # thresholds (Methods §3.5). 0 = Low, 1 = Medium, 2 = High (display order on
+    # both axes). No raw subtraction, no Δ, no composite tier and no
+    # metric_disagreement flag are used.
+    IPTM_MED_MIN = 0.50      # v1 medium gate for ipTM (high gate is IPTM_HIGH)
+    PDOCKQ_MED_MIN = 0.23    # v1 medium gate for pDockQ (high gate is PDOCKQ_HIGH)
+    iptm_vals = plot_df['iptm'].astype(float).values
+    pdockq_vals = plot_df['pdockq'].astype(float).values
+    cat_finite = np.isfinite(iptm_vals) & np.isfinite(pdockq_vals)
+    iptm_vals = iptm_vals[cat_finite]
+    pdockq_vals = pdockq_vals[cat_finite]
+    n_cat = len(iptm_vals)
+    if n_cat == 0:
+        print("  Skipping Fig 5: no rows with finite ipTM and pDockQ.")
         return
-    delta = delta[finite]
-    plot_df_finite = plot_df.loc[finite].reset_index(drop=True)
 
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(15, 6))
-    bins = np.linspace(float(np.nanmin(delta)), float(np.nanmax(delta)), 80)
+    iptm_idx = np.where(iptm_vals >= IPTM_HIGH, 2,
+                        np.where(iptm_vals >= IPTM_MED_MIN, 1, 0))
+    pdockq_idx = np.where(pdockq_vals >= PDOCKQ_HIGH, 2,
+                          np.where(pdockq_vals >= PDOCKQ_MED_MIN, 1, 0))
 
-    # Reference-line styling (shared across both panels). The previous
-    # rendering used `#555` and `black` for the zero and median lines, which
-    # are visually indistinguishable at print DPI when the median sits
-    # close to zero. Pick contrasting hues + distinct linestyles so each
-    # line is unambiguous.
-    ZERO_LINE_COLOUR = '#2c3e50'   # cool dark slate — neutral reference
-    MEDIAN_LINE_COLOUR = '#c0392b' # warm crimson — stands out against slate
+    matrix = np.zeros((3, 3), dtype=int)  # rows = ipTM-only cat, cols = pDockQ-only cat
+    for r in range(3):
+        for c in range(3):
+            matrix[r, c] = int(np.sum((iptm_idx == r) & (pdockq_idx == c)))
+    pct_matrix = matrix / n_cat * 100.0
 
-    # Panel A: raw count.
-    ax_a.hist(delta, bins=bins, color='#34495e', alpha=0.85,
-              edgecolor='white', linewidth=0.3)
-    median_d = float(np.median(delta))
-    p90 = float(np.percentile(delta, 90))
-    p99 = float(np.percentile(delta, 99))
-    ax_a.axvline(0, color=ZERO_LINE_COLOUR, linestyle='--', linewidth=1.4,
-                 label='ipTM = pDockQ (Δ = 0)', zorder=4)
-    ax_a.axvline(median_d, color=MEDIAN_LINE_COLOUR, linestyle='-.',
-                 linewidth=1.8, label=f'median Δ = {median_d:.3f}', zorder=5)
-    ax_a.text(0.99, 0.95,
-              f'median Δ = {median_d:.3f}\np90 Δ = {p90:.3f}\np99 Δ = {p99:.3f}\nn = {len(delta):,}',
-              transform=ax_a.transAxes, ha='right', va='top', fontsize=FONT_TICK,
-              bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
-    # Direction arrows under the x-axis to disambiguate the sign of Δ at a
-    # glance — a recurring point of confusion when readers skim the figure.
-    ax_a.text(0.02, -0.13, '← pDockQ > ipTM', transform=ax_a.transAxes,
-              ha='left', va='top', fontsize=FONT_TICK - 1, color='#777',
-              style='italic')
-    ax_a.text(0.98, -0.13, 'ipTM > pDockQ →', transform=ax_a.transAxes,
-              ha='right', va='top', fontsize=FONT_TICK - 1, color='#777',
-              style='italic')
-    ax_a.legend(fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
-    _apply_common_style(ax_a,
-        '(a) Δ = ipTM − pDockQ (raw counts)',
-        'ipTM − pDockQ', 'Count')
+    agree_pct = float(np.trace(pct_matrix))   # diagonal = categorical agreement
+    disagree_pct = 100.0 - agree_pct          # off-diagonal = categorical disagreement
 
-    # Panel B: per-tier, normalised so each tier sums to 100%.
-    for tier in TIER_ORDER:
-        mask = plot_df_finite['quality_tier_v2'] == tier
-        sub = delta[mask.values]
-        if len(sub) == 0:
-            continue
-        weights = np.ones(len(sub)) / len(sub) * 100.0
-        ax_b.hist(sub, bins=bins, weights=weights, histtype='step',
-                  color=TIER_COLORS[tier], linewidth=1.6, alpha=0.9,
-                  label=f"{tier} (n={int(mask.sum()):,})")
-    # Zero reference line styled identically to panel (a) so the two panels
-    # use a consistent visual vocabulary.
-    ax_b.axvline(0, color=ZERO_LINE_COLOUR, linestyle='--', linewidth=1.4,
-                 label='ipTM = pDockQ (Δ = 0)', zorder=4)
-    ax_b.legend(fontsize=FONT_TICK, loc='upper left', framealpha=0.9)
-    _apply_common_style(ax_b,
-        '(b) Δ shape per tier (each tier normalised to 100%)',
-        'ipTM − pDockQ', '% within tier')
+    # Single-axis figure: the categorical matrix is now the whole figure.
+    fig, ax = plt.subplots(figsize=(8.5, 7.0))
+
+    # Colour: hue encodes agreement (green diagonal) vs disagreement (orange
+    # off-diagonal); intensity within each hue scales with the cell's share of
+    # the population so the dominant cells read darkest. Built as an explicit
+    # RGBA grid.
+    green_cmap = plt.cm.Greens
+    orange_cmap = plt.cm.Oranges
+    max_pct = float(pct_matrix.max()) if pct_matrix.max() > 0 else 1.0
+    rgba = np.zeros((3, 3, 4))
+    intensity_grid = np.zeros((3, 3))
+    for r in range(3):
+        for c in range(3):
+            intensity = 0.20 + 0.70 * (pct_matrix[r, c] / max_pct)
+            intensity_grid[r, c] = intensity
+            rgba[r, c] = green_cmap(intensity) if r == c else orange_cmap(intensity)
+    ax.imshow(rgba, aspect='auto', origin='upper')
+
+    # Cell annotations: count + share of all calibrated dimers (full-population %).
+    for r in range(3):
+        for c in range(3):
+            txt_colour = 'white' if intensity_grid[r, c] > 0.62 else '#2c3e50'
+            ax.text(c, r, f'{matrix[r, c]:,}\n({pct_matrix[r, c]:.1f}%)',
+                    ha='center', va='center', fontsize=FONT_AXIS_LABEL + 1,
+                    fontweight='bold', color=txt_colour)
+
+    cat_labels = ['Low', 'Medium', 'High']
+    ax.set_xticks(range(3))
+    ax.set_xticklabels(cat_labels)
+    ax.set_yticks(range(3))
+    ax.set_yticklabels(cat_labels)
+    ax.set_xlabel('pDockQ-only category', fontsize=FONT_AXIS_LABEL)
+    ax.set_ylabel('ipTM-only category', fontsize=FONT_AXIS_LABEL)
+    ax.tick_params(which='major', labelsize=FONT_AXIS_LABEL)
+    # White cell borders for clear separation.
+    ax.set_xticks(np.arange(-0.5, 3, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, 3, 1), minor=True)
+    ax.grid(which='minor', color='white', linewidth=2)
+    ax.tick_params(which='minor', bottom=False, left=False)
+
+    # Headline split banner (derived from the matrix, not hardcoded), placed
+    # above the matrix so it is read first.
+    ax.text(0.5, 1.05,
+            f'Categorical agreement: {agree_pct:.1f}%        '
+            f'Disagreement: {disagree_pct:.1f}%',
+            transform=ax.transAxes, ha='center', va='bottom',
+            fontsize=FONT_AXIS_LABEL, fontweight='bold', color='#34495e',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='#f7f7f7',
+                      edgecolor='#cccccc', alpha=0.95))
 
     fig.suptitle(
-        f"Distribution of ipTM minus pDockQ across calibrated dimers "
+        f"ipTM and pDockQ categorical agreement "
         f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; "
-        f"N={len(delta):,}]",
-        fontsize=14, fontweight='bold', y=1.02)
-    # Reframe the older "ipTM always exceeds pDockQ" wording: the 516k
-    # corpus has a positive median Δ and a long ipTM-dominant tail, but a
-    # non-trivial negative tail of pDockQ-dominant complexes also exists.
-    fig.text(0.5, -0.02,
-             'ipTM tends to exceed pDockQ in the calibrated dimer corpus '
-             '(positive median Δ, long ipTM-dominant tail), but the '
-             'relationship is not one-directional — the negative tail '
-             'contains complexes where pDockQ exceeds ipTM.',
+        f"n={n_cat:,}]",
+        fontsize=14, fontweight='bold', y=1.00)
+    # Non-visible note for caption writing: how the two independent
+    # classifications were thresholded, and that neither metric is ground truth.
+    fig.text(0.5, -0.04,
+             f'Categories were assigned independently using ipTM thresholds of '
+             f'{IPTM_MED_MIN:.2f} and {IPTM_HIGH:.2f} and pDockQ thresholds of '
+             f'{PDOCKQ_MED_MIN:.2f} and {PDOCKQ_HIGH:.2f}. Neither metric was '
+             f'treated as ground truth.',
              ha='center', va='top', fontsize=8, style='italic',
              color='#555555', wrap=True)
-    _save_figure(fig, f'8_iptm_pdockq_delta_histogram{species_label}.png')
+    _save_figure(fig, f'Fig_5_ipTM_pDockQ_Metric_Disagreement{species_label}.png')
 
 
 def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: bool = False, species_label: str = '') -> None:
@@ -1863,8 +1887,9 @@ def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: b
 
     NOTE: the dashed y=x line is a visual reference only; ipTM and pDockQ are
     not calibrated to the same numerical scale, so distance from y=x is NOT a
-    direct agreement metric. The new main Fig 8 (Δ histogram) is the
-    methodologically safer view.
+    direct agreement metric. The main figure (dissertation Fig 5,
+    `plot_fig8_iptm_pdockq_delta_histogram`) is the ipTM/pDockQ categorical
+    agreement matrix, which avoids any raw-scale comparison entirely.
     """
     required = ['iptm', 'pdockq', 'quality_tier_v2']
     plot_df, n_before, n_after = apply_filter(df, 'calibrated_dimer', fig_label='Fig 8 supp')
@@ -1898,10 +1923,11 @@ def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: b
     # Visual reference y=x line (NOT a calibrated agreement line).
     axes.plot([0, 1.1], [0, 1.1], 'k--', linewidth=1.2, alpha=0.6, zorder=1)
 
-    # Highlight extreme cases (ipTM >> pDockQ). The "ipTM >> pDockQ"
-    # shorthand is defined by the project metric-disagreement threshold
-    # (Δ > METRIC_DISAGREEMENT_GAP) — the annotation spells that out so
-    # the double-arrow notation is not left to reader interpretation.
+    # Descriptive highlight of large positive-Δ cases (ipTM >> pDockQ), using
+    # METRIC_DISAGREEMENT_GAP only as a display cut-off for the highlight. This
+    # is NOT the dissertation's metric-disagreement definition, which is
+    # categorical (ipTM-only vs pDockQ-only tiers, no Δ threshold; Methods
+    # §3.6) — the footer states that boundary so the two are not conflated.
     extreme_mask = (plot_df['iptm'] - plot_df['pdockq']) > METRIC_DISAGREEMENT_GAP
     n_extreme = int(extreme_mask.sum())
     pct_extreme = n_extreme / len(plot_df) * 100 if len(plot_df) > 0 else 0
@@ -1912,10 +1938,11 @@ def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: b
               fontsize=FONT_AXIS_LABEL, fontweight='bold', color='#c0392b',
               bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
     axes.text(0.5, -0.10,
-              f'ipTM >> pDockQ denotes Δ = ipTM − pDockQ above the project '
-              f'metric-disagreement threshold ({METRIC_DISAGREEMENT_GAP}). '
-              'Dashed y = x is a visual reference; ipTM and pDockQ are not '
-              'on the same calibrated scale.',
+              f'ipTM >> pDockQ is a descriptive highlight of a large positive '
+              f'gap (Δ = ipTM - pDockQ > {METRIC_DISAGREEMENT_GAP}); the reported '
+              f'metric-disagreement rate is a separate categorical result '
+              f'(ipTM-only vs pDockQ-only tiers). Dashed y = x is a visual '
+              f'reference; ipTM and pDockQ are not on the same calibrated scale.',
               transform=axes.transAxes, ha='center', va='top', fontsize=8,
               style='italic', color='#777')
 
@@ -1925,7 +1952,7 @@ def plot_fig8_supp_metric_disagreement_scatter(df: pd.DataFrame, density_mode: b
     _apply_common_style(
         axes,
         f"Supplementary: ipTM vs pDockQ scatter (descriptive) "
-        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; N={len(plot_df):,}]",
+        f"[{_scope_with_species(CAPTION_SCOPE_CALIBRATED_DIMER, species_label)}; n={len(plot_df):,}]",
         'ipTM', 'pDockQ')
     _save_figure(figure, f'8_supp_iptm_pdockq_scatter{species_label}.png')
 
@@ -2046,7 +2073,7 @@ def plot_fig9_chain_count_profile(df: pd.DataFrame, density_mode: bool = False, 
 
     figure.suptitle(
         f"Supplementary: Chain-count quality profile (order-statistic bias) "
-        f"[{_scope_with_species(CAPTION_SCOPE_RECOVERABLE_ALL_N, species_label)}; N={len(plot_df):,}]",
+        f"[{_scope_with_species(CAPTION_SCOPE_RECOVERABLE_ALL_N, species_label)}; n={len(plot_df):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     _save_figure(figure, f'9_supp_Chain_Count_Profile{species_label}.png')
 
@@ -2228,7 +2255,7 @@ def plot_fig10_clustering_validation(df: pd.DataFrame) -> None:
     _despine(ax_b)
     figure.suptitle(
         f"Supplementary: Sequence-cluster consistency across calibrated dimer quality tiers "
-        f"[{CAPTION_SCOPE_CALIBRATED_DIMER}; N={len(plot_df):,}]",
+        f"[{CAPTION_SCOPE_CALIBRATED_DIMER}; n={len(plot_df):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     figure.text(0.5, -0.01,
                 f'Note: N may be lower than the calibrated_dimer headline; requires '
@@ -2511,9 +2538,16 @@ def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> 
 
     #=============================Scatter coloured by quality tier=================================
     base_size, base_alpha, raster = _adaptive_scatter_params(len(x_vals))
+    # Fig 7 readability: at HPC scale _adaptive_scatter_params returns s~1.2 and
+    # alpha~0.14 which, combined with white edges, washes the tier colours out
+    # almost completely. Enforce a visible floor on size/opacity and drop the
+    # white edge so the coloured cloud reads clearly in the exported figure.
+    # Rasterisation is retained for bounded file size at large N.
+    point_size = max(base_size, 6.0)
+    point_alpha = max(base_alpha, 0.38)
     colors = df.loc[valid_mask, tier_col].map(TIER_COLORS).fillna('#bdc3c7').values if tier_col in df.columns else '#3498db'
 
-    _timed_scatter(ax, x_vals, y_vals, len(x_vals), fig_label='Fig 12', c=colors, s=base_size, alpha=base_alpha, edgecolors='white', linewidths=0.3, rasterized=raster)
+    _timed_scatter(ax, x_vals, y_vals, len(x_vals), fig_label='Fig 12', c=colors, s=point_size, alpha=point_alpha, edgecolors='none', rasterized=raster)
 
     if density_mode:
         _overlay_kde_contours(ax, x_vals, y_vals)
@@ -2605,13 +2639,13 @@ def plot_fig12_variant_density(df: pd.DataFrame, density_mode: bool = False) -> 
                         'Interface confidence score',
                         'Variant density per interface residue')
     figure.suptitle(
-        f"Interface variant density increases with composite interface confidence "
-        f"[{CAPTION_SCOPE_CALIBRATED_HUMAN_BROAD}]",
+        f"Variant density versus composite confidence "
+        f"[broad-human calibrated dimers; n={len(df):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     figure.text(0.5, -0.01,
                 'This is annotation-supported correlation, not causal validation.',
                 ha='center', fontsize=7, style='italic', color='#777')
-    _save_figure(figure, '12_Variant_Density.png')
+    _save_figure(figure, 'Fig_7_Variant_Density_Versus_Composite_Confidence.png')
 
 #--------------------------------------Item 6: Map stability scores (Fig 13)-----------------------------------------------
 
@@ -3839,9 +3873,9 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
 
     #=============================================Figure footer===================================================
     footer_parts = [
-        'Panel B note: STRING p-values underflow for large networks; '
-        'p-values are displayed as p < 1e-300 where applicable, '
-        'and the enrichment ratio is used as the discriminative metric.'
+        'Panel B note: STRING p-values saturate at a numerical floor for '
+        'large pathways (shown as p < 1e-300 where applicable), so the '
+        'observed-to-expected enrichment ratio is the discriminative metric.'
     ]
     if 'complex_type' in wdf.columns:
         hetero = wdf[wdf['complex_type'] == 'heterodimer']
@@ -3864,11 +3898,11 @@ def plot_fig16_prediction_quality_paradox(df: pd.DataFrame) -> None:
         fig.text(0.5, -0.01, '  |  '.join(footer_parts), ha='center', va='top', fontsize=9, fontstyle='italic', color='#555555')
 
     fig.suptitle(
-        f"Interface-confidence signal and prediction-bias diagnostics in reviewed-human dimers "
-        f"[{CAPTION_SCOPE_CALIBRATED_HUMAN_BROAD}]",
+        f"Biological corroboration and prediction bias "
+        f"[reviewed-human calibrated dimers; n={len(wdf):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
-    _save_figure(fig, '16_Prediction_Quality_Paradox.png')
+    _save_figure(fig, 'Fig_8_Biological_Corroboration_and_Prediction_Bias.png')
 
     #========================Statistics table==================================================
     all_stats = _paradox_stats_for_subset(wdf, label='All')
@@ -3997,22 +4031,19 @@ def plot_fig0_corpus_funnel(df: pd.DataFrame) -> None:
     _despine(ax_side)
 
     figure.suptitle(
-        f"Final Corpus Analysis Populations "
-        f"[{CAPTION_SCOPE_CORPUS_FUNNEL}; total N={total:,}]",
+        f"Dataset and analysis populations "
+        f"[full dataset; n={total:,}]",
         fontsize=14, fontweight='bold', y=1.02)
     figure.text(
         0.5, -0.02,
-        "Side callouts are contextual populations, not a partition of the full "
-        "corpus unless explicitly labelled as such. Percentages on the side "
-        "panel use the full-corpus denominator unless a calibrated-dimer "
-        "denominator is shown explicitly — strong/moderate/weak partition the "
-        "calibrated dimer screening population, so both denominators are given "
-        "for those rows. partial_error and multimer_exploratory are separate "
-        "diagnostic categories whose membership overlaps with neither the funnel "
-        "nor the screening bands by construction.",
+        "Side callouts are contextual populations, not a partition of the "
+        "dataset. The strong/moderate/weak screen bands do partition the "
+        "calibrated dimer set, so those rows carry both a full-dataset and a "
+        "calibrated-dimer percentage; partial_error and multimer_exploratory "
+        "overlap neither the main funnel nor the screen bands by construction.",
         ha='center', fontsize=8, style='italic', color='#555555', wrap=True)
     plt.tight_layout()
-    _save_figure(figure, '0_Corpus_Funnel.png')
+    _save_figure(figure, 'Fig_1_Dataset_and_Analysis_Population_Funnel.png')
 
 
 def plot_fig17_screening_landscape(df: pd.DataFrame) -> None:
@@ -4090,30 +4121,26 @@ def plot_fig17_screening_landscape(df: pd.DataFrame) -> None:
     ax_b.set_yticklabels(
         [f"{t}\n(n={int(crosstab.loc[t].sum()):,})" for t in TIER_ORDER],
         fontsize=FONT_AXIS_LABEL)
-    ax_b.set_title('(b) Classification (v2) x Screening (status) — row %',
+    ax_b.set_title('(b) Classification by screening status (row %)',
                    fontsize=FONT_TITLE, fontweight='bold')
     cbar = figure.colorbar(im, ax=ax_b, shrink=0.6, pad=0.04)
     cbar.set_label('Row %', fontsize=FONT_TICK)
 
     figure.suptitle(
-        f"Composite Screening Landscape "
-        f"[{CAPTION_SCOPE_CALIBRATED_DIMER}; N={len(sub):,}]",
+        f"Classification versus continuous screening "
+        f"[{CAPTION_SCOPE_CALIBRATED_DIMER}; n={len(sub):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     figure.text(
         0.5, -0.02,
-        "Classification axis is quality_tier_v2; screening axis is "
-        "composite_screen_status. These are not interchangeable. "
-        "Panel B shows the relationship between classification and "
-        "screening labels under the adopted decision rules — both axes "
-        "are functions of the same composite thresholds, so this is a "
-        "policy-consistency view, not an independent validation test. "
-        "The `unavailable` screen-status (e.g. the High|unavailable=654 cell "
-        "visible in the full audit crosstab) is excluded here by "
-        "construction because it lives outside the calibrated screenable "
-        "population.",
+        "Classification (quality_tier_v2) and continuous screening "
+        "(composite_screen_status) are separate outputs, but both derive from "
+        "the same adopted composite thresholds, so panel (b) is a "
+        "policy-consistency view, not an independent validation. The "
+        "unavailable screen status is excluded here by construction: it lies "
+        "outside the calibrated screenable population.",
         ha='center', fontsize=8, style='italic', color='#555555', wrap=True)
     plt.tight_layout()
-    _save_figure(figure, '17_Screening_Landscape.png')
+    _save_figure(figure, 'Fig_4_Classification_Versus_Screening.png')
 
 
 def plot_fig18_partial_reason_dashboard(df: pd.DataFrame) -> None:
@@ -4220,8 +4247,8 @@ def plot_fig18_partial_reason_dashboard(df: pd.DataFrame) -> None:
     _despine(ax_c)
 
     figure.suptitle(
-        f"Supplementary: Input recoverability diagnostic — partial rows excluded from calibrated analyses "
-        f"[{CAPTION_SCOPE_PARTIAL}; partial_error N={len(partial):,}]",
+        f"Supplementary: Input recoverability diagnostic - partial rows excluded from calibrated analyses "
+        f"[{CAPTION_SCOPE_PARTIAL}; partial_error n={len(partial):,}]",
         fontsize=14, fontweight='bold', y=1.02)
     # Explicit framing: this dashboard is for audit/recoverability QA only.
     # The dominant pdb_decompression_error bar is an input-handling
@@ -4549,8 +4576,8 @@ def main() -> None:
                                       multimer_supplement=args.multimer_supplement)
             figures_generated += 1
 
-            # Main: NEW Fig 8 - Δ histogram.
-            print(f"Fig 8 - ipTM-pDockQ delta histogram{label_suffix}")
+            # Main: Fig 5 - ipTM/pDockQ categorical agreement matrix.
+            print(f"Fig 5 - ipTM/pDockQ categorical agreement matrix{label_suffix}")
             plot_fig8_iptm_pdockq_delta_histogram(df_subset, density_mode=args.density, species_label=suffix)
             figures_generated += 1
             # Supp: old Fig 8 scatter (descriptive).
