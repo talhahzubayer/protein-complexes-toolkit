@@ -1,27 +1,9 @@
 # Protein Complexes Toolkit
 
-An interface-aware quality-assessment and triage toolkit for AlphaFold2-Multimer protein-complex predictions.
+A command-line Python toolkit for interface-aware assessment of AlphaFold-Multimer protein-complex predictions.
 
-*MSc Applied Bioinformatics research project, King's College London.*
-**Author:** Mohammad Talhah Zubayer · **Supervisor:** Dr David Burke.
-
-## Overview
-
-The toolkit operates downstream of AlphaFold2-Multimer. It reads the predicted structure (`.pdb`) and confidence (`.pkl`) files that AlphaFold2-Multimer produces and assesses the confidence of each predicted inter-chain interface, without generating or modifying the predictions themselves. The problem it addresses is one of scale: large prediction sets contain far more complexes than can be inspected by eye, and the two most relevant confidence metrics — ipTM, which summarises the predicted arrangement of the chains as a single complex-level value, and pDockQ, which reads the interface directly but depends on contact abundance — measure different properties and frequently disagree. Neither, on its own, describes confidence at the predicted contact site.
-
-To fill that gap, the toolkit reads confidence locally at the predicted interface. It retains ipTM and pDockQ as transparent baselines and adds interface-localised measurements: mean interface pLDDT (per-residue local confidence), interface PAE (predicted aligned error between contacting residues on different chains), interface symmetry and contact density. These are combined into a single continuous composite score used for screening and prioritisation, which is reported separately from a conservative categorical quality tier. This dual output keeps classification and prioritisation distinct rather than forcing one score to serve both purposes.
-
-Optional stages attach biological context — gene and protein identity, sequence-cluster homology, variant mapping, variant-effect and stability predictions, disease and pathway annotation — and generate PyMOL scripts and a batch figure suite. The same command-line pipeline runs on a handful of complexes locally and on hundreds of thousands of complexes on a high-performance computing (HPC) cluster, with checkpointing, incremental runs and memory-bounded batching. The submitted dissertation applied it to 516,744 predicted complexes.
-
-## Scope and interpretation
-
-The toolkit assesses confidence and supports prioritisation. It does not validate a structure or an interaction experimentally, and its outputs should be read within the following boundaries, which follow the dissertation's stated scope:
-
-- The composite `interface_confidence_score` is a screening and prioritisation heuristic. Its weights were chosen by design rather than learned from labelled outcomes, so it is not a probability of correctness or an externally calibrated estimate of structural accuracy.
-- Structural confidence does not establish biological reality. A confidently predicted interface is a candidate for closer examination, not evidence that the interaction forms in cells.
-- Biological annotations provide corroboration and context, not proof. Membership of an interaction database, a disease association or a shared pathway supports interpretation but cannot confirm that a predicted interface is real.
-- Calibrated classification is restricted to dimers. Complexes with more than two chains are processed structurally but labelled `multimer_provisional`, because the composite uses best-pair inputs that are not calibrated for larger assemblies.
-- Because no native structures were available at this scale, external structural benchmarking against experimentally resolved complexes remains necessary to establish predictive accuracy.
+*MSc Applied Bioinformatics Research Project, King's College London.*
+**Student:** Talhah Zubayer · **Supervisor:** Dr David Burke
 
 ## Repository structure
 
@@ -56,30 +38,28 @@ protein-complexes-toolkit/
 ├── hpc_incremental_run.sh     # SLURM wrapper: incremental and chunked runs
 │
 ├── requirements.txt           # Python dependencies
-├── Docs/                      # Dissertation, full command reference and output schema
-│   ├── MSc Dissertation Final.pdf
+├── Docs/                      # Full toolkit command list and output schema
 │   ├── Toolkit_Commands_List.md
 │   └── OUTPUT_SCHEMA.md
 └── data/                      # External databases (not included; see below)
 ```
 
-The `data/` directory and the large external files it holds are not stored in this repository.
+The external datasets under `data/` are not included in the repository.
 
-## Reproduction requirements
+## Required inputs
 
-"Reproduce" can mean three different things here, and the repository supports them to different degrees.
+Some inputs must be supplied separately:
 
-**Run the method on your own predictions.** If you supply your own paired AlphaFold2-Multimer PDB and PKL files, you can run the same pipeline and obtain the same kinds of output. This reproduces the *method* on another dataset; it does not reproduce the dissertation's numbers.
+- The AlphaFold2-Multimer prediction corpus is **not included**. The toolkit assesses predictions but does not generate them.
+- The final dissertation results CSV (`results_516744.csv`) is **not included**; the dissertation reports it as stored on King's College London's CREATE cluster.
+- The external annotation databases under `data/` are **not included** and must be downloaded (see [Setting up external data](#setting-up-external-data)).
+- Each complex must be supplied as a paired **PDB** structure file and **PKL** confidence file.
 
-**Reproduce the dissertation's population-level analyses and figures.** This requires the final results CSV (`results_516744.csv`). That file is **not included in this repository** — the dissertation reports it as stored on King's College London's CREATE cluster alongside an execution-ready copy of the code. Given the CSV, the figure commands in [Reproducing the dissertation workflow](#reproducing-the-dissertation-workflow) regenerate the population-level figures (the dissertation's Figures 1–5 and 7–9) from it. The dissertation's Figure 6 — the two worked structural examples — is rendered from the raw PDB/PKL inputs rather than from the CSV, so it belongs to the raw-to-results level below.
-
-**Reproduce the complete raw-to-results workflow.** This additionally requires the original AlphaFold2-Multimer prediction corpus (the paired PDB and PKL files), the same external-data releases, and the same processing and consolidation steps. The source predictions were generated upstream and provided by the supervisor; the toolkit assesses them but does not generate them. **The prediction corpus is not part of this repository**, so a full raw-to-results reproduction depends on obtaining those inputs separately.
-
-The scientific rationale, reported results and limitations are documented in the submitted dissertation, [`Docs/MSc Dissertation Final.pdf`](Docs/MSc%20Dissertation%20Final.pdf).
+For the scientific context of the submitted workflow, see [`Docs/MSc Dissertation Final.pdf`](Docs/MSc%20Dissertation%20Final.pdf).
 
 ## Installation
 
-The toolkit requires **Python 3.11 or newer** (the dissertation analyses ran under Python 3.11.6). Create a virtual environment and install the pinned dependencies:
+Requires **Python 3.11 or newer** (the dissertation analyses ran under Python 3.11.6).
 
 ```bash
 python -m venv .venv
@@ -88,32 +68,27 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-JAX is **not** required. `read_af2_nojax.py` reads the confidence arrays from AlphaFold2 PKL files and converts them to NumPy without a JAX installation.
-
-Once the external data is in place (next sections), confirm it before a run:
+JAX is not required. Once the external data is in place, validate it:
 
 ```bash
 python data_registry.py
 ```
 
-This checks the 16 required data files (two further registry entries are output directories that the pipeline creates itself) and prints a per-group `[ OK ] / [MISSING]` report, exiting non-zero if anything required is absent. `render_complex_summary.py` additionally needs a headless PyMOL executable, which is an external runtime rather than a Python dependency; see [Generate the structural examples](#generate-the-structural-examples).
+This reports any missing registered data file before a run starts. `render_complex_summary.py` additionally needs a headless PyMOL executable (see [Generate structural summaries](#generate-structural-summaries)).
 
-## Input predictions
+## Input prediction layouts
 
-The pipeline expects a directory of paired AlphaFold2-Multimer outputs. Each complex is represented by a PDB structure file and a PKL confidence file; the PDB supplies the geometry and per-residue B-factor pLDDT, while the PKL supplies ipTM, pTM, pLDDT and the PAE matrix. Discovery, layout detection and decompression are automatic, so no manual preparation step is required.
+Each complex is a paired PDB and PKL file. `toolkit.py --dir <MODELS_DIR>` accepts three layouts:
 
-`toolkit.py --dir <MODELS_DIR>` recognises three directory layouts:
-
-**Loose flat** — files sit directly in the root and complex names are parsed from the filenames. This layout is handled in place and does not write a manifest.
+**Loose flat** — files directly in the root, complex names parsed from filenames:
 
 ```text
 Protein_Complexes/
 ├── A0A0A0MQZ0_P40933.pdb
-├── A0A0A0MQZ0_P40933.pkl
-└── ...
+└── A0A0A0MQZ0_P40933.pkl
 ```
 
-**Directory per complex** — each child directory holds one complex's files.
+**Directory per complex** — each child directory holds one complex:
 
 ```text
 Protein_Complexes/
@@ -122,7 +97,7 @@ Protein_Complexes/
     └── A0A0A0MQZ0_P40933.pkl
 ```
 
-**Sharded directory per complex** — a two-character shard prefix (matching `^[A-Z0-9]{2}$`) groups complexes for filesystem performance. This is the layout used for the HPC dataset.
+**Sharded directory per complex** — a two-character shard prefix groups complexes (the HPC layout):
 
 ```text
 Protein_Complexes/
@@ -132,15 +107,15 @@ Protein_Complexes/
         └── A0A0A0MQZ0_P40933.pkl.bz2
 ```
 
-The accepted suffixes are `.pdb`, `.pdb.bz2` and `.pdb.gz` for structures, and `.pkl`, `.pkl.bz2`, `.pkl.gz`, `.results.pkl` and `.results.pkl.bz2` for confidence files; the long-form AlphaFold names `*_relaxed_model_*` and `*_result_model_*` are also matched. One detail is layout-dependent: the two directory-based layouts are resolved by `complex_resolver.py`, which recognises the uncompressed and `.bz2` forms, whereas `.gz` inputs are recognised only in the loose layout. Compressed files are decompressed once per complex and reused across the readers, so no separate decompression step is needed.
+Accepted suffixes are `.pdb`, `.pdb.bz2` and `.pdb.gz` for structures and `.pkl`, `.pkl.bz2`, `.pkl.gz`, `.results.pkl` and `.results.pkl.bz2` for confidence files; the long-form `*_relaxed_model_*` and `*_result_model_*` names are also matched. The directory-based layouts recognise the uncompressed and `.bz2` forms; `.gz` is recognised only in the loose layout.
 
-The directory-based layouts also produce a forensic manifest. Running the resolver directly is a useful way to catalogue and audit inputs before a full run:
+Audit a prediction directory before processing:
 
 ```bash
 python complex_resolver.py --root <MODELS_DIR>
 ```
 
-This writes, under `data/complex_manifest_audit/runs/<run_id>/`, a manifest of the complete PDB/PKL pairs, an `incomplete_inputs.tsv` listing skipped inputs with a reason code (for example `missing_pdb`, `empty_pkl`, `ambiguous_pdb` or `duplicate_complex_name`), and a run summary; a `latest/` mirror and a `latest_run_id.txt` pointer track the most recent run. Because each pair is fingerprinted by file size and modification time, the manifest lets later incremental runs detect inputs that have changed. With no `--root`, the resolver reads the `PROTEIN_COMPLEXES_ROOT` environment variable. The command exits `0` when at least one complete pair is found and `1` otherwise, so it can gate a batch script.
+This writes a manifest of complete pairs and reports missing, empty or ambiguous inputs. The manifest format and reason codes are documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
 
 ## Setting up external data
 
@@ -247,144 +222,120 @@ data/
 
 `data/string_api_cache/` (STRING API response cache) and `pymol_scripts/` (PyMOL output) are created automatically.
 
-## Reproducing the dissertation workflow
+## Running the dissertation workflow
 
-This section documents the operational sequence used in the submitted project. It covers running the complete pipeline locally, the initial and incremental HPC runs, memory-bounded batching, resumption and consolidation, and the figure and structural outputs. For selective execution, individual flags and the standalone module tools, see [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
-
-### Validate the external data
-
-Confirm that every registered dataset is present before starting, so a missing file is reported in seconds rather than causing a failure part-way through a long run:
+### Validate external data
 
 ```bash
 python data_registry.py
 ```
 
-### Audit the prediction inputs
+Run the registry check before processing so that missing external files are reported before the analysis starts.
 
-Catalogue the input predictions and record which PDB/PKL pairs are complete:
+### Audit prediction inputs
 
 ```bash
 python complex_resolver.py --root <MODELS_DIR>
 ```
 
-The manifest it writes is the record of exactly which complexes entered the run, and its file-size and modification-time fingerprints are what later incremental runs use to detect changed inputs. Capturing it once before a dataset is expanded gives a baseline against which additions can be identified.
+Writes the input manifest and reports incomplete PDB/PKL pairs.
 
-### Run the complete pipeline locally
-
-`--full-pipeline` activates every stage using the registered default data paths and validates that all required data files exist before processing begins. Only `--dir` is required; `-w`/`--workers` sets the number of parallel workers.
+### Run the full pipeline locally
 
 ```bash
 python toolkit.py --full-pipeline --dir <MODELS_DIR> -w 8 \
-    --output results.csv --export-interfaces interfaces.jsonl
+    --output results.csv \
+    --export-interfaces interfaces.jsonl
 ```
 
-This is equivalent to enabling `--interface --pae --enrich --databases --clustering --variants --stability --protvar --disease --pathways --pymol --checkpoint` with default paths. To run only some stages, stack the individual flags instead; the full flag reference and dependencies are in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
+`--full-pipeline` enables the complete production workflow. Selective flags, dependencies and standalone commands are documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
 
 ### Run the initial HPC workflow
 
-`hpc_dataset_run.sh` submits a clean, end-to-end production run to a SLURM cluster. It pins the two cluster paths near the top of the file, so edit those lines for your site before submitting:
-
 ```bash
-# In hpc_dataset_run.sh, set these to your paths:
-#   export PROTEIN_TOOLKIT_PROJECT_ROOT=/scratch/<project>/protein-complexes-toolkit-hpc
-#   export PROTEIN_COMPLEXES_ROOT=/scratch/<project>/Protein_Complexes
 sbatch hpc_dataset_run.sh
 ```
 
-The wrapper loads the Python module, activates the project virtual environment, caps the BLAS and NumExpr thread counts so worker processes do not oversubscribe the allocated CPUs, and runs five phases: a dependency check, external-data validation, input resolution, the full pipeline (writing `results.csv`, `interfaces.jsonl` and `pymol_scripts/`), and figure generation. The figure step reads the `VISUALISE_ARGS` environment variable, which defaults to `--full-figure-pack --human-supplement`.
+Before submitting, edit the two pinned paths near the top of `hpc_dataset_run.sh` (`PROTEIN_TOOLKIT_PROJECT_ROOT` and `PROTEIN_COMPLEXES_ROOT`) for your cluster. The wrapper validates the dependencies and inputs, runs the full pipeline, and generates the figures. Adjust the `#SBATCH` resource requests in the script for the target cluster.
 
-The script requests 16 CPUs, 80 GB of memory and a 48-hour walltime by default. These are starting points rather than fixed requirements: the dissertation's initial 41,196-complex run completed in under six hours at a peak of roughly 67 GB, but the completed dataset was ultimately assembled through memory-bounded batches of up to 100,000 complexes under a 128 GB allocation, because the current design accumulates results in memory (see [Process the dataset in memory-bounded batches](#process-the-dataset-in-memory-bounded-batches)).
-
-### Process an expanded dataset
-
-When new complexes are added to a corpus that has already been processed, `hpc_incremental_run.sh` processes only the complexes that are absent from a cumulative historical CSV. It runs `toolkit.py --full-pipeline --skip-existing <historical results.csv>` and does not render figures, because figures must be generated from the consolidated dataset rather than from an incremental fragment.
+### Run an incremental workflow
 
 ```bash
-sbatch --export=ALL,HISTORICAL_RESULTS_CSV=results.csv hpc_incremental_run.sh
+sbatch --export=ALL,HISTORICAL_RESULTS_CSV=results.csv \
+    hpc_incremental_run.sh
 ```
 
-The wrapper reads the complex names already present in `HISTORICAL_RESULTS_CSV`, processes only the remainder, and writes the new rows to a **separate** `results_incremental_<stamp>_<job>.csv` (and a matching interfaces JSONL). It logs the historical CSV's SHA-256 checksum at the start so that the baseline can be confirmed unchanged across a retry.
+Processes only complexes absent from the historical CSV, writing separate incremental CSV and JSONL outputs; it does not modify the historical files.
 
-### Process the dataset in memory-bounded batches
-
-At the largest scale, memory rather than runtime is the limiting factor, because completed rows and intermediate annotations accumulate in memory over a single invocation. The dissertation therefore assembled the final dataset in batches. The `LIMIT` environment variable (which appends `--limit N` to the toolkit call) caps the number of complexes processed per submission, taken from the alphabetically-sorted set of not-yet-processed complexes:
+### Process a limited batch
 
 ```bash
-sbatch --export=ALL,HISTORICAL_RESULTS_CSV=results.csv,LIMIT=100000 hpc_incremental_run.sh
+sbatch --export=ALL,HISTORICAL_RESULTS_CSV=results.csv,LIMIT=100000 \
+    hpc_incremental_run.sh
 ```
 
-Each batch is then handled as a short loop: submit one batch, confirm it completed, consolidate its output into the cumulative CSV, and submit the next batch against the updated cumulative file. Because the chunk is selected before any resumption filtering, a crashed and resumed batch processes the same set of complexes as a clean one, provided `HISTORICAL_RESULTS_CSV` is unchanged between attempts.
+Run one batch, verify that it completed, consolidate it into the cumulative CSV, then submit the next batch against the updated file.
 
 ### Resume an interrupted batch
-
-To recover an interrupted batch, resubmit against the **same** partial output files with `RESUME=1`, which adds `--resume` to the toolkit call so that complexes already written to the current checkpoint are skipped:
 
 ```bash
 sbatch --export=ALL,RESUME=1,\
 HISTORICAL_RESULTS_CSV=results.csv,\
 OUTPUT_CSV=results_incremental_<stamp>_<job>.csv,\
 INTERFACES_JSONL=interfaces_incremental_<stamp>_<job>.jsonl \
-hpc_incremental_run.sh
+    hpc_incremental_run.sh
 ```
 
-`OUTPUT_CSV` and `INTERFACES_JSONL` must point at the interrupted batch's own partial files, and `HISTORICAL_RESULTS_CSV` must be identical to the original attempt; otherwise the batch boundary shifts. `--skip-existing` (an append-only filter against a completed historical CSV) and `--resume` (in-flight crash recovery from the current checkpoint) read independent state and can be combined.
+Resume against the same partial output files and the unchanged historical CSV used by the interrupted run.
 
 ### Consolidate incremental outputs
 
-Incremental and batched runs write their rows to separate files by design; they do not modify the historical CSV in place. Each incremental output must therefore be merged into the cumulative CSV and JSONL, and the merged CSV promoted as the `HISTORICAL_RESULTS_CSV` reference for the next run — otherwise the wrapper will rediscover and reprocess the same complexes. **There is no automated merge helper in this repository**; consolidation is a manual step, and the dissertation lists automatic merging with column and duplicate checks as future work. The minimum safe requirements are that the merged file preserves the column order, contains no duplicate `complex_name` values, and keeps every interface JSONL record's complex present in the CSV. A safe step-by-step merge procedure is given in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
+Incremental runs do not modify the historical CSV or JSONL. Merge each completed output into the cumulative files before starting the next batch. The repository does not currently include an automated merge helper. The complete validation procedure is documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
 
-### Generate the dissertation analyses
-
-Once a consolidated `results.csv` exists, `visualise_results.py` generates the figures from it. The default invocation produces the main-text figure pack; the dissertation figure suite additionally requires the supplementary figures, which are produced by `--full-figure-pack`, and the human-subset structural variants, produced by `--human-supplement`:
+### Generate population figures
 
 ```bash
-python visualise_results.py results.csv --output-dir Output --full-figure-pack --human-supplement
+python visualise_results.py results.csv \
+    --output-dir Output \
+    --full-figure-pack \
+    --human-supplement
 ```
 
-Figures are written as PNG files to `Output/`. Each figure degrades gracefully: one whose required columns are absent is skipped with a message rather than causing an error. One caveat is worth knowing when locating a specific figure. The output filenames use the dissertation's Results numbering (for example `Fig_2A_Interface_PAE_by_Quality_Tier.png` corresponds to the dissertation's Figure 2A), but the internal plotting-function names retain an older numbering that no longer matches, so the function names should not be used to identify a figure. The `Fig_1` to `Fig_5` filenames align with the dissertation's Figures 1 to 5; because the dissertation's Figure 6 is the structural-examples figure produced separately (below), the `Fig_6`, `Fig_7` and `Fig_8` output files correspond to the dissertation's Figures 7, 8 and 9 respectively. The full filename-to-figure mapping is documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md). The dissertation's Results narrative and the figures themselves are in the dissertation.
+Run this on the final consolidated CSV; figures are written to `Output/`. The filename-to-dissertation-figure mapping is in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
 
-### Generate the structural examples
-
-The dissertation's Figure 6 uses two worked examples to show how interface-localised evidence changed a prediction's classification — one dimer raised from low to high tier by strong local interface evidence, and one lowered from high to medium by weak contact-level support. Each example is a single-complex structural summary produced by `render_complex_summary.py`:
+### Generate structural summaries
 
 ```bash
 python render_complex_summary.py \
     --input-dir <COMPLEX_DIR> \
-    --output    complex_summary.png \
+    --output complex_summary.png \
     --pymol-executable "$HOME/envs/pymol/bin/pymol"
 ```
 
-The script reuses the production metric path, so the metrics it displays are computed exactly as in the batch pipeline. It renders a chain-and-interface view and a pLDDT-confidence view of the same complex in one orientation, composes them with a metric panel into a single PNG (2000 × 1600 pixels by default), and removes its intermediate files. It is **dimer-only**: a non-dimer or non-calibrated input fails with a clear message. It requires no network access — display names come from the local alias table when present and fall back to accessions — and it writes the PNG atomically, failing rather than overwriting an existing file unless `--overwrite` is given.
-
-`render_complex_summary.py` produces **one** PNG per complex. The dissertation's two-example figure was assembled by rendering the two examples separately and composing them; that final side-by-side composition is a manual step and is not performed by the script.
-
-The script invokes a **headless PyMOL executable** through a subprocess, resolving it from `--pymol-executable`, then the `PYMOL_EXECUTABLE` environment variable, then `pymol` on the `PATH`. Where no PyMOL module is available, install one once with conda into a self-contained environment (this does not touch the toolkit's virtual environment):
+Generates one PNG for one calibrated dimer, and requires a headless PyMOL executable. The dissertation's two structural examples were rendered separately and combined afterwards. Where no PyMOL module is available, install one once:
 
 ```bash
 conda create -y -p "$HOME/envs/pymol" -c conda-forge pymol-open-source
-"$HOME/envs/pymol/bin/pymol" -cq -d "print('PyMOL', cmd.get_version()[0]); quit"   # verify headless
 ```
 
-Setting `export PYMOL_EXECUTABLE="$HOME/envs/pymol/bin/pymol"` then lets the script run without the `--pymol-executable` flag. This output is an inspection and communication figure; it is not evidence that the predicted interaction is biologically real.
+Full options are documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
 
 ## Outputs
 
-A full run produces the following artefacts.
+| Output | Created by |
+| ------ | ---------- |
+| Results CSV | `toolkit.py` |
+| Interface JSONL | `--export-interfaces` |
+| PyMOL scripts | `--pymol` |
+| Population figures | `visualise_results.py` |
+| Single-complex summary PNG | `render_complex_summary.py` |
+| Audit manifests | `complex_resolver.py` |
 
-| Output | Purpose |
-| ------ | ------- |
-| Results CSV | One row per predicted complex; up to 155 fields depending on the stages enabled |
-| Interface JSONL | Confident interface residues, PAE and per-residue pLDDT, one record per complex |
-| PyMOL scripts | `.pml` scripts for structural inspection of qualifying complexes |
-| Batch PNG figures | Population-level analyses generated from the results CSV |
-| Single-complex summary PNG | A structural example for one dimer |
-| Audit manifests | Input-discovery and per-run traceability records |
+Output locations, tier filtering and other details are documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
 
-The interface JSONL is written when `--export-interfaces <PATH>` is given (it implies `--interface --pae`) and contains only complexes reaching the High or Medium v2 tier. PyMOL scripts are written when `--pymol` is given, filtered by v2 tier (High by default) and sharded into subdirectories of up to 1000 scripts. Detailed flag behaviour, defaults and output locations are documented in [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md).
+## Output CSV
 
-## Understanding the output CSV
-
-The results CSV holds one row per complex. The base output has 41 columns; each optional stage appends its own block, up to 155 columns with the full pipeline:
+The base pipeline emits 41 columns. Optional stages append their own field blocks, producing 155 columns under `--full-pipeline`.
 
 | Stage combination | Columns |
 | ----------------- | :-----: |
@@ -400,28 +351,4 @@ The results CSV holds one row per complex. The base output has 41 columns; each 
 | `+ --disease` | 145 |
 | `+ --pathways` (= `--full-pipeline`) | **155** |
 
-At a high level the columns fall into a few groups: complex identity and species scope; the AlphaFold model metrics (ipTM, pTM, pDockQ, whole-complex pLDDT); interface geometry and interface-localised confidence; the classification and screening outputs; recoverability and calibration flags; whole-complex aggregates for multimers; and the optional biological-annotation blocks. Seven fields carry most of the interpretive weight, and reading them correctly matters more than any single metric:
-
-- **`quality_tier`** — the baseline (v1) tier from ipTM and pDockQ alone.
-- **`quality_tier_v2`** — the final tier, which reclassifies v1 using the composite score (strong interface evidence can rescue a low prediction; weak interface evidence can downgrade a high one). This is the tier to use for interface-aware statements.
-- **`interface_confidence_score`** — the composite screening score on a 0–1 scale. It ranks predictions; it is not a probability of correctness.
-- **`composite_screen_status`** — a prioritisation label (`strong_`/`moderate_`/`weak_screen_candidate`, or `unavailable`) derived from the composite score. It sits beside the tier rather than replacing it.
-- **`tier_scope`** — `dimer_validated` (two chains) or `multimer_provisional`. Calibrated claims apply only within `dimer_validated`.
-- **`composite_is_calibrated`** — true only when the composite was genuinely computable on a dimer with all inputs present. A numeric score alone is not sufficient; filter on this flag for any calibrated claim.
-- **`partial_reason`** — empty for a fully assessed row; otherwise a code identifying why the row is incomplete. A non-empty value marks a diagnostic row, not a low-confidence result.
-
-Every emitted field is documented individually — with its stage, type, range, interpretation, caveats and role in the submitted dissertation — in [`Docs/OUTPUT_SCHEMA.md`](Docs/OUTPUT_SCHEMA.md), which also gives the reproducible population filters used to define the dissertation's analysis groups.
-
-## Further documentation
-
-This README is deliberately limited to the principal reproduction workflow. The complete references are:
-
-| Document | Purpose |
-| -------- | ------- |
-| [`Docs/MSc Dissertation Final.pdf`](Docs/MSc%20Dissertation%20Final.pdf) | Submitted scientific rationale, methods, results and limitations |
-| [`Docs/Toolkit_Commands_List.md`](Docs/Toolkit_Commands_List.md) | Complete command-line reference and the broader toolkit capabilities, including functionality not used in the submitted dissertation |
-| [`Docs/OUTPUT_SCHEMA.md`](Docs/OUTPUT_SCHEMA.md) | Complete CSV field reference and each field's role in the dissertation |
-
-## Acknowledgements
-
-Developed by Mohammad Talhah Zubayer under the supervision of Dr David Burke as part of the MSc Applied Bioinformatics programme at King's College London. The AlphaFold2-Multimer predictions that formed the input dataset were provided by the supervisor, and the large-scale analyses used the King's Computational Research, Engineering and Technology Environment (CREATE). The toolkit builds on public resources including AlphaFold2, STRING, BioGRID, HuRI, hu.MAP 2.0, UniProt, ClinVar, gnomAD/ExAC, EVE, AlphaMissense, ProtVar and the AFDB FoldX data, and Reactome; please cite those resources when using their data.
+The complete field definitions, availability rules, serialisation formats and dissertation population filters are documented in [`Docs/OUTPUT_SCHEMA.md`](Docs/OUTPUT_SCHEMA.md).
