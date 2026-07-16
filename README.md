@@ -51,11 +51,9 @@ The external datasets under `data/` are not included in the repository.
 Some inputs must be supplied separately:
 
 - The AlphaFold2-Multimer prediction corpus is **not included**. The toolkit assesses predictions but does not generate them.
-- The final dissertation results CSV (`results_516744.csv`) is **not included**; the dissertation reports it as stored on King's College London's CREATE cluster.
+- The final dissertation results CSV (`results_516744.csv`) is **not included**; it is stored on King's College London's CREATE cluster.
 - The external annotation databases under `data/` are **not included** and must be downloaded (see [Setting up external data](#setting-up-external-data)).
 - Each complex must be supplied as a paired **PDB** structure file and **PKL** confidence file.
-
-For the scientific context of the submitted workflow, see [`Docs/MSc Dissertation Final.pdf`](Docs/MSc%20Dissertation%20Final.pdf).
 
 ## Installation
 
